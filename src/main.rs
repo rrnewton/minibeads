@@ -26,13 +26,18 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Validation mode for parsing issues
-    #[arg(long, global = true, default_value = "error", value_name = "MODE")]
-    validation: ValidationMode,
+    /// Validation mode for parsing issues (minibeads-specific)
+    #[arg(
+        long = "mb-validation",
+        global = true,
+        default_value = "error",
+        value_name = "MODE"
+    )]
+    mb_validation: ValidationMode,
 
-    /// Disable command logging to .beads/command_history.log
-    #[arg(long, global = true)]
-    no_cmd_logging: bool,
+    /// Disable command logging to .beads/command_history.log (minibeads-specific)
+    #[arg(long = "mb-no-cmd-logging", global = true)]
+    mb_no_cmd_logging: bool,
 
     /// Disable auto-flush (ignored for compatibility)
     #[arg(long, global = true)]
@@ -281,7 +286,7 @@ fn run() -> Result<()> {
             let storage = Storage::init(beads_dir, prefix)?;
 
             // Log command after successful init
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -310,7 +315,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -356,7 +361,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -380,7 +385,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -427,7 +432,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -474,7 +479,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -495,7 +500,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -527,7 +532,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -546,7 +551,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -573,7 +578,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -602,7 +607,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if !cli.no_cmd_logging {
+            if !cli.mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -653,7 +658,7 @@ fn get_storage(db_arg: &Option<PathBuf>) -> Result<Storage> {
         } else {
             db_path
         }
-    } else if let Ok(beads_dir) = env::var("BEADS_DIR") {
+    } else if let Ok(beads_dir) = env::var("MB_BEADS_DIR") {
         PathBuf::from(beads_dir)
     } else {
         // Search for .beads directory
@@ -761,7 +766,7 @@ DATABASE LOCATION
   bd automatically discovers your database:
     1. --db /path/to/.beads flag
     2. $BEADS_DB environment variable
-    3. $BEADS_DIR environment variable
+    3. $MB_BEADS_DIR environment variable
     4. .beads/ in current directory or ancestors
 
 Ready to start!

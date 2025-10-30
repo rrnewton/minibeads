@@ -118,7 +118,7 @@ minibeads works seamlessly with AI agents via the beads MCP server. Agents can:
 - Query dependencies and find ready work
 - Track progress across sessions using the markdown history
 
-Set `BEADS_DB` or `BEADS_DIR` environment variables, or let the MCP server auto-discover `.beads/` in your project.
+Set `BEADS_DB` or `MB_BEADS_DIR` environment variables, or let the MCP server auto-discover `.beads/` in your project.
 
 ## Development
 
@@ -197,8 +197,8 @@ minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing th
 
 - `--db PATH` - Path to .beads directory
 - `--json` - Output JSON format
-- `--validation MODE` - Validation mode: silent, warn, error (default)
-- `--no-cmd-logging` - Disable command history logging
+- `--mb-validation MODE` - Validation mode: silent, warn, error (default) [minibeads-specific]
+- `--mb-no-cmd-logging` - Disable command history logging [minibeads-specific]
 
 ## Differences from Upstream Beads
 
@@ -232,7 +232,7 @@ See `.beads/issues/` for tracking:
 
 ## Environment Variables
 
-- `BEADS_DIR` - Path to .beads directory
+- `MB_BEADS_DIR` - Path to .beads directory [minibeads-specific]
 - `BEADS_DB` - Path to .beads database (supports `.db` extension for compatibility)
 - `BEADS_WORKING_DIR` - Working directory for MCP operations
 
