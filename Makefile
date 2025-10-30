@@ -35,6 +35,7 @@ fmt:
 clean:
 	cargo clean
 	rm -rf scratch/*/beads.lock
+	(cd scratch && git clean -fxd)
 
 # Install binary to ~/.local/bin
 install: release
