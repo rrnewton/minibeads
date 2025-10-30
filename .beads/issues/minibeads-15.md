@@ -285,14 +285,14 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 4. Fix minibeads-13 (dependencies/dependents schema bug)
 
 ### P1 - High Priority (Common Usage)
-1. Add short flags throughout:
-   - `bd init -p` (for --prefix)
-   - `bd create -a` (for --assignee)
-   - `bd update -s, -p, -a, -d` (for status, priority, assignee, description)
-   - `bd close -r` (for --reason)
-   - `bd reopen -r` (for --reason)
-   - `bd ready -a, -p, -n` (for assignee, priority, limit)
-   - `bd dep add -t` (for --type)
+1. ✅ DONE - Add short flags throughout:
+   - ✅ `bd init -p` (for --prefix)
+   - ✅ `bd create -a` (for --assignee)
+   - ✅ `bd update -s, -p, -a, -d` (for status, priority, assignee, description)
+   - ✅ `bd close -r` (for --reason)
+   - ✅ `bd reopen -r` (for --reason)
+   - ✅ `bd ready -a, -p, -n` (for assignee, priority, limit)
+   - ✅ `bd dep add -t` (for --type)
 
 2. Add bulk operations:
    - `bd show bd-1 bd-2 bd-3` - Show multiple issues

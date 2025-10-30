@@ -112,7 +112,7 @@ enum Commands {
     /// Initialize beads in current directory
     Init {
         /// Issue prefix (e.g., 'myproject' for myproject-1, myproject-2)
-        #[arg(long)]
+        #[arg(short, long)]
         prefix: Option<String>,
     },
 
@@ -142,7 +142,7 @@ enum Commands {
         acceptance: Option<String>,
 
         /// Assignee
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         assignee: Option<String>,
 
         /// Labels (can be specified multiple times)
@@ -197,15 +197,15 @@ enum Commands {
         issue_id: String,
 
         /// New status
-        #[arg(long)]
+        #[arg(short = 's', long)]
         status: Option<Status>,
 
         /// New priority
-        #[arg(long)]
+        #[arg(short, long)]
         priority: Option<i32>,
 
         /// New assignee
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         assignee: Option<String>,
 
         /// New title
@@ -213,7 +213,7 @@ enum Commands {
         title: Option<String>,
 
         /// New description
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(short, long, allow_hyphen_values = true)]
         description: Option<String>,
 
         /// New design notes
@@ -239,7 +239,7 @@ enum Commands {
         issue_id: String,
 
         /// Reason for closing
-        #[arg(long, default_value = "Completed", allow_hyphen_values = true)]
+        #[arg(short, long, default_value = "Completed", allow_hyphen_values = true)]
         reason: String,
     },
 
@@ -249,7 +249,7 @@ enum Commands {
         issue_ids: Vec<String>,
 
         /// Reason for reopening
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(short, long, allow_hyphen_values = true)]
         reason: Option<String>,
     },
 
@@ -295,15 +295,15 @@ enum Commands {
     /// Find ready work (issues with no blockers)
     Ready {
         /// Filter by assignee
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         assignee: Option<String>,
 
         /// Filter by priority
-        #[arg(long)]
+        #[arg(short, long)]
         priority: Option<i32>,
 
         /// Maximum number of issues to return
-        #[arg(long, default_value = "10")]
+        #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
     },
 
@@ -325,7 +325,7 @@ enum DepCommands {
         depends_on_id: String,
 
         /// Dependency type
-        #[arg(long, default_value = "blocks")]
+        #[arg(short = 't', long, default_value = "blocks")]
         r#type: DependencyType,
     },
 }
