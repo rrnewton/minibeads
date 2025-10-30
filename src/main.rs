@@ -686,9 +686,13 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
     let log_path = beads_dir.join("command_history.log");
     let timestamp = chrono::Utc::now().to_rfc3339();
 
-    // Skip the first argument (binary path) and only log the CLI options
+    // Skip the first argument (binary path) and quote each CLI argument
     let command_line = if args.len() > 1 {
-        args[1..].join(" ")
+        args[1..]
+            .iter()
+            .map(|arg| format!("\"{}\"", arg))
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         String::new()
     };
