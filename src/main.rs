@@ -363,6 +363,9 @@ enum DepCommands {
         #[arg(long)]
         show_all_paths: bool,
     },
+
+    /// Detect dependency cycles
+    Cycles,
 }
 
 /// Print a dependency tree in a visual format
@@ -777,6 +780,28 @@ fn run() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&tree)?);
                     } else {
                         print_dependency_tree(&tree, 0, "", true);
+                    }
+                }
+                DepCommands::Cycles => {
+                    let cycles = storage.detect_dependency_cycles()?;
+
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&cycles)?);
+                    } else if cycles.is_empty() {
+                        println!("No dependency cycles detected.");
+                    } else {
+                        println!("Found {} dependency cycle(s):\n", cycles.len());
+                        for (i, cycle) in cycles.iter().enumerate() {
+                            println!("Cycle {}:", i + 1);
+                            for (j, issue_id) in cycle.iter().enumerate() {
+                                if j == cycle.len() - 1 {
+                                    println!("  {} -> {} (completes cycle)", issue_id, cycle[0]);
+                                } else {
+                                    println!("  {} ->", issue_id);
+                                }
+                            }
+                            println!();
+                        }
                     }
                 }
             }

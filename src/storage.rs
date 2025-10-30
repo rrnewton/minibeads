@@ -438,6 +438,39 @@ impl Storage {
             None,
         )
     }
+
+    /// Detect dependency cycles in the issue graph
+    pub fn detect_dependency_cycles(&self) -> Result<Vec<Vec<String>>> {
+        use std::collections::{HashMap, HashSet};
+
+        // Load all issues
+        let issues = self.list_issues(None, None, None, None, None)?;
+        let issues_map: HashMap<String, Issue> = issues
+            .into_iter()
+            .map(|issue| (issue.id.clone(), issue))
+            .collect();
+
+        let mut cycles = Vec::new();
+        let mut visited = HashSet::new();
+        let mut rec_stack = HashSet::new();
+        let mut path = Vec::new();
+
+        // Try to find cycles starting from each unvisited node
+        for issue_id in issues_map.keys() {
+            if !visited.contains(issue_id) {
+                find_cycles_dfs(
+                    issue_id,
+                    &issues_map,
+                    &mut visited,
+                    &mut rec_stack,
+                    &mut path,
+                    &mut cycles,
+                );
+            }
+        }
+
+        Ok(cycles)
+    }
 }
 
 /// Recursively build a tree node
@@ -500,6 +533,67 @@ fn build_tree_node(
     }
 
     Ok(node)
+}
+
+/// DFS helper function to find cycles in the dependency graph
+fn find_cycles_dfs(
+    current_id: &str,
+    issues_map: &HashMap<String, Issue>,
+    visited: &mut std::collections::HashSet<String>,
+    rec_stack: &mut std::collections::HashSet<String>,
+    path: &mut Vec<String>,
+    cycles: &mut Vec<Vec<String>>,
+) {
+    // Mark current node as visited and add to recursion stack
+    visited.insert(current_id.to_string());
+    rec_stack.insert(current_id.to_string());
+    path.push(current_id.to_string());
+
+    // Get the current issue
+    if let Some(issue) = issues_map.get(current_id) {
+        // Check all dependencies
+        for dep_id in issue.depends_on.keys() {
+            if !visited.contains(dep_id) {
+                // Recursively visit unvisited dependencies
+                find_cycles_dfs(dep_id, issues_map, visited, rec_stack, path, cycles);
+            } else if rec_stack.contains(dep_id) {
+                // Found a cycle! Extract the cycle from the path
+                if let Some(cycle_start_idx) = path.iter().position(|id| id == dep_id) {
+                    let cycle: Vec<String> = path[cycle_start_idx..].to_vec();
+                    // Only add if this exact cycle hasn't been found before
+                    if !cycles.iter().any(|c| cycles_equal(c, &cycle)) {
+                        cycles.push(cycle);
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove from recursion stack and path
+    rec_stack.remove(current_id);
+    path.pop();
+}
+
+/// Check if two cycles are equal (considering rotation)
+fn cycles_equal(cycle1: &[String], cycle2: &[String]) -> bool {
+    if cycle1.len() != cycle2.len() {
+        return false;
+    }
+
+    // Check all rotations
+    for i in 0..cycle1.len() {
+        let mut match_found = true;
+        for j in 0..cycle1.len() {
+            if cycle1[(i + j) % cycle1.len()] != cycle2[j] {
+                match_found = false;
+                break;
+            }
+        }
+        if match_found {
+            return true;
+        }
+    }
+    false
 }
 
 impl Storage {
