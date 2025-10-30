@@ -132,11 +132,11 @@ enum Commands {
     /// List issues
     List {
         /// Filter by status
-        #[arg(long)]
+        #[arg(short = 's', long)]
         status: Option<Status>,
 
         /// Filter by priority
-        #[arg(long)]
+        #[arg(short = 'p', long)]
         priority: Option<i32>,
 
         /// Filter by type
@@ -148,8 +148,8 @@ enum Commands {
         assignee: Option<String>,
 
         /// Maximum number of issues to return
-        #[arg(long, default_value = "50")]
-        limit: usize,
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Show issue details
@@ -366,7 +366,7 @@ fn run() -> Result<()> {
             }
 
             let issues =
-                storage.list_issues(status, priority, r#type, assignee.as_deref(), Some(limit))?;
+                storage.list_issues(status, priority, r#type, assignee.as_deref(), limit)?;
 
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
