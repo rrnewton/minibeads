@@ -314,7 +314,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 ### P3 - Low Priority (Nice to Have)
 1. `bd show --all-issues` - Show all issues
 2. `bd show -p 0 -p 1` - Show by priority
-3. `bd ready --sort` - Sort policy for ready work
+3. ✅ DONE - `bd ready --sort` - Sort policy for ready work
 4. `bd list --format` - Custom output formats (digraph, dot, templates)
 5. `bd init -q` - Quiet mode
 6. `bd create -f` - Bulk create from markdown file

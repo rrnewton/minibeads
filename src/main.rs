@@ -319,6 +319,10 @@ enum Commands {
         /// Maximum number of issues to return
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
+
+        /// Sort policy: priority (by priority), oldest (by creation date), hybrid (priority + age)
+        #[arg(short = 's', long, default_value = "hybrid")]
+        sort: String,
     },
 
     /// Show quickstart guide
@@ -944,6 +948,7 @@ fn run() -> Result<()> {
             assignee,
             priority,
             limit,
+            sort,
         } => {
             let storage = get_storage(&cli.db)?;
 
@@ -952,7 +957,16 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let ready = storage.get_ready(assignee.as_deref(), priority, limit)?;
+            // Validate sort policy
+            let sort_policy = match sort.as_str() {
+                "priority" | "oldest" | "hybrid" => sort.as_str(),
+                _ => {
+                    eprintln!("Warning: Invalid sort policy '{}', using 'hybrid'", sort);
+                    "hybrid"
+                }
+            };
+
+            let ready = storage.get_ready(assignee.as_deref(), priority, limit, sort_policy)?;
 
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&ready)?);

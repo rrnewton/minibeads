@@ -776,14 +776,45 @@ impl Storage {
         assignee: Option<&str>,
         priority: Option<i32>,
         limit: usize,
+        sort_policy: &str,
     ) -> Result<Vec<Issue>> {
         let issues = self.list_issues(Some(Status::Open), priority, None, assignee, None)?;
 
-        let ready: Vec<Issue> = issues
+        let mut ready: Vec<Issue> = issues
             .into_iter()
             .filter(|i| i.get_blocking_dependencies().is_empty())
-            .take(limit)
             .collect();
+
+        // Apply sorting based on policy
+        match sort_policy {
+            "priority" => {
+                // Sort by priority (0 is highest priority, so ascending order)
+                ready.sort_by_key(|i| i.priority);
+            }
+            "oldest" => {
+                // Sort by creation date (oldest first)
+                ready.sort_by_key(|i| i.created_at);
+            }
+            "hybrid" => {
+                // Hybrid: Sort by priority first, then by creation date (oldest first) for same priority
+                ready.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| a.created_at.cmp(&b.created_at))
+                });
+            }
+            _ => {
+                // Default to hybrid if invalid (shouldn't happen due to CLI validation)
+                ready.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| a.created_at.cmp(&b.created_at))
+                });
+            }
+        }
+
+        // Apply limit after sorting
+        ready.truncate(limit);
 
         Ok(ready)
     }
