@@ -25,5 +25,5 @@ target
 
 /target
 
-# Test beads database
-.beads/
+# Test beads databases
+test_spaces
