@@ -157,7 +157,9 @@ enum Commands {
         #[arg(long)]
         id: Option<String>,
 
-        /// Dependencies (comma-separated, e.g., "bd-1,bd-2")
+        /// Dependencies (comma-separated). Formats:
+        /// Simple: "bd-1,bd-2" (defaults to 'blocks')
+        /// Advanced: "blocks:bd-1,related:bd-2,discovered-from:bd-3"
         #[arg(long)]
         deps: Option<String>,
     },
@@ -468,10 +470,39 @@ fn run() -> Result<()> {
             }
 
             // Parse dependencies
+            // Supports two formats:
+            // 1. Simple: "bd-1,bd-2" (defaults to 'blocks' type)
+            // 2. Advanced: "blocks:bd-1,related:bd-2,discovered-from:bd-3"
             let parsed_deps = if let Some(deps_str) = deps {
                 deps_str
                     .split(',')
-                    .map(|s| (s.trim().to_string(), DependencyType::Blocks))
+                    .filter_map(|s| {
+                        let s = s.trim();
+                        if s.is_empty() {
+                            return None;
+                        }
+
+                        // Check if it contains a colon (advanced format)
+                        if let Some(colon_idx) = s.find(':') {
+                            let (type_str, id) = s.split_at(colon_idx);
+                            let id = id[1..].trim(); // Skip the colon
+
+                            // Parse the dependency type
+                            match type_str.parse::<DependencyType>() {
+                                Ok(dep_type) => Some((id.to_string(), dep_type)),
+                                Err(_) => {
+                                    eprintln!(
+                                        "Warning: Invalid dependency type '{}', skipping '{}'",
+                                        type_str, s
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            // Simple format: just the ID, default to Blocks
+                            Some((s.to_string(), DependencyType::Blocks))
+                        }
+                    })
                     .collect()
             } else {
                 Vec::new()
