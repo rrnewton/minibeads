@@ -191,10 +191,10 @@ enum Commands {
         issue_ids: Vec<String>,
     },
 
-    /// Update an issue
+    /// Update one or more issues
     Update {
-        /// Issue ID
-        issue_id: String,
+        /// Issue IDs to update
+        issue_ids: Vec<String>,
 
         /// New status
         #[arg(short = 's', long)]
@@ -233,10 +233,10 @@ enum Commands {
         external_ref: Option<String>,
     },
 
-    /// Close an issue
+    /// Close one or more issues
     Close {
-        /// Issue ID
-        issue_id: String,
+        /// Issue IDs to close
+        issue_ids: Vec<String>,
 
         /// Reason for closing
         #[arg(short, long, default_value = "Completed", allow_hyphen_values = true)]
@@ -502,7 +502,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Update {
-            issue_id,
+            issue_ids,
             status,
             priority,
             assignee,
@@ -549,17 +549,24 @@ fn run() -> Result<()> {
                 updates.insert("external_ref".to_string(), e);
             }
 
-            let issue = storage.update_issue(&issue_id, updates)?;
+            // Update all specified issues
+            let mut updated_issues = Vec::new();
+            for issue_id in &issue_ids {
+                let issue = storage.update_issue(issue_id, updates.clone())?;
+                updated_issues.push(issue);
+            }
 
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&[issue])?);
+                println!("{}", serde_json::to_string_pretty(&updated_issues)?);
             } else {
-                println!("Updated issue: {}", issue_id);
+                for issue in &updated_issues {
+                    println!("Updated issue: {}", issue.id);
+                }
             }
             Ok(())
         }
 
-        Commands::Close { issue_id, reason } => {
+        Commands::Close { issue_ids, reason } => {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
@@ -567,12 +574,19 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let issue = storage.close_issue(&issue_id, &reason)?;
+            // Close all specified issues
+            let mut closed_issues = Vec::new();
+            for issue_id in &issue_ids {
+                let issue = storage.close_issue(issue_id, &reason)?;
+                closed_issues.push(issue);
+            }
 
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&[issue])?);
+                println!("{}", serde_json::to_string_pretty(&closed_issues)?);
             } else {
-                println!("Closed issue: {}", issue_id);
+                for issue in &closed_issues {
+                    println!("Closed issue: {}", issue.id);
+                }
             }
             Ok(())
         }

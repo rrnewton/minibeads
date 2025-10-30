@@ -294,10 +294,10 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
    - ✅ `bd ready -a, -p, -n` (for assignee, priority, limit)
    - ✅ `bd dep add -t` (for --type)
 
-2. Add bulk operations:
-   - `bd show bd-1 bd-2 bd-3` - Show multiple issues
-   - `bd update bd-1 bd-2 --status in_progress` - Update multiple issues
-   - `bd close bd-1 bd-2` - Close multiple issues
+2. ✅ DONE - Add bulk operations:
+   - ✅ `bd show bd-1 bd-2 bd-3` - Show multiple issues
+   - ✅ `bd update bd-1 bd-2 --status in_progress` - Update multiple issues
+   - ✅ `bd close bd-1 bd-2` - Close multiple issues
 
 3. Advanced `bd list` filters:
    - `--label` and `--label-any` - Label filtering
