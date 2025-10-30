@@ -28,3 +28,6 @@ target
 # Scratch space for testing and temporary work
 scratch
 TRASH
+
+# Export artifacts
+.beads/*.jsonl

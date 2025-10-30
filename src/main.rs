@@ -234,9 +234,13 @@ enum Commands {
 
     /// Export issues to JSONL format
     Export {
-        /// Output file path
-        #[arg(short = 'o', long, default_value = "issues.jsonl")]
-        output: PathBuf,
+        /// Output file path (defaults to stdout)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+
+        /// Use default file output (.beads/issues.jsonl) instead of stdout
+        #[arg(long = "mb-output-default")]
+        mb_output_default: bool,
 
         /// Filter by status
         #[arg(long)]
@@ -648,6 +652,7 @@ fn run() -> Result<()> {
 
         Commands::Export {
             output,
+            mb_output_default,
             status,
             priority,
             r#type,
@@ -660,10 +665,37 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let count =
-                storage.export_to_jsonl(&output, status, priority, r#type, assignee.as_deref())?;
-
-            println!("Exported {} issues to {}", count, output.display());
+            // Determine output destination
+            if let Some(path) = output {
+                // -o flag provided: write to specified file
+                let count = storage.export_to_jsonl(
+                    &path,
+                    status,
+                    priority,
+                    r#type,
+                    assignee.as_deref(),
+                )?;
+                eprintln!("Exported {} issues to {}", count, path.display());
+            } else if mb_output_default {
+                // --mb-output-default: write to .beads/issues.jsonl
+                let path = storage.get_beads_dir().join("issues.jsonl");
+                let count = storage.export_to_jsonl(
+                    &path,
+                    status,
+                    priority,
+                    r#type,
+                    assignee.as_deref(),
+                )?;
+                eprintln!("Exported {} issues to {}", count, path.display());
+            } else {
+                // Default: write to stdout (matching upstream bd)
+                let issues =
+                    storage.list_issues(status, priority, r#type, assignee.as_deref(), None)?;
+                for issue in &issues {
+                    let json = serde_json::to_string(&issue)?;
+                    println!("{}", json);
+                }
+            }
             Ok(())
         }
 
