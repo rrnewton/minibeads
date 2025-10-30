@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::os::unix::fs::PermissionsExt;
 
 /// Discovers and runs all .sh test scripts in the tests/ directory
+#[cfg(unix)]
 fn discover_shell_tests() -> Vec<PathBuf> {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut shell_tests = Vec::new();
@@ -24,6 +25,7 @@ fn discover_shell_tests() -> Vec<PathBuf> {
 }
 
 /// Runs a single shell test script
+#[cfg(unix)]
 fn run_shell_test(test_path: &PathBuf) -> Result<(), String> {
     let output = Command::new("bash")
         .arg(test_path)
@@ -53,6 +55,7 @@ fn run_shell_test(test_path: &PathBuf) -> Result<(), String> {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_all_shell_tests() {
     let shell_tests = discover_shell_tests();
 
