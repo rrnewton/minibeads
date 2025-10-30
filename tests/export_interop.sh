@@ -2,6 +2,23 @@
 # E2E test for bd export interoperability with upstream bd
 set -euo pipefail
 
+# Parse command line arguments
+KEEP_TEMP=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --keep)
+            KEEP_TEMP=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--keep]"
+            echo "  --keep    Keep temporary test directories instead of cleaning up"
+            exit 1
+            ;;
+    esac
+done
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -282,7 +299,11 @@ echo ""
 
 if [ $TESTS_FAILED -eq 0 ]; then
     echo -e "${GREEN}All tests passed!${NC}"
-    cleanup
+    if [ "$KEEP_TEMP" = true ]; then
+        echo -e "${BLUE}Test directory preserved (--keep): $TEST_DIR${NC}"
+    else
+        cleanup
+    fi
     exit 0
 else
     echo -e "${RED}Some tests failed!${NC}"
