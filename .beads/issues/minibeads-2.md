@@ -1,10 +1,10 @@
 ---
 title: Documentation and examples tracking
-status: open
+status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.778549219+00:00
-updated_at: 2025-10-30T13:22:12.778549219+00:00
+updated_at: 2025-10-30T13:27:05.321087850+00:00
 ---
 
 # Description
