@@ -260,3 +260,16 @@ pub struct BlockedIssue {
     pub blocked_by: Vec<String>,
     pub blocked_by_count: usize,
 }
+
+/// Tree node for dependency tree visualization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub priority: i32,
+    pub dep_type: Option<String>,
+    pub children: Vec<TreeNode>,
+    pub is_cycle: bool,
+    pub depth_exceeded: bool,
+}

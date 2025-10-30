@@ -349,6 +349,70 @@ enum DepCommands {
         /// Issue that issue_id depends on (to remove)
         depends_on_id: String,
     },
+
+    /// Show dependency tree
+    Tree {
+        /// Issue ID to show tree for (supports shorthand: "14" expands to "prefix-14")
+        issue_id: String,
+
+        /// Maximum tree depth to display (safety limit)
+        #[arg(short = 'd', long, default_value = "50")]
+        max_depth: usize,
+
+        /// Show all paths to nodes (no deduplication for diamond dependencies)
+        #[arg(long)]
+        show_all_paths: bool,
+    },
+}
+
+/// Print a dependency tree in a visual format
+fn print_dependency_tree(node: &types::TreeNode, depth: usize, prefix: &str, is_last: bool) {
+    // Print the current node
+    let connector = if depth == 0 {
+        ""
+    } else if is_last {
+        "└── "
+    } else {
+        "├── "
+    };
+
+    let dep_type_str = if let Some(ref dt) = node.dep_type {
+        format!(" ({})", dt)
+    } else {
+        String::new()
+    };
+
+    let suffix = if node.is_cycle {
+        " [CYCLE DETECTED]"
+    } else if node.depth_exceeded {
+        " [MAX DEPTH EXCEEDED]"
+    } else {
+        ""
+    };
+
+    println!(
+        "{}{}{}: {} [{}] (P{}){}{}",
+        prefix, connector, node.id, node.title, node.status, node.priority, dep_type_str, suffix
+    );
+
+    // Don't recurse if cycle or depth exceeded
+    if node.is_cycle || node.depth_exceeded {
+        return;
+    }
+
+    // Print children
+    let child_prefix = if depth == 0 {
+        String::new()
+    } else if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    };
+
+    for (i, child) in node.children.iter().enumerate() {
+        let is_last_child = i == node.children.len() - 1;
+        print_dependency_tree(child, depth + 1, &child_prefix, is_last_child);
+    }
 }
 
 fn main() {
@@ -700,6 +764,19 @@ fn run() -> Result<()> {
                             "Removed dependency: {} no longer depends on {}",
                             issue_id, depends_on_id
                         );
+                    }
+                }
+                DepCommands::Tree {
+                    issue_id,
+                    max_depth,
+                    show_all_paths,
+                } => {
+                    let tree = storage.get_dependency_tree(&issue_id, max_depth, show_all_paths)?;
+
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&tree)?);
+                    } else {
+                        print_dependency_tree(&tree, 0, "", true);
                     }
                 }
             }

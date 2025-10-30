@@ -306,7 +306,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 ### P2 - Medium Priority (Dependency Management)
 1. ✅ DONE - Implement `bd dep remove` - Remove dependencies
-2. Implement `bd dep tree` - Show dependency tree visualization
+2. ✅ DONE - Implement `bd dep tree` - Show dependency tree visualization
 3. Implement `bd dep cycles` - Detect circular dependencies
 4. Support advanced `--deps` syntax in `bd create`:
    - Format: `type:id,type:id` (e.g., `discovered-from:bd-20,blocks:bd-15`)

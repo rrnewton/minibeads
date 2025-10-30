@@ -403,6 +403,106 @@ impl Storage {
         Ok(())
     }
 
+    /// Get dependency tree starting from a given issue
+    pub fn get_dependency_tree(
+        &self,
+        issue_id: &str,
+        max_depth: usize,
+        show_all_paths: bool,
+    ) -> Result<crate::types::TreeNode> {
+        use std::collections::HashSet;
+
+        // Load all issues to build the tree
+        let issues = self.list_issues(None, None, None, None, None)?;
+        let issues_map: HashMap<String, Issue> = issues
+            .into_iter()
+            .map(|issue| (issue.id.clone(), issue))
+            .collect();
+
+        // Find the root issue
+        let root_issue = issues_map
+            .get(issue_id)
+            .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", issue_id))?;
+
+        // Track visited nodes for cycle detection (if not showing all paths)
+        let mut visited = HashSet::new();
+
+        // Build tree recursively
+        build_tree_node(
+            root_issue,
+            &issues_map,
+            &mut visited,
+            0,
+            max_depth,
+            show_all_paths,
+            None,
+        )
+    }
+}
+
+/// Recursively build a tree node
+fn build_tree_node(
+    issue: &Issue,
+    issues_map: &HashMap<String, Issue>,
+    visited: &mut std::collections::HashSet<String>,
+    current_depth: usize,
+    max_depth: usize,
+    show_all_paths: bool,
+    dep_type: Option<String>,
+) -> Result<crate::types::TreeNode> {
+    let mut node = crate::types::TreeNode {
+        id: issue.id.clone(),
+        title: issue.title.clone(),
+        status: issue.status,
+        priority: issue.priority,
+        dep_type,
+        children: Vec::new(),
+        is_cycle: false,
+        depth_exceeded: false,
+    };
+
+    // Check for cycle
+    if !show_all_paths && visited.contains(&issue.id) {
+        node.is_cycle = true;
+        return Ok(node);
+    }
+
+    // Check depth limit
+    if current_depth >= max_depth {
+        node.depth_exceeded = true;
+        return Ok(node);
+    }
+
+    // Mark as visited (if not showing all paths)
+    if !show_all_paths {
+        visited.insert(issue.id.clone());
+    }
+
+    // Add children (dependencies)
+    for (dep_id, dep_type_val) in &issue.depends_on {
+        if let Some(dep_issue) = issues_map.get(dep_id) {
+            let child = build_tree_node(
+                dep_issue,
+                issues_map,
+                visited,
+                current_depth + 1,
+                max_depth,
+                show_all_paths,
+                Some(dep_type_val.to_string()),
+            )?;
+            node.children.push(child);
+        }
+    }
+
+    // Unmark as visited (for backtracking if not showing all paths)
+    if !show_all_paths {
+        visited.remove(&issue.id);
+    }
+
+    Ok(node)
+}
+
+impl Storage {
     /// Populate dependents field for a vector of issues
     fn populate_dependents(issues: &mut [Issue]) {
         use crate::types::Dependency;
