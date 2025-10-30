@@ -1,0 +1,187 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Issue status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Open,
+    InProgress,
+    Blocked,
+    Closed,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Status::Open => "open",
+            Status::InProgress => "in_progress",
+            Status::Blocked => "blocked",
+            Status::Closed => "closed",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl std::str::FromStr for Status {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "open" => Ok(Status::Open),
+            "in_progress" => Ok(Status::InProgress),
+            "blocked" => Ok(Status::Blocked),
+            "closed" => Ok(Status::Closed),
+            _ => Err(anyhow::anyhow!("Invalid status: {}", s)),
+        }
+    }
+}
+
+/// Issue type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IssueType {
+    Bug,
+    Feature,
+    Task,
+    Epic,
+    Chore,
+}
+
+impl std::fmt::Display for IssueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueType::Bug => write!(f, "bug"),
+            IssueType::Feature => write!(f, "feature"),
+            IssueType::Task => write!(f, "task"),
+            IssueType::Epic => write!(f, "epic"),
+            IssueType::Chore => write!(f, "chore"),
+        }
+    }
+}
+
+impl std::str::FromStr for IssueType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bug" => Ok(IssueType::Bug),
+            "feature" => Ok(IssueType::Feature),
+            "task" => Ok(IssueType::Task),
+            "epic" => Ok(IssueType::Epic),
+            "chore" => Ok(IssueType::Chore),
+            _ => Err(anyhow::anyhow!("Invalid issue type: {}", s)),
+        }
+    }
+}
+
+/// Dependency type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyType {
+    Blocks,
+    Related,
+    ParentChild,
+    DiscoveredFrom,
+}
+
+impl std::fmt::Display for DependencyType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencyType::Blocks => write!(f, "blocks"),
+            DependencyType::Related => write!(f, "related"),
+            DependencyType::ParentChild => write!(f, "parent-child"),
+            DependencyType::DiscoveredFrom => write!(f, "discovered-from"),
+        }
+    }
+}
+
+impl std::str::FromStr for DependencyType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "blocks" => Ok(DependencyType::Blocks),
+            "related" => Ok(DependencyType::Related),
+            "parent-child" => Ok(DependencyType::ParentChild),
+            "discovered-from" => Ok(DependencyType::DiscoveredFrom),
+            _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+        }
+    }
+}
+
+/// Issue structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Issue {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub design: String,
+    pub notes: String,
+    pub acceptance_criteria: String,
+    pub status: Status,
+    pub priority: i32,
+    pub issue_type: IssueType,
+    pub assignee: String,
+    pub external_ref: Option<String>,
+    pub labels: Vec<String>,
+    pub depends_on: HashMap<String, DependencyType>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+impl Issue {
+    pub fn new(id: String, title: String, priority: i32, issue_type: IssueType) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            title,
+            description: String::new(),
+            design: String::new(),
+            notes: String::new(),
+            acceptance_criteria: String::new(),
+            status: Status::Open,
+            priority,
+            issue_type,
+            assignee: String::new(),
+            external_ref: None,
+            labels: Vec::new(),
+            depends_on: HashMap::new(),
+            created_at: now,
+            updated_at: now,
+            closed_at: None,
+        }
+    }
+
+    /// Get dependencies of a specific type
+    pub fn get_blocking_dependencies(&self) -> Vec<&String> {
+        self.depends_on
+            .iter()
+            .filter(|(_, dep_type)| **dep_type == DependencyType::Blocks)
+            .map(|(id, _)| id)
+            .collect()
+    }
+}
+
+/// Statistics structure
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Stats {
+    pub total_issues: usize,
+    pub open_issues: usize,
+    pub in_progress_issues: usize,
+    pub blocked_issues: usize,
+    pub closed_issues: usize,
+    pub ready_issues: usize,
+    pub average_lead_time_hours: f64,
+}
+
+/// Blocked issue structure (for blocked command)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockedIssue {
+    #[serde(flatten)]
+    pub issue: Issue,
+    pub blocked_by: Vec<String>,
+    pub blocked_by_count: usize,
+}
