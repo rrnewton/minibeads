@@ -1,3 +1,6 @@
 [submodule "claude_template"]
 	path = .claude_template
 	url = git@github.com:rrnewton/claude_template.git
+[submodule "beads"]
+	path = beads
+	url = git@github.com:rrnewton/beads
