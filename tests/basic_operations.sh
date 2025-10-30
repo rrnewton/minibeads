@@ -68,7 +68,7 @@ assert_contains() {
     local needle="$2"
     local message="${3:-Assertion failed}"
 
-    if echo "$haystack" | grep -q "$needle"; then
+    if echo "$haystack" | grep -qF -- "$needle"; then
         success "$message"
     else
         fail "$message (expected to find: '$needle' in output)"
@@ -192,6 +192,27 @@ echo -e "\n${YELLOW}Test 13: Add dependency${NC}"
 "$BD_BIN" create "Test issue 3" -p 1 -t task >/dev/null 2>&1
 OUTPUT=$("$BD_BIN" dep add test-3 test-2 --type related 2>&1)
 assert_contains "$OUTPUT" "Added dependency: test-3 depends on test-2" "Should add dependency"
+
+# Test 14: Numeric shorthand for bd show
+echo -e "\n${YELLOW}Test 14: Numeric shorthand for bd show${NC}"
+OUTPUT=$("$BD_BIN" show 1 2>&1)
+assert_contains "$OUTPUT" "ID: test-1" "bd show 1 should show test-1"
+assert_contains "$OUTPUT" "Title: Test issue 1" "Should show correct title"
+
+# Test 15: Multi-issue show
+echo -e "\n${YELLOW}Test 15: Multi-issue show${NC}"
+OUTPUT=$("$BD_BIN" show test-1 test-2 test-3 2>&1)
+assert_contains "$OUTPUT" "ID: test-1" "Should show test-1"
+assert_contains "$OUTPUT" "ID: test-2" "Should show test-2"
+assert_contains "$OUTPUT" "ID: test-3" "Should show test-3"
+# Check for separator between issues
+assert_contains "$OUTPUT" "======" "Should have separator between issues"
+
+# Test 16: Mixed format for bd show (full ID + shorthand)
+echo -e "\n${YELLOW}Test 16: Mixed format for bd show${NC}"
+OUTPUT=$("$BD_BIN" show test-1 2 2>&1)
+assert_contains "$OUTPUT" "ID: test-1" "Should show test-1"
+assert_contains "$OUTPUT" "ID: test-2" "Should show test-2 from shorthand"
 
 # Print summary
 echo ""

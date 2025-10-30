@@ -23,10 +23,11 @@ Research upstream beads testing approach and create porting plan for minibeads. 
 
 ### Minibeads Testing (Current)
 - ✅ Unit tests: 3 tests in src/ (format, lock roundtrip)
-- ✅ E2E tests: 1 shell script (basic_operations.sh, 28 assertions)
-- ✅ Test harness: Rust integration in tests/e2e_tests.rs
+- ✅ E2E tests: 2 shell scripts (basic_operations.sh: 36 assertions, help_version.sh: 28 assertions)
+- ✅ Test harness: Rust integration in tests/e2e_tests.rs with auto-discovery
 - ✅ CI: GitHub Actions with full validation
-- ⚠️ Coverage: Basic workflows only, many edge cases untested
+- ✅ Phase 1 COMPLETE: All core commands have test coverage
+- ⚠️ Coverage: Need Phase 2 unit tests for edge cases
 
 ### Upstream Beads Testing (Analyzed)
 - **78 Go test files** in total
@@ -114,18 +115,18 @@ tests := []struct{
 ### ✅ Directly Applicable (High Priority)
 
 **Script Tests** (Can port almost all):
-- `init.txt` - ✅ Already covered in basic_operations.sh
-- `create.txt` - ✅ Already covered
-- `list.txt` - ✅ Already covered
-- `show.txt` - ✅ Already covered
-- `update.txt` - ✅ Already covered
-- `close.txt` - ✅ Already covered
-- `dep_add.txt` - ✅ Already covered
-- `blocked.txt` - ✅ Already covered
-- `ready.txt` - ✅ Already covered
-- `help.txt` - ❌ Not yet covered
-- `version.txt` - ❌ Not yet covered
-- `list_json.txt` - ✅ Partially covered
+- `init.txt` - ✅ Covered in basic_operations.sh
+- `create.txt` - ✅ Covered in basic_operations.sh
+- `list.txt` - ✅ Covered in basic_operations.sh
+- `show.txt` - ✅ Covered in basic_operations.sh (+ numeric shorthand)
+- `update.txt` - ✅ Covered in basic_operations.sh
+- `close.txt` - ✅ Covered in basic_operations.sh
+- `dep_add.txt` - ✅ Covered in basic_operations.sh
+- `blocked.txt` - ✅ Covered in basic_operations.sh
+- `ready.txt` - ✅ Covered in basic_operations.sh
+- `help.txt` - ✅ Covered in help_version.sh
+- `version.txt` - ✅ Covered in help_version.sh
+- `list_json.txt` - ✅ Covered in basic_operations.sh
 - `dep_remove.txt` - ❌ Not implemented (no dep remove command yet)
 - `dep_tree.txt` - ❌ Not implemented
 - `export.txt` - ❌ Not implemented (minibeads-11)
@@ -165,18 +166,18 @@ tests := []struct{
 **Goal**: Achieve parity with upstream script tests for implemented commands
 
 **Tasks**:
-1. ✅ Port init.txt (DONE)
-2. ✅ Port create.txt (DONE)
-3. ✅ Port list.txt (DONE)
-4. ✅ Port show.txt (DONE)
-5. ✅ Port update.txt (DONE)
-6. ✅ Port close.txt (DONE)
-7. ✅ Port dep_add.txt (DONE)
-8. ✅ Port blocked.txt (DONE)
-9. ✅ Port ready.txt (DONE)
-10. ❌ Port help.txt (TODO)
-11. ❌ Port version.txt (TODO)
-12. ❌ Add reopen tests (TODO - command exists but not in upstream scripts)
+1. ✅ Port init.txt (DONE - basic_operations.sh)
+2. ✅ Port create.txt (DONE - basic_operations.sh)
+3. ✅ Port list.txt (DONE - basic_operations.sh)
+4. ✅ Port show.txt (DONE - basic_operations.sh + numeric shorthand)
+5. ✅ Port update.txt (DONE - basic_operations.sh)
+6. ✅ Port close.txt (DONE - basic_operations.sh)
+7. ✅ Port dep_add.txt (DONE - basic_operations.sh)
+8. ✅ Port blocked.txt (DONE - basic_operations.sh)
+9. ✅ Port ready.txt (DONE - basic_operations.sh)
+10. ✅ Port help.txt (DONE - help_version.sh)
+11. ✅ Port version.txt (DONE - help_version.sh)
+12. ✅ Add reopen tests (DONE - basic_operations.sh Test 11)
 
 **Approach**: Extend `tests/basic_operations.sh` or create parallel script tests.
 
@@ -296,7 +297,9 @@ tests := []struct{
 - ✅ All implemented commands have script test coverage
 - ✅ Tests run in CI
 - ✅ Tests pass on Linux, macOS, Windows (via CI matrix)
-- ❌ help and version commands tested
+- ✅ help and version commands tested
+
+**Status: ✅ PHASE 1 COMPLETE** (64 test assertions across 2 shell scripts)
 
 ### Phase 2 Complete When:
 - ❌ >80% unit test coverage of core modules
@@ -334,18 +337,18 @@ tests := []struct{
 ### Test Organization
 ```
 tests/
-├── e2e_tests.rs         # Rust harness (existing)
-├── basic_operations.sh  # Core commands (existing)
-├── help_version.sh      # Help/version tests (TODO)
+├── e2e_tests.rs         # Rust harness with auto-discovery ✅
+├── basic_operations.sh  # Core commands (36 assertions) ✅
+├── help_version.sh      # Help/version tests (28 assertions) ✅
 ├── edge_cases.sh        # Error scenarios (TODO)
 ├── dependencies.sh      # Complex dep graphs (TODO)
 └── mcp_integration.sh   # MCP compatibility (TODO)
 
 src/
-├── format.rs           # Add unit tests
-├── types.rs            # Add unit tests
-├── storage.rs          # Add unit tests
-├── lock.rs             # Extend tests
+├── format.rs           # Add unit tests (3 existing, more needed)
+├── types.rs            # Add unit tests (TODO)
+├── storage.rs          # Add unit tests (TODO)
+├── lock.rs             # Extend tests (1 existing)
 └── main.rs             # CLI integration tests?
 ```
 

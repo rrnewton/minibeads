@@ -15,12 +15,15 @@ Track testing improvements for minibeads.
 - ✅ 3 unit tests passing (format, lock)
 - ✅ Makefile with validate target created
 - ✅ Clippy checks passing
-- ✅ E2E test infrastructure complete
-- ✅ Shell-based e2e test with 28 assertions (basic_operations.sh)
+- ✅ E2E test infrastructure complete with auto-discovery
+- ✅ Shell-based e2e tests: 64 total assertions
+  - basic_operations.sh: 36 assertions (core commands)
+  - help_version.sh: 28 assertions (help/version/quickstart)
 - ✅ Rust test harness for automatic shell test discovery
 - ✅ GitHub Actions CI/CD pipeline configured
-- 🔲 Need more comprehensive test coverage
-- 🔲 Need additional e2e scenarios
+- ✅ Phase 1 test porting complete (see minibeads-14)
+- 🔲 Need Phase 2 unit tests for edge cases
+- 🔲 Need Phase 4 MCP integration tests
 
 ## TODO
 - [ ] Add more unit tests for storage operations
@@ -30,10 +33,14 @@ Track testing improvements for minibeads.
 - [ ] Implement test porting plan from upstream beads (see minibeads-14)
 
 ## Completed
-- [x] Created tests/basic_operations.sh with 28 test assertions
-- [x] Created tests/e2e_tests.rs Rust harness
+- [x] Created tests/basic_operations.sh with 36 test assertions
+- [x] Created tests/help_version.sh with 28 test assertions
+- [x] Created tests/e2e_tests.rs Rust harness with auto-discovery
 - [x] Integrated with cargo test
 - [x] All tests passing in make validate
+- [x] Phase 1 test porting complete (all implemented commands covered)
+- [x] Added tests for numeric shorthand in bd show
+- [x] Added tests for multi-issue bd show
 - [x] GitHub Actions CI with multiple jobs:
   - Test suite (make validate)
   - Code coverage (tarpaulin)
