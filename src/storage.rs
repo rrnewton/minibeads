@@ -380,6 +380,29 @@ impl Storage {
         Ok(())
     }
 
+    pub fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", from_id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", from_id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(from_id, &content)?;
+
+        // Remove dependency
+        if issue.depends_on.remove(to_id).is_none() {
+            anyhow::bail!("Dependency not found: {} -> {}", from_id, to_id);
+        }
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(())
+    }
+
     /// Populate dependents field for a vector of issues
     fn populate_dependents(issues: &mut [Issue]) {
         use crate::types::Dependency;

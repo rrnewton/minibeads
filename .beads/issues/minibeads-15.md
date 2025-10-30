@@ -305,7 +305,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
    - ✅ `--title` - Filter by title text (case-insensitive substring)
 
 ### P2 - Medium Priority (Dependency Management)
-1. Implement `bd dep remove` - Remove dependencies
+1. ✅ DONE - Implement `bd dep remove` - Remove dependencies
 2. Implement `bd dep tree` - Show dependency tree visualization
 3. Implement `bd dep cycles` - Detect circular dependencies
 4. Support advanced `--deps` syntax in `bd create`:

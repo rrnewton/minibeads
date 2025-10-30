@@ -340,6 +340,15 @@ enum DepCommands {
         #[arg(short = 't', long, default_value = "blocks")]
         r#type: DependencyType,
     },
+
+    /// Remove a dependency
+    Remove {
+        /// Issue that has the dependency
+        issue_id: String,
+
+        /// Issue that issue_id depends on (to remove)
+        depends_on_id: String,
+    },
 }
 
 fn main() {
@@ -657,14 +666,7 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::Dep {
-            command:
-                DepCommands::Add {
-                    issue_id,
-                    depends_on_id,
-                    r#type,
-                },
-        } => {
+        Commands::Dep { command } => {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
@@ -672,13 +674,34 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            storage.add_dependency(&issue_id, &depends_on_id, r#type)?;
+            match command {
+                DepCommands::Add {
+                    issue_id,
+                    depends_on_id,
+                    r#type,
+                } => {
+                    storage.add_dependency(&issue_id, &depends_on_id, r#type)?;
 
-            if !cli.json {
-                println!(
-                    "Added dependency: {} depends on {} ({})",
-                    issue_id, depends_on_id, r#type
-                );
+                    if !cli.json {
+                        println!(
+                            "Added dependency: {} depends on {} ({})",
+                            issue_id, depends_on_id, r#type
+                        );
+                    }
+                }
+                DepCommands::Remove {
+                    issue_id,
+                    depends_on_id,
+                } => {
+                    storage.remove_dependency(&issue_id, &depends_on_id)?;
+
+                    if !cli.json {
+                        println!(
+                            "Removed dependency: {} no longer depends on {}",
+                            issue_id, depends_on_id
+                        );
+                    }
+                }
             }
             Ok(())
         }
