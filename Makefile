@@ -30,7 +30,7 @@ fmt:
 # Clean build artifacts
 clean:
 	cargo clean
-	rm -rf test_spaces/*/beads.lock
+	rm -rf scratch/*/beads.lock
 
 # Install binary to ~/.local/bin
 install: release

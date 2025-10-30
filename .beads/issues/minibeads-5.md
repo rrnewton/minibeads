@@ -19,7 +19,7 @@ Fixed MCP integration bug where Status enum was serializing incorrectly.
 - Added `--validation=silent|warn|error` flag (default: error) for future extensibility
 - Fixed clippy warnings: needless question marks, manual strip, collapsible str::replace
 - Created Makefile with validate target (test + fmt + clippy)
-- Reorganized test_spaces structure
+- Reorganized scratch directory structure
 
 ## Test Results
 - All 3 unit tests passing

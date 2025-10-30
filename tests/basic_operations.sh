@@ -13,7 +13,7 @@ TEST_NAME="basic_operations"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BD_BIN="$WORKSPACE_ROOT/target/debug/bd"
-TEST_DIR="$WORKSPACE_ROOT/test_spaces/e2e_${TEST_NAME}_$$"
+TEST_DIR="$WORKSPACE_ROOT/scratch/e2e_${TEST_NAME}_$$"
 
 # Counters
 TESTS_RUN=0

@@ -30,9 +30,9 @@ struct Cli {
     #[arg(long, global = true, default_value = "error", value_name = "MODE")]
     validation: ValidationMode,
 
-    /// Enable command logging to .beads/command_history.log
-    #[arg(long, global = true, default_value = "true")]
-    cmd_logging: bool,
+    /// Disable command logging to .beads/command_history.log
+    #[arg(long, global = true)]
+    no_cmd_logging: bool,
 
     /// Disable auto-flush (ignored for compatibility)
     #[arg(long, global = true)]
@@ -281,7 +281,7 @@ fn run() -> Result<()> {
             let storage = Storage::init(beads_dir, prefix)?;
 
             // Log command after successful init
-            if cli.cmd_logging {
+            if !cli.no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -310,7 +310,7 @@ fn run() -> Result<()> {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
-            if cli.cmd_logging {
+            if !cli.no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -354,6 +354,12 @@ fn run() -> Result<()> {
             limit,
         } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let issues =
                 storage.list_issues(status, priority, r#type, assignee.as_deref(), Some(limit))?;
 
@@ -372,6 +378,12 @@ fn run() -> Result<()> {
 
         Commands::Show { issue_id } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let issue = storage
                 .get_issue(&issue_id)?
                 .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", issue_id))?;
@@ -414,6 +426,11 @@ fn run() -> Result<()> {
         } => {
             let storage = get_storage(&cli.db)?;
 
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let mut updates = HashMap::new();
             if let Some(s) = status {
                 updates.insert("status".to_string(), s.to_string());
@@ -455,6 +472,12 @@ fn run() -> Result<()> {
 
         Commands::Close { issue_id, reason } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let issue = storage.close_issue(&issue_id, &reason)?;
 
             if cli.json {
@@ -470,6 +493,12 @@ fn run() -> Result<()> {
             reason: _,
         } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let mut reopened = Vec::new();
 
             for issue_id in issue_ids {
@@ -496,6 +525,12 @@ fn run() -> Result<()> {
                 },
         } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             storage.add_dependency(&issue_id, &depends_on_id, r#type)?;
 
             if !cli.json {
@@ -509,6 +544,12 @@ fn run() -> Result<()> {
 
         Commands::Stats => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let stats = storage.get_stats()?;
 
             if cli.json {
@@ -530,6 +571,12 @@ fn run() -> Result<()> {
 
         Commands::Blocked => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let blocked = storage.get_blocked()?;
 
             if cli.json {
@@ -553,6 +600,12 @@ fn run() -> Result<()> {
             limit,
         } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             let ready = storage.get_ready(assignee.as_deref(), priority, limit)?;
 
             if cli.json {
@@ -632,7 +685,13 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
 
     let log_path = beads_dir.join("command_history.log");
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let command_line = args.join(" ");
+
+    // Skip the first argument (binary path) and only log the CLI options
+    let command_line = if args.len() > 1 {
+        args[1..].join(" ")
+    } else {
+        String::new()
+    };
 
     let mut file = OpenOptions::new()
         .create(true)

@@ -25,5 +25,5 @@ target
 
 /target
 
-# Test beads databases
-test_spaces
+# Scratch space for testing and temporary work
+scratch
