@@ -180,6 +180,18 @@ enum Commands {
         #[arg(long)]
         assignee: Option<String>,
 
+        /// Filter by labels (must have ALL specified labels)
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
+
+        /// Filter by specific issue IDs (comma-separated)
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Filter by title substring (case-insensitive)
+        #[arg(long)]
+        title: Option<String>,
+
         /// Maximum number of issues to return
         #[arg(long)]
         limit: Option<usize>,
@@ -416,6 +428,9 @@ fn run() -> Result<()> {
             priority,
             r#type,
             assignee,
+            labels,
+            id,
+            title,
             limit,
         } => {
             let storage = get_storage(&cli.db)?;
@@ -425,8 +440,31 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let issues =
-                storage.list_issues(status, priority, r#type, assignee.as_deref(), limit)?;
+            let mut issues =
+                storage.list_issues(status, priority, r#type, assignee.as_deref(), None)?;
+
+            // Apply label filter (must have ALL specified labels)
+            if !labels.is_empty() {
+                issues.retain(|issue| labels.iter().all(|label| issue.labels.contains(label)));
+            }
+
+            // Apply ID filter (comma-separated list of specific IDs)
+            if let Some(id_filter) = id {
+                let target_ids: Vec<String> =
+                    id_filter.split(',').map(|s| s.trim().to_string()).collect();
+                issues.retain(|issue| target_ids.contains(&issue.id));
+            }
+
+            // Apply title filter (case-insensitive substring match)
+            if let Some(title_filter) = title {
+                let title_lower = title_filter.to_lowercase();
+                issues.retain(|issue| issue.title.to_lowercase().contains(&title_lower));
+            }
+
+            // Apply limit if specified
+            if let Some(limit_val) = limit {
+                issues.truncate(limit_val);
+            }
 
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);

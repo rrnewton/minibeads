@@ -299,10 +299,10 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
    - ✅ `bd update bd-1 bd-2 --status in_progress` - Update multiple issues
    - ✅ `bd close bd-1 bd-2` - Close multiple issues
 
-3. Advanced `bd list` filters:
-   - `--label` and `--label-any` - Label filtering
-   - `--id` - Filter by specific IDs
-   - `--title` - Filter by title text
+3. ✅ DONE - Advanced `bd list` filters:
+   - ✅ `--label` (-l) - Label filtering (must have ALL specified labels)
+   - ✅ `--id` - Filter by specific IDs (comma-separated)
+   - ✅ `--title` - Filter by title text (case-insensitive substring)
 
 ### P2 - Medium Priority (Dependency Management)
 1. Implement `bd dep remove` - Remove dependencies
