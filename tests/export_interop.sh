@@ -171,7 +171,7 @@ assert_file_exists ".beads/issues/exp-3.md" "exp-3 file should exist"
 # Test 3: Export to stdout
 echo -e "\n${YELLOW}Test 3: Export to stdout (default)${NC}"
 STDOUT_EXPORT=$("$BD_BIN" export 2>/dev/null)
-LINE_COUNT=$(echo "$STDOUT_EXPORT" | wc -l)
+LINE_COUNT=$(echo "$STDOUT_EXPORT" | wc -l | tr -d ' ')
 assert_equals "3" "$LINE_COUNT" "Should export 3 issues to stdout"
 
 # Verify it's valid JSON
@@ -186,7 +186,7 @@ assert_contains "$OUTPUT" "Exported 3 issues to custom_export.jsonl" "Should rep
 assert_file_exists "custom_export.jsonl" "Custom export file should exist"
 
 # Verify file contents
-FILE_LINES=$(wc -l < custom_export.jsonl)
+FILE_LINES=$(wc -l < custom_export.jsonl | tr -d ' ')
 assert_equals "3" "$FILE_LINES" "Custom export should have 3 lines"
 
 # Test 5: Export with --mb-output-default flag
@@ -196,7 +196,7 @@ assert_contains "$OUTPUT" "Exported 3 issues to" "Should report export"
 assert_file_exists ".beads/issues.jsonl" "Default export file should exist"
 
 JSONL_FILE="$TEST_DIR/.beads/issues.jsonl"
-JSONL_LINES=$(wc -l < "$JSONL_FILE")
+JSONL_LINES=$(wc -l < "$JSONL_FILE" | tr -d ' ')
 assert_equals "3" "$JSONL_LINES" "Export should have 3 lines"
 
 # Test 6: Verify JSONL format is valid
@@ -235,12 +235,12 @@ assert_contains "$EXP1_JSON" '"id":"exp-3"' "Should have exp-3 as dependent"
 # Test 8: Export with filters
 echo -e "\n${YELLOW}Test 8: Export with status filter${NC}"
 OPEN_EXPORT=$("$BD_BIN" export --status open 2>/dev/null)
-OPEN_COUNT=$(echo "$OPEN_EXPORT" | wc -l)
+OPEN_COUNT=$(echo "$OPEN_EXPORT" | wc -l | tr -d ' ')
 assert_equals "1" "$OPEN_COUNT" "Should export 1 open issue (exp-3)"
 
 # Also test closed filter
 CLOSED_EXPORT=$("$BD_BIN" export --status closed 2>/dev/null)
-CLOSED_COUNT=$(echo "$CLOSED_EXPORT" | wc -l)
+CLOSED_COUNT=$(echo "$CLOSED_EXPORT" | wc -l | tr -d ' ')
 assert_equals "1" "$CLOSED_COUNT" "Should export 1 closed issue (exp-1)"
 
 # Test 9: Upstream bd interoperability (if available)
