@@ -5,14 +5,16 @@ priority: 0
 issue_type: bug
 assignee: claude
 created_at: 2025-10-30T14:30:56.705927961+00:00
-updated_at: 2025-10-30T14:30:56.705927961+00:00
+updated_at: 2025-10-30T18:10:21.423692775+00:00
 ---
 
 # Description
 
 During comprehensive MCP testing, discovered critical bugs that break agent workflows.
 
-## Bug #1: Dependencies/Dependents Schema Mismatch (CRITICAL)
+## Bug #1: Dependencies/Dependents Schema Mismatch (CRITICAL) - ✅ FIXED
+
+**Status**: ✅ RESOLVED in commit 5247166
 
 **Symptom**: MCP server show/list operations return empty dependencies and dependents arrays even when issues have dependencies.
 
@@ -20,28 +22,24 @@ During comprehensive MCP testing, discovered critical bugs that break agent work
 - minibeads outputs: `depends_on: HashMap<String, DependencyType>`
 - MCP server expects: `dependencies: []` and `dependents: []`
 
-**Evidence**:
-```bash
-## CLI JSON output (correct):
-bd show mcp-8 --json
-{"depends_on": {"mcp-7": "parent-child"}, ...}
+**Fix Applied**:
+1. Added custom serde serialization for `depends_on` HashMap
+   - Serializes as "dependencies" array with {id, type} objects
+   - Deserializes both old HashMap and new array formats (backward compat)
+2. Added computed "dependents" field to Issue struct
+   - Populated by reverse dependency lookup in storage layer
+3. Storage layer changes to compute and populate dependents
 
-## MCP show output (wrong):
-mcp show mcp-8
-{"dependencies": [], "dependents": [], ...}
+**Verification**:
+```bash
+bd show test-1 --json
+## Now correctly shows: {"dependencies": [], "dependents": [{"id": "test-2", "type": "blocks"}]}
+
+bd show test-2 --json
+## Now correctly shows: {"dependencies": [{"id": "test-1", "type": "blocks"}], "dependents": []}
 ```
 
-**Impact**: AI agents cannot see dependencies, breaking workflow planning.
-
-**Reproducer**:
-```bash
-cd /workspace/scratch/mcp_test
-## Create issues with dependencies
-bd create "Task A" -p 1
-bd create "Task B" -p 1
-bd dep add b-2 b-1
-## Via MCP: show b-2 - dependencies will be empty
-```
+**Impact**: ✅ AI agents can now see dependencies correctly, unblocking workflow planning.
 
 ## Bug #2: Acceptance Criteria with Markdown List Causes Parse Error
 
@@ -89,8 +87,8 @@ All MCP operations tested:
 | set_context | ✅ Works | - |
 | where_am_i | ✅ Works | - |
 | create | ⚠️ Partial | Bug #2 with acceptance criteria |
-| list | ⚠️ Partial | Bug #1 - empty dependencies |
-| show | ⚠️ Partial | Bug #1 - empty dependencies |
+| list | ✅ FIXED | Bug #1 resolved |
+| show | ✅ FIXED | Bug #1 resolved |
 | update | ✅ Works | - |
 | close | ✅ Works | - |
 | reopen | ✅ Works | Multiple IDs supported |
@@ -117,6 +115,6 @@ All MCP operations tested:
 
 ## Recommended Fixes
 
-1. **Bug #1 (Priority 0)**: Add transformation layer or modify Issue struct to include dependencies/dependents arrays for JSON output
+1. **Bug #1 (Priority 0)**: ✅ DONE - Added transformation layer with dependencies/dependents arrays
 2. **Bug #2 (Priority 1)**: Escape or quote CLI arguments passed by MCP server, or use stdin for long text
 3. **Bug #3 (Priority 2)**: Add optional --validate-deps flag, default to warn on nonexistent deps
