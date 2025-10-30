@@ -12,12 +12,41 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Get the beads directory path
+    pub fn get_beads_dir(&self) -> PathBuf {
+        self.beads_dir.clone()
+    }
+}
+
+impl Storage {
     /// Open storage at the given .beads directory
     pub fn open(beads_dir: PathBuf) -> Result<Self> {
         let issues_dir = beads_dir.join("issues");
 
         // Create directories if they don't exist
         fs::create_dir_all(&issues_dir).context("Failed to create issues directory")?;
+
+        // Validate and ensure config.yaml exists
+        let config_path = beads_dir.join("config.yaml");
+        if !config_path.exists() {
+            // Try to infer prefix and create config
+            let prefix = infer_prefix(&beads_dir).unwrap_or_else(|| "bd".to_string());
+            let mut config = HashMap::new();
+            config.insert("issue-prefix".to_string(), prefix);
+            let config_yaml = serde_yaml::to_string(&config)?;
+            fs::write(&config_path, config_yaml).context("Failed to create config.yaml")?;
+        } else {
+            // Validate that config has issue-prefix
+            let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
+            let config: HashMap<String, String> =
+                serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
+            if !config.contains_key("issue-prefix") {
+                anyhow::bail!("config.yaml is missing required 'issue-prefix' field");
+            }
+        }
+
+        // Ensure .gitignore exists and has required entries
+        ensure_gitignore(&beads_dir)?;
 
         Ok(Self {
             beads_dir,
@@ -45,6 +74,9 @@ impl Storage {
         config.insert("issue-prefix".to_string(), prefix);
         let config_yaml = serde_yaml::to_string(&config)?;
         fs::write(&config_path, config_yaml).context("Failed to write config.yaml")?;
+
+        // Ensure .gitignore exists and has required entries
+        ensure_gitignore(&beads_dir)?;
 
         Ok(Self {
             beads_dir,
@@ -468,4 +500,51 @@ fn infer_prefix(beads_dir: &Path) -> Option<String> {
     let prefix = name.to_lowercase().replace([' ', '_'], "-");
 
     Some(prefix)
+}
+
+/// Ensure .gitignore exists and contains required entries
+fn ensure_gitignore(beads_dir: &Path) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let gitignore_path = beads_dir.join(".gitignore");
+    let required_entries = ["minibeads.lock", "command_history.log"];
+
+    // Read existing content if file exists
+    let mut existing_lines = Vec::new();
+    if gitignore_path.exists() {
+        let file = fs::File::open(&gitignore_path).context("Failed to read .gitignore")?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            existing_lines.push(line?);
+        }
+    }
+
+    // Check which entries are missing
+    let mut missing_entries = Vec::new();
+    for entry in &required_entries {
+        if !existing_lines.iter().any(|line| line.trim() == *entry) {
+            missing_entries.push(*entry);
+        }
+    }
+
+    // Append missing entries if any
+    if !missing_entries.is_empty() {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&gitignore_path)
+            .context("Failed to open .gitignore for writing")?;
+
+        // Add a newline before our entries if file already had content
+        if !existing_lines.is_empty() && !existing_lines.last().unwrap().is_empty() {
+            writeln!(file)?;
+        }
+
+        // Write missing entries
+        for entry in missing_entries {
+            writeln!(file, "{}", entry)?;
+        }
+    }
+
+    Ok(())
 }

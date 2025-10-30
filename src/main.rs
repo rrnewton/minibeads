@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use storage::Storage;
 use types::{DependencyType, IssueType, Status};
 
@@ -29,6 +29,10 @@ struct Cli {
     /// Validation mode for parsing issues
     #[arg(long, global = true, default_value = "error", value_name = "MODE")]
     validation: ValidationMode,
+
+    /// Enable command logging to .beads/command_history.log
+    #[arg(long, global = true, default_value = "true")]
+    cmd_logging: bool,
 
     /// Disable auto-flush (ignored for compatibility)
     #[arg(long, global = true)]
@@ -275,6 +279,12 @@ fn run() -> Result<()> {
         Commands::Init { prefix } => {
             let beads_dir = PathBuf::from(".beads");
             let storage = Storage::init(beads_dir, prefix)?;
+
+            // Log command after successful init
+            if cli.cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
             if !cli.json {
                 println!(
                     "Initialized beads database with prefix: {}",
@@ -298,6 +308,11 @@ fn run() -> Result<()> {
             deps,
         } => {
             let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if cli.cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
 
             // Parse dependencies
             let parsed_deps = if let Some(deps_str) = deps {
@@ -608,6 +623,27 @@ fn find_beads_dir() -> Result<PathBuf> {
             anyhow::bail!("No .beads directory found. Run 'bd init' to initialize a new database.");
         }
     }
+}
+
+/// Log command to command_history.log
+fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let log_path = beads_dir.join("command_history.log");
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let command_line = args.join(" ");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .context("Failed to open command history log")?;
+
+    writeln!(file, "{} {}", timestamp, command_line)
+        .context("Failed to write to command history log")?;
+
+    Ok(())
 }
 
 fn print_quickstart() {

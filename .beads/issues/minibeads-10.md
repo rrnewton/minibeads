@@ -1,7 +1,7 @@
 ---
 title: Implement Events/audit trail data model in markdown format
 status: open
-priority: 2
+priority: 4
 issue_type: feature
 created_at: 2025-10-30T14:00:08.585118377+00:00
 updated_at: 2025-10-30T14:00:08.585118377+00:00
