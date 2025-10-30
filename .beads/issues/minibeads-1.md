@@ -22,6 +22,7 @@ Main tracking issue for minibeads - a minimal, filesystem-based issue tracker in
 - minibeads-2: Documentation and examples
 - minibeads-3: Testing and validation
 - minibeads-4: Performance optimization
+- minibeads-15: Achieving feature parity with upstream bd.
 
 ## Project Conventions
 - Use `bd` CLI or MCP tools to manage issues
