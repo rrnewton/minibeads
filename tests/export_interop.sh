@@ -109,7 +109,10 @@ fi
 
 # Check for upstream bd
 UPSTREAM_BD=""
-if command -v bd-upstream >/dev/null 2>&1; then
+if [ -f "$WORKSPACE_ROOT/beads/bd" ]; then
+    UPSTREAM_BD="$WORKSPACE_ROOT/beads/bd"
+    echo -e "${BLUE}Found upstream bd: ./beads/bd${NC}"
+elif command -v bd-upstream >/dev/null 2>&1; then
     UPSTREAM_BD="bd-upstream"
     echo -e "${BLUE}Found upstream bd: bd-upstream${NC}"
 elif [ -f "$HOME/.cargo/bin/bd-upstream" ]; then
@@ -120,8 +123,8 @@ elif command -v beads >/dev/null 2>&1; then
     echo -e "${BLUE}Found upstream bd: beads${NC}"
 else
     echo -e "${YELLOW}Upstream bd not found - will test export only${NC}"
-    echo -e "${YELLOW}To install upstream bd: cargo install --git https://github.com/steveyegge/beads bd${NC}"
-    echo -e "${YELLOW}Or install as: cargo install --git https://github.com/steveyegge/beads bd --force --bin bd --root ~/.cargo${NC}"
+    echo -e "${YELLOW}To build upstream bd: cd beads && go build -o bd ./cmd/bd${NC}"
+    echo -e "${YELLOW}Or install from source: cargo install --git https://github.com/steveyegge/beads bd${NC}"
     echo ""
 fi
 
@@ -175,7 +178,7 @@ OUTPUT=$("$BD_BIN" export --mb-output-default 2>&1)
 assert_contains "$OUTPUT" "Exported 3 issues to" "Should report export"
 assert_file_exists ".beads/issues.jsonl" "Default export file should exist"
 
-JSONL_FILE=".beads/issues.jsonl"
+JSONL_FILE="$TEST_DIR/.beads/issues.jsonl"
 JSONL_LINES=$(wc -l < "$JSONL_FILE")
 assert_equals "3" "$JSONL_LINES" "Export should have 3 lines"
 
@@ -230,29 +233,32 @@ if [ -n "$UPSTREAM_BD" ]; then
     # Create a clean directory for upstream bd testing
     UPSTREAM_DIR="$TEST_DIR/upstream_test"
     mkdir -p "$UPSTREAM_DIR"
-    cp "$JSONL_FILE" "$UPSTREAM_DIR/issues.jsonl"
     cd "$UPSTREAM_DIR"
+
+    # Initialize upstream bd to create .beads directory
+    "$UPSTREAM_BD" init --prefix exp >/dev/null 2>&1
+
+    # Copy exported issues.jsonl to .beads directory
+    cp "$JSONL_FILE" .beads/issues.jsonl
 
     # Test upstream bd list with --no-db flag
     echo -e "${BLUE}Testing: $UPSTREAM_BD list --no-db${NC}"
-    if UPSTREAM_LIST=$("$UPSTREAM_BD" list --no-db 2>&1); then
-        assert_contains "$UPSTREAM_LIST" "exp-1" "Upstream bd should list exp-1"
-        assert_contains "$UPSTREAM_LIST" "exp-2" "Upstream bd should list exp-2"
-        assert_contains "$UPSTREAM_LIST" "exp-3" "Upstream bd should list exp-3"
-    else
-        echo -e "${YELLOW}Upstream bd list failed - may not support --no-db flag${NC}"
-        echo -e "${YELLOW}Output: $UPSTREAM_LIST${NC}"
-    fi
+    UPSTREAM_LIST=$("$UPSTREAM_BD" list --no-db 2>&1)
+    assert_contains "$UPSTREAM_LIST" "exp-1" "Upstream bd should list exp-1"
+    assert_contains "$UPSTREAM_LIST" "exp-2" "Upstream bd should list exp-2"
+    assert_contains "$UPSTREAM_LIST" "exp-3" "Upstream bd should list exp-3"
 
     # Test upstream bd show with --no-db flag
     echo -e "${BLUE}Testing: $UPSTREAM_BD show exp-1 --no-db${NC}"
-    if UPSTREAM_SHOW=$("$UPSTREAM_BD" show exp-1 --no-db 2>&1); then
-        assert_contains "$UPSTREAM_SHOW" "exp-1" "Upstream bd should show exp-1"
-        assert_contains "$UPSTREAM_SHOW" "Bug Fix A" "Upstream bd should show title"
-    else
-        echo -e "${YELLOW}Upstream bd show failed - may not support --no-db flag${NC}"
-        echo -e "${YELLOW}Output: $UPSTREAM_SHOW${NC}"
-    fi
+    UPSTREAM_SHOW=$("$UPSTREAM_BD" show exp-1 --no-db 2>&1)
+    assert_contains "$UPSTREAM_SHOW" "exp-1" "Upstream bd should show exp-1"
+    assert_contains "$UPSTREAM_SHOW" "Bug Fix A" "Upstream bd should show title"
+
+    # Test upstream bd stats with --no-db flag
+    echo -e "${BLUE}Testing: $UPSTREAM_BD stats --no-db${NC}"
+    UPSTREAM_STATS=$("$UPSTREAM_BD" stats --no-db 2>&1)
+    assert_contains "$UPSTREAM_STATS" "Total Issues:" "Upstream bd should show total issues"
+    assert_contains "$UPSTREAM_STATS" "3" "Upstream bd should show 3 as total"
 
     cd "$TEST_DIR"
 else

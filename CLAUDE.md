@@ -85,6 +85,17 @@ Then, the commit that fixes the issue both removes the comment and closes the is
 
 When creating or updating issues with `bd`, always put ALL content in the description field. Do NOT use the --notes field, as it creates duplication and confusion between what's in description vs notes. Keep all issue information consolidated in the description field only.
 
+### Upstream bd Reference
+
+Upstream bd (from https://github.com/steveyegge/beads) is present in `./beads/bd`.
+
+To build upstream bd:
+```bash
+cd beads && go build -o bd ./cmd/bd
+```
+
+The e2e export interoperability test (`tests/export_interop.sh`) will automatically detect and use `./beads/bd` if present to test interoperability between minibeads JSONL export and upstream bd's ability to read issues.jsonl format.
+
 
 Workflow: Commits and Version Control
 ================================================================================
