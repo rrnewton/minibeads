@@ -1,4 +1,4 @@
-.PHONY: all build test validate clean install help
+.PHONY: all build test validate clean install help upstream
 
 # Default target
 all: build
@@ -14,6 +14,10 @@ release:
 # Run all tests
 test:
 	cargo test
+
+upstream: beads/bd-upstream
+beads/bd-upstream:
+	cd beads && go build -o bd-upstream ./cmd/bd
 
 # Validation target - runs all checks before commit
 validate: test

@@ -87,15 +87,14 @@ When creating or updating issues with `bd`, always put ALL content in the descri
 
 ### Upstream bd Reference
 
-Upstream bd (from https://github.com/steveyegge/beads) is present in `./beads/bd`.
+Upstream bd (from https://github.com/steveyegge/beads) is present in `./beads/`.
+Use the 'beads/bd-upstream' binary to test against upstream.
 
 To build upstream bd:
 ```bash
-cd beads && go build -o bd ./cmd/bd
+make upstream
+# which does cd beads && go build -o bd-upstream ./cmd/bd
 ```
-
-The e2e export interoperability test (`tests/export_interop.sh`) will automatically detect and use `./beads/bd` if present to test interoperability between minibeads JSONL export and upstream bd's ability to read issues.jsonl format.
-
 
 Workflow: Commits and Version Control
 ================================================================================

@@ -109,9 +109,9 @@ fi
 
 # Check for upstream bd
 UPSTREAM_BD=""
-if [ -f "$WORKSPACE_ROOT/beads/bd" ]; then
-    UPSTREAM_BD="$WORKSPACE_ROOT/beads/bd"
-    echo -e "${BLUE}Found upstream bd: ./beads/bd${NC}"
+if [ -f "$WORKSPACE_ROOT/beads/bd-upstream" ]; then
+    UPSTREAM_BD="$WORKSPACE_ROOT/beads/bd-upstream"
+    echo -e "${BLUE}Found upstream bd: ./beads/bd-upstream${NC}"
 elif command -v bd-upstream >/dev/null 2>&1; then
     UPSTREAM_BD="bd-upstream"
     echo -e "${BLUE}Found upstream bd: bd-upstream${NC}"
@@ -123,7 +123,7 @@ elif command -v beads >/dev/null 2>&1; then
     echo -e "${BLUE}Found upstream bd: beads${NC}"
 else
     echo -e "${YELLOW}Upstream bd not found - will test export only${NC}"
-    echo -e "${YELLOW}To build upstream bd: cd beads && go build -o bd ./cmd/bd${NC}"
+    echo -e "${YELLOW}To build upstream bd: make upstream${NC}"
     echo -e "${YELLOW}Or install from source: cargo install --git https://github.com/steveyegge/beads bd${NC}"
     echo ""
 fi
@@ -237,8 +237,8 @@ if [ -n "$UPSTREAM_BD" ]; then
     cd "$UPSTREAM_DIR"
 
     # Initialize upstream bd to create .beads directory
-    echo -e "${BLUE}→ $UPSTREAM_BD init --prefix exp${NC}"
-    "$UPSTREAM_BD" init --prefix exp >/dev/null 2>&1
+    echo -e "${BLUE}→ echo n | $UPSTREAM_BD init --prefix exp${NC}"
+    echo n | "$UPSTREAM_BD" init --prefix exp >/dev/null 2>&1
     echo -e "${BLUE}  (init completed)${NC}"
 
     # Copy exported issues.jsonl to .beads directory
