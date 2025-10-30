@@ -24,3 +24,7 @@ winapi = { version = "0.3", features = ["handleapi", "processthreadsapi", "winnt
 
 [dev-dependencies]
 dir-test = "0.4"
+
+[build-dependencies]
+built = { version = "0.7", features = ["git2"] }
+chrono = "0.4"
