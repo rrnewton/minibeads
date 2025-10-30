@@ -27,6 +27,7 @@ Track testing improvements for minibeads.
 - [ ] Add more e2e test scenarios (concurrent access, error handling, edge cases)
 - [ ] Add property-based tests for markdown format
 - [ ] Add code coverage reporting
+- [ ] Implement test porting plan from upstream beads (see minibeads-14)
 
 ## Completed
 - [x] Created tests/basic_operations.sh with 28 test assertions
@@ -42,3 +43,4 @@ Track testing improvements for minibeads.
 
 ## Related Issues
 - minibeads-5: Fixed serialization bug and validation (CLOSED)
+- minibeads-14: Test porting plan - adapting upstream beads tests for minibeads

@@ -7,8 +7,10 @@ labels:
 - testing
 - planning
 - documentation
+depends_on:
+  minibeads-3: parent-child
 created_at: 2025-10-30T14:51:10.942162916+00:00
-updated_at: 2025-10-30T14:51:10.942162916+00:00
+updated_at: 2025-10-30T16:26:20.249371754+00:00
 ---
 
 # Description
