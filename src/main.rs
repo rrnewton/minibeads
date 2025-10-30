@@ -154,8 +154,8 @@ enum Commands {
 
     /// Show issue details
     Show {
-        /// Issue ID
-        issue_id: String,
+        /// Issue IDs (supports shorthand: "14" expands to "prefix-14")
+        issue_ids: Vec<String>,
     },
 
     /// Update an issue
@@ -381,7 +381,7 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::Show { issue_id } => {
+        Commands::Show { issue_ids } => {
             let storage = get_storage(&cli.db)?;
 
             // Log command after storage is validated
@@ -389,28 +389,52 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let issue = storage
-                .get_issue(&issue_id)?
-                .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", issue_id))?;
+            if issue_ids.is_empty() {
+                anyhow::bail!("No issue IDs provided. Usage: bd show <issue-id> [issue-ids...]");
+            }
+
+            let prefix = storage.get_prefix()?;
+            let mut issues = Vec::new();
+
+            // Normalize issue IDs (expand numeric shorthand like "14" -> "prefix-14")
+            for id_str in &issue_ids {
+                let normalized_id = if id_str.parse::<u32>().is_ok() {
+                    format!("{}-{}", prefix, id_str)
+                } else {
+                    id_str.clone()
+                };
+
+                let issue = storage
+                    .get_issue(&normalized_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", normalized_id))?;
+                issues.push(issue);
+            }
 
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&[issue])?);
+                println!("{}", serde_json::to_string_pretty(&issues)?);
             } else {
-                println!("ID: {}", issue.id);
-                println!("Title: {}", issue.title);
-                println!("Status: {}", issue.status);
-                println!("Priority: {}", issue.priority);
-                println!("Type: {}", issue.issue_type);
-                if !issue.assignee.is_empty() {
-                    println!("Assignee: {}", issue.assignee);
-                }
-                if !issue.description.is_empty() {
-                    println!("\nDescription:\n{}", issue.description);
-                }
-                if !issue.depends_on.is_empty() {
-                    println!("\nDependencies:");
-                    for (dep_id, dep_type) in &issue.depends_on {
-                        println!("  {} ({})", dep_id, dep_type);
+                for (idx, issue) in issues.iter().enumerate() {
+                    if idx > 0 {
+                        println!("\n{}", "=".repeat(70));
+                        println!();
+                    }
+
+                    println!("ID: {}", issue.id);
+                    println!("Title: {}", issue.title);
+                    println!("Status: {}", issue.status);
+                    println!("Priority: {}", issue.priority);
+                    println!("Type: {}", issue.issue_type);
+                    if !issue.assignee.is_empty() {
+                        println!("Assignee: {}", issue.assignee);
+                    }
+                    if !issue.description.is_empty() {
+                        println!("\nDescription:\n{}", issue.description);
+                    }
+                    if !issue.depends_on.is_empty() {
+                        println!("\nDependencies:");
+                        for (dep_id, dep_type) in &issue.depends_on {
+                            println!("  {} ({})", dep_id, dep_type);
+                        }
                     }
                 }
             }
