@@ -41,7 +41,9 @@ bd show test-2 --json
 
 **Impact**: ✅ AI agents can now see dependencies correctly, unblocking workflow planning.
 
-## Bug #2: Acceptance Criteria with Markdown List Causes Parse Error
+## Bug #2: Acceptance Criteria with Markdown List Causes Parse Error - ✅ FIXED
+
+**Status**: ✅ RESOLVED
 
 **Symptom**: Creating issue via MCP with acceptance criteria starting with `- ` fails with clap parse error.
 
@@ -60,9 +62,22 @@ mcp.create(
 ## Fails with parse error
 ```
 
-**Workaround**: Use non-dash format like "Criteria 1, Criteria 2"
+**Root Cause**: MCP server passes acceptance text as CLI argument, clap interprets leading dash as flag without `allow_hyphen_values`.
 
-**Root Cause**: MCP server passes acceptance text as CLI argument, clap interprets leading dash as flag.
+**Fix Applied**:
+Added `allow_hyphen_values = true` to all text field arguments that might contain markdown lists or leading hyphens:
+- Create command: description, design, acceptance
+- Update command: title, description, design, acceptance, notes
+- Close command: reason
+- Reopen command: reason
+
+**Verification**:
+```bash
+bd create "Test" --acceptance "- Criteria 1\n- Criteria 2"  # Now works!
+bd update test-1 --notes "- Note 1\n- Note 2"  # Now works!
+```
+
+**Impact**: ✅ AI agents can now use markdown lists in all text fields without workarounds.
 
 ## Bug #3: Nonexistent Dependencies Accepted Without Validation
 
@@ -86,12 +101,12 @@ All MCP operations tested:
 |-----------|--------|-------|
 | set_context | ✅ Works | - |
 | where_am_i | ✅ Works | - |
-| create | ⚠️ Partial | Bug #2 with acceptance criteria |
+| create | ✅ FIXED | Bug #2 resolved |
 | list | ✅ FIXED | Bug #1 resolved |
 | show | ✅ FIXED | Bug #1 resolved |
-| update | ✅ Works | - |
-| close | ✅ Works | - |
-| reopen | ✅ Works | Multiple IDs supported |
+| update | ✅ FIXED | Bug #2 resolved |
+| close | ✅ FIXED | Bug #2 resolved |
+| reopen | ✅ FIXED | Bug #2 resolved |
 | dep | ⚠️ Partial | Bug #3 - no validation |
 | stats | ✅ Works | - |
 | blocked | ✅ Works | Shows all blockers including nonexistent |
@@ -116,5 +131,5 @@ All MCP operations tested:
 ## Recommended Fixes
 
 1. **Bug #1 (Priority 0)**: ✅ DONE - Added transformation layer with dependencies/dependents arrays
-2. **Bug #2 (Priority 1)**: Escape or quote CLI arguments passed by MCP server, or use stdin for long text
-3. **Bug #3 (Priority 2)**: Add optional --validate-deps flag, default to warn on nonexistent deps
+2. **Bug #2 (Priority 1)**: ✅ DONE - Added `allow_hyphen_values = true` to all text field arguments
+3. **Bug #3 (Priority 2)**: TODO - Add optional --validate-deps flag, default to warn on nonexistent deps

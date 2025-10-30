@@ -130,15 +130,15 @@ enum Commands {
         issue_type: IssueType,
 
         /// Description
-        #[arg(short, long, default_value = "")]
+        #[arg(short, long, default_value = "", allow_hyphen_values = true)]
         description: String,
 
         /// Design notes
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         design: Option<String>,
 
         /// Acceptance criteria
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         acceptance: Option<String>,
 
         /// Assignee
@@ -209,23 +209,23 @@ enum Commands {
         assignee: Option<String>,
 
         /// New title
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         title: Option<String>,
 
         /// New description
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         description: Option<String>,
 
         /// New design notes
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         design: Option<String>,
 
         /// New acceptance criteria
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         acceptance: Option<String>,
 
         /// Additional notes
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         notes: Option<String>,
 
         /// New external reference
@@ -239,7 +239,7 @@ enum Commands {
         issue_id: String,
 
         /// Reason for closing
-        #[arg(long, default_value = "Completed")]
+        #[arg(long, default_value = "Completed", allow_hyphen_values = true)]
         reason: String,
     },
 
@@ -249,7 +249,7 @@ enum Commands {
         issue_ids: Vec<String>,
 
         /// Reason for reopening
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         reason: Option<String>,
     },
 
