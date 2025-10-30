@@ -12,7 +12,7 @@ minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workf
 - **Dependency tracking**: Issues can block each other, with automatic detection of ready work
 - **AI-friendly**: Full MCP (Model Context Protocol) integration for AI agents
 - **Fast**: Rust implementation with coarse-grained file locking
-- **Drop-in replacement**: Compatible with upstream beads MCP server
+- **Drop-in replacement**: Compatible with upstream beads MCP server (https://github.com/steveyegge/beads)
 
 ## Installation
 
