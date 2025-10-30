@@ -35,7 +35,9 @@ impl Storage {
         fs::create_dir_all(&issues_dir).context("Failed to create issues directory")?;
 
         // Determine prefix
-        let prefix = prefix.or_else(|| infer_prefix(&beads_dir)).unwrap_or_else(|| "bd".to_string());
+        let prefix = prefix
+            .or_else(|| infer_prefix(&beads_dir))
+            .unwrap_or_else(|| "bd".to_string());
 
         // Create config.yaml with issue-prefix
         let config_path = beads_dir.join("config.yaml");
@@ -56,12 +58,12 @@ impl Storage {
 
         if !config_path.exists() {
             // Try to infer from existing issues
-            return Ok(self.infer_prefix_from_issues()?);
+            return self.infer_prefix_from_issues();
         }
 
         let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
-        let config: HashMap<String, String> = serde_yaml::from_str(&content)
-            .context("Failed to parse config.yaml")?;
+        let config: HashMap<String, String> =
+            serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
 
         config
             .get("issue-prefix")
@@ -79,8 +81,7 @@ impl Storage {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if name_str.ends_with(".md") {
-                let issue_id = &name_str[..name_str.len() - 3];
+            if let Some(issue_id) = name_str.strip_suffix(".md") {
                 if let Some(pos) = issue_id.rfind('-') {
                     let prefix = &issue_id[..pos];
                     *prefixes.entry(prefix.to_string()).or_insert(0) += 1;
@@ -106,8 +107,7 @@ impl Storage {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if name_str.ends_with(".md") {
-                let issue_id = &name_str[..name_str.len() - 3];
+            if let Some(issue_id) = name_str.strip_suffix(".md") {
                 if let Some(pos) = issue_id.rfind('-') {
                     let issue_prefix = &issue_id[..pos];
                     let num_str = &issue_id[pos + 1..];
@@ -124,6 +124,7 @@ impl Storage {
     }
 
     /// Create a new issue
+    #[allow(clippy::too_many_arguments)]
     pub fn create_issue(
         &self,
         title: String,
@@ -213,7 +214,9 @@ impl Storage {
                 "priority" => issue.priority = value.parse()?,
                 "issue_type" => issue.issue_type = value.parse()?,
                 "assignee" => issue.assignee = value,
-                "external_ref" => issue.external_ref = if value.is_empty() { None } else { Some(value) },
+                "external_ref" => {
+                    issue.external_ref = if value.is_empty() { None } else { Some(value) }
+                }
                 _ => {}
             }
         }
@@ -272,7 +275,12 @@ impl Storage {
     }
 
     /// Add a dependency between issues
-    pub fn add_dependency(&self, from_id: &str, to_id: &str, dep_type: DependencyType) -> Result<()> {
+    pub fn add_dependency(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        dep_type: DependencyType,
+    ) -> Result<()> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
         let issue_path = self.issues_dir.join(format!("{}.md", from_id));
@@ -362,23 +370,22 @@ impl Storage {
 
         let total = issues.len();
         let open = issues.iter().filter(|i| i.status == Status::Open).count();
-        let in_progress = issues.iter().filter(|i| i.status == Status::InProgress).count();
+        let in_progress = issues
+            .iter()
+            .filter(|i| i.status == Status::InProgress)
+            .count();
         let closed = issues.iter().filter(|i| i.status == Status::Closed).count();
 
         // Calculate blocked issues (those with blocking dependencies)
         let blocked = issues
             .iter()
-            .filter(|i| {
-                i.status != Status::Closed && !i.get_blocking_dependencies().is_empty()
-            })
+            .filter(|i| i.status != Status::Closed && !i.get_blocking_dependencies().is_empty())
             .count();
 
         // Calculate ready issues
         let ready = issues
             .iter()
-            .filter(|i| {
-                i.status == Status::Open && i.get_blocking_dependencies().is_empty()
-            })
+            .filter(|i| i.status == Status::Open && i.get_blocking_dependencies().is_empty())
             .count();
 
         // Calculate average lead time for closed issues
@@ -458,10 +465,7 @@ fn infer_prefix(beads_dir: &Path) -> Option<String> {
     let parent = beads_dir.parent()?.parent()?;
     let name = parent.file_name()?.to_str()?;
 
-    let prefix = name
-        .to_lowercase()
-        .replace(' ', "-")
-        .replace('_', "-");
+    let prefix = name.to_lowercase().replace([' ', '_'], "-");
 
     Some(prefix)
 }

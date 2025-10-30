@@ -105,8 +105,7 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
     }
 
     // Parse frontmatter
-    let fm: Frontmatter =
-        serde_yaml::from_str(parts[1]).context("Failed to parse frontmatter")?;
+    let fm: Frontmatter = serde_yaml::from_str(parts[1]).context("Failed to parse frontmatter")?;
 
     // Parse body sections
     let (description, design, acceptance_criteria, notes) = parse_sections(parts[2]);

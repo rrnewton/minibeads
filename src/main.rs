@@ -26,6 +26,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Validation mode for parsing issues
+    #[arg(long, global = true, default_value = "error", value_name = "MODE")]
+    validation: ValidationMode,
+
     /// Disable auto-flush (ignored for compatibility)
     #[arg(long, global = true)]
     no_auto_flush: bool,
@@ -36,6 +40,29 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationMode {
+    Silent,
+    Warn,
+    Error,
+}
+
+impl std::str::FromStr for ValidationMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "silent" => Ok(ValidationMode::Silent),
+            "warn" => Ok(ValidationMode::Warn),
+            "error" => Ok(ValidationMode::Error),
+            _ => Err(anyhow::anyhow!(
+                "Invalid validation mode: '{}'. Valid values are: silent, warn, error",
+                s
+            )),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -249,7 +276,10 @@ fn run() -> Result<()> {
             let beads_dir = PathBuf::from(".beads");
             let storage = Storage::init(beads_dir, prefix)?;
             if !cli.json {
-                println!("Initialized beads database with prefix: {}", storage.get_prefix()?);
+                println!(
+                    "Initialized beads database with prefix: {}",
+                    storage.get_prefix()?
+                );
             }
             Ok(())
         }
@@ -309,13 +339,8 @@ fn run() -> Result<()> {
             limit,
         } => {
             let storage = get_storage(&cli.db)?;
-            let issues = storage.list_issues(
-                status,
-                priority,
-                r#type,
-                assignee.as_deref(),
-                Some(limit),
-            )?;
+            let issues =
+                storage.list_issues(status, priority, r#type, assignee.as_deref(), Some(limit))?;
 
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
@@ -448,11 +473,12 @@ fn run() -> Result<()> {
         }
 
         Commands::Dep {
-            command: DepCommands::Add {
-                issue_id,
-                depends_on_id,
-                r#type,
-            },
+            command:
+                DepCommands::Add {
+                    issue_id,
+                    depends_on_id,
+                    r#type,
+                },
         } => {
             let storage = get_storage(&cli.db)?;
             storage.add_dependency(&issue_id, &depends_on_id, r#type)?;
@@ -542,7 +568,7 @@ fn run() -> Result<()> {
 fn get_storage(db_arg: &Option<PathBuf>) -> Result<Storage> {
     let beads_dir = if let Some(db) = db_arg {
         // If --db points to a .db file, use its parent directory
-        if db.extension().map_or(false, |e| e == "db") {
+        if db.extension().is_some_and(|e| e == "db") {
             db.parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid database path"))?
                 .to_path_buf()
@@ -551,7 +577,7 @@ fn get_storage(db_arg: &Option<PathBuf>) -> Result<Storage> {
         }
     } else if let Ok(beads_db) = env::var("BEADS_DB") {
         let db_path = PathBuf::from(beads_db);
-        if db_path.extension().map_or(false, |e| e == "db") {
+        if db_path.extension().is_some_and(|e| e == "db") {
             db_path
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid BEADS_DB path"))?
@@ -579,9 +605,7 @@ fn find_beads_dir() -> Result<PathBuf> {
         }
 
         if !current.pop() {
-            anyhow::bail!(
-                "No .beads directory found. Run 'bd init' to initialize a new database."
-            );
+            anyhow::bail!("No .beads directory found. Run 'bd init' to initialize a new database.");
         }
     }
 }

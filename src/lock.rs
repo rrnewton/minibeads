@@ -25,16 +25,15 @@ impl Lock {
             // Try to create lock file
             match try_acquire_lock(&lock_path, pid) {
                 Ok(()) => {
-                    return Ok(Self { lock_path, _pid: pid });
+                    return Ok(Self {
+                        lock_path,
+                        _pid: pid,
+                    });
                 }
                 Err(e) => {
                     // Check if we've exceeded max backoff time
                     if total_wait >= MAX_BACKOFF_MS {
-                        anyhow::bail!(
-                            "Failed to acquire lock after {}ms: {}",
-                            MAX_BACKOFF_MS,
-                            e
-                        );
+                        anyhow::bail!("Failed to acquire lock after {}ms: {}", MAX_BACKOFF_MS, e);
                     }
 
                     // Wait with exponential backoff

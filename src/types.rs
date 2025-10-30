@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 /// Issue status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Open,
     InProgress,
@@ -33,7 +33,10 @@ impl std::str::FromStr for Status {
             "in_progress" => Ok(Status::InProgress),
             "blocked" => Ok(Status::Blocked),
             "closed" => Ok(Status::Closed),
-            _ => Err(anyhow::anyhow!("Invalid status: {}", s)),
+            _ => Err(anyhow::anyhow!(
+                "Invalid status: '{}'. Valid values are: open, in_progress, blocked, closed",
+                s
+            )),
         }
     }
 }
@@ -71,7 +74,10 @@ impl std::str::FromStr for IssueType {
             "task" => Ok(IssueType::Task),
             "epic" => Ok(IssueType::Epic),
             "chore" => Ok(IssueType::Chore),
-            _ => Err(anyhow::anyhow!("Invalid issue type: {}", s)),
+            _ => Err(anyhow::anyhow!(
+                "Invalid issue type: '{}'. Valid values are: bug, feature, task, epic, chore",
+                s
+            )),
         }
     }
 }
@@ -106,7 +112,10 @@ impl std::str::FromStr for DependencyType {
             "related" => Ok(DependencyType::Related),
             "parent-child" => Ok(DependencyType::ParentChild),
             "discovered-from" => Ok(DependencyType::DiscoveredFrom),
-            _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+            _ => Err(anyhow::anyhow!(
+                "Invalid dependency type: '{}'. Valid values are: blocks, related, parent-child, discovered-from",
+                s
+            )),
         }
     }
 }
