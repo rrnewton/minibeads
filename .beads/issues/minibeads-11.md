@@ -1,10 +1,11 @@
 ---
 title: Implement bd export to issues.jsonl format
-status: open
+status: closed
 priority: 3
 issue_type: feature
 created_at: 2025-10-30T14:11:15.924424355+00:00
-updated_at: 2025-10-30T14:11:15.924424355+00:00
+updated_at: 2025-10-30T19:15:47.086461274+00:00
+closed_at: 2025-10-30T19:15:47.086461013+00:00
 ---
 
 # Description

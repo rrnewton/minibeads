@@ -232,6 +232,29 @@ enum Commands {
     /// Get blocked issues
     Blocked,
 
+    /// Export issues to JSONL format
+    Export {
+        /// Output file path
+        #[arg(short = 'o', long, default_value = "issues.jsonl")]
+        output: PathBuf,
+
+        /// Filter by status
+        #[arg(long)]
+        status: Option<Status>,
+
+        /// Filter by priority
+        #[arg(long)]
+        priority: Option<i32>,
+
+        /// Filter by type
+        #[arg(long)]
+        r#type: Option<IssueType>,
+
+        /// Filter by assignee
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+
     /// Find ready work (issues with no blockers)
     Ready {
         /// Filter by assignee
@@ -620,6 +643,27 @@ fn run() -> Result<()> {
                     );
                 }
             }
+            Ok(())
+        }
+
+        Commands::Export {
+            output,
+            status,
+            priority,
+            r#type,
+            assignee,
+        } => {
+            let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            let count =
+                storage.export_to_jsonl(&output, status, priority, r#type, assignee.as_deref())?;
+
+            println!("Exported {} issues to {}", count, output.display());
             Ok(())
         }
 

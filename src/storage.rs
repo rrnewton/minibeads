@@ -570,6 +570,34 @@ impl Storage {
 
         Ok(ready)
     }
+
+    /// Export issues to JSONL format
+    pub fn export_to_jsonl(
+        &self,
+        output_path: &Path,
+        status: Option<Status>,
+        priority: Option<i32>,
+        issue_type: Option<IssueType>,
+        assignee: Option<&str>,
+    ) -> Result<usize> {
+        use std::io::Write;
+
+        // Get issues with filters (list_issues acquires its own lock)
+        let issues = self.list_issues(status, priority, issue_type, assignee, None)?;
+
+        // Open output file
+        let mut file = fs::File::create(output_path)
+            .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+
+        // Write each issue as a JSON line
+        for issue in &issues {
+            let json =
+                serde_json::to_string(&issue).context("Failed to serialize issue to JSON")?;
+            writeln!(file, "{}", json).context("Failed to write to output file")?;
+        }
+
+        Ok(issues.len())
+    }
 }
 
 /// Infer prefix from the parent directory name
