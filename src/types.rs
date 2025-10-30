@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
 /// Issue status
@@ -120,6 +120,64 @@ impl std::str::FromStr for DependencyType {
     }
 }
 
+/// Dependency representation for JSON output (MCP compatibility)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dependency {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub dep_type: String,
+}
+
+/// Custom serialization for depends_on HashMap -> dependencies array
+fn serialize_dependencies<S>(
+    map: &HashMap<String, DependencyType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let deps: Vec<Dependency> = map
+        .iter()
+        .map(|(id, dep_type)| Dependency {
+            id: id.clone(),
+            dep_type: dep_type.to_string(),
+        })
+        .collect();
+    deps.serialize(serializer)
+}
+
+/// Helper enum for deserializing either old HashMap or new array format
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DependenciesFormat {
+    Array(Vec<Dependency>),
+    Map(HashMap<String, DependencyType>),
+}
+
+/// Custom deserialization for dependencies array -> depends_on HashMap
+fn deserialize_dependencies<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, DependencyType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match DependenciesFormat::deserialize(deserializer)? {
+        DependenciesFormat::Array(deps) => {
+            let mut map = HashMap::new();
+            for dep in deps {
+                let dep_type = dep.dep_type.parse::<DependencyType>().map_err(|_| {
+                    Error::custom(format!("Invalid dependency type: {}", dep.dep_type))
+                })?;
+                map.insert(dep.id, dep_type);
+            }
+            Ok(map)
+        }
+        DependenciesFormat::Map(map) => Ok(map),
+    }
+}
+
 /// Issue structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
@@ -135,7 +193,14 @@ pub struct Issue {
     pub assignee: String,
     pub external_ref: Option<String>,
     pub labels: Vec<String>,
+    #[serde(
+        rename = "dependencies",
+        serialize_with = "serialize_dependencies",
+        deserialize_with = "deserialize_dependencies"
+    )]
     pub depends_on: HashMap<String, DependencyType>,
+    #[serde(default, skip_deserializing)]
+    pub dependents: Vec<Dependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
@@ -158,6 +223,7 @@ impl Issue {
             external_ref: None,
             labels: Vec::new(),
             depends_on: HashMap::new(),
+            dependents: Vec::new(),
             created_at: now,
             updated_at: now,
             closed_at: None,

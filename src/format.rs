@@ -125,6 +125,7 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
         external_ref: fm.external_ref,
         labels: fm.labels,
         depends_on: HashMap::new(),
+        dependents: Vec::new(),
         created_at: parse_timestamp(&fm.created_at)?,
         updated_at: parse_timestamp(&fm.updated_at)?,
         closed_at: fm.closed_at.as_ref().and_then(|s| parse_timestamp(s).ok()),

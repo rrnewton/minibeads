@@ -218,8 +218,55 @@ impl Storage {
         }
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
-        let issue = markdown_to_issue(id, &content)?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        // Populate dependents by scanning all issues
+        let all_issues = self.list_all_issues_no_dependents()?;
+        Self::populate_dependents_for_one(&all_issues, &mut issue);
+
         Ok(Some(issue))
+    }
+
+    /// Helper to load all issues without computing dependents (to avoid recursion)
+    fn list_all_issues_no_dependents(&self) -> Result<Vec<Issue>> {
+        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
+
+        let mut issues = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if !name_str.ends_with(".md") {
+                continue;
+            }
+
+            let issue_id = &name_str[..name_str.len() - 3];
+            let content = fs::read_to_string(entry.path())?;
+            let issue = markdown_to_issue(issue_id, &content)?;
+            issues.push(issue);
+        }
+
+        Ok(issues)
+    }
+
+    /// Populate dependents for a single issue given all issues
+    fn populate_dependents_for_one(all_issues: &[Issue], target_issue: &mut Issue) {
+        use crate::types::Dependency;
+
+        let mut dependents = Vec::new();
+        for issue in all_issues {
+            if issue.depends_on.contains_key(&target_issue.id) {
+                if let Some(dep_type) = issue.depends_on.get(&target_issue.id) {
+                    dependents.push(Dependency {
+                        id: issue.id.clone(),
+                        dep_type: dep_type.to_string(),
+                    });
+                }
+            }
+        }
+
+        target_issue.dependents = dependents;
     }
 
     /// Update an issue
@@ -333,6 +380,36 @@ impl Storage {
         Ok(())
     }
 
+    /// Populate dependents field for a vector of issues
+    fn populate_dependents(issues: &mut [Issue]) {
+        use crate::types::Dependency;
+        use std::collections::HashMap;
+
+        // Build a reverse dependency map: issue_id -> [(dependent_id, dep_type), ...]
+        let mut reverse_deps: HashMap<String, Vec<Dependency>> = HashMap::new();
+
+        for issue in issues.iter() {
+            for (dep_id, dep_type) in &issue.depends_on {
+                reverse_deps
+                    .entry(dep_id.clone())
+                    .or_default()
+                    .push(Dependency {
+                        id: issue.id.clone(),
+                        dep_type: dep_type.to_string(),
+                    });
+            }
+        }
+
+        // Populate dependents for each issue
+        for issue in issues.iter_mut() {
+            if let Some(dependents) = reverse_deps.get(&issue.id) {
+                issue.dependents = dependents.clone();
+            } else {
+                issue.dependents = Vec::new();
+            }
+        }
+    }
+
     /// List all issues
     pub fn list_issues(
         &self,
@@ -392,6 +469,9 @@ impl Storage {
         if let Some(limit) = limit {
             issues.truncate(limit);
         }
+
+        // Populate dependents
+        Self::populate_dependents(&mut issues);
 
         Ok(issues)
     }
