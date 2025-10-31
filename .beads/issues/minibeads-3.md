@@ -100,6 +100,11 @@ Track testing improvements for minibeads.
   - Added --parallel flag with optional core count
   - Thread-safe parallel execution with atomic coordination
   - 11.4x speedup with 64 workers vs single-threaded
+- [x] Upstream JSONL import compatibility test (tests/random_import_upstream_json.rs)
+  - Verifies minibeads can correctly parse upstream beads JSONL format
+  - Tests parsing of all fields: id, title, description, status, priority, type, dependencies
+  - Validates dependency relationships and types
+  - Uses sample JSONL matching upstream format
 
 ## Related Issues
 - minibeads-5: Fixed serialization bug and validation (CLOSED)
