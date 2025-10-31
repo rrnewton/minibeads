@@ -681,3 +681,152 @@ pub struct ExecutionResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
 }
+
+/// Reference interpreter for beads actions
+///
+/// Maintains an in-memory representation of the beads state by interpreting
+/// BeadsAction sequences. This provides a "golden state" for verification.
+pub struct ReferenceInterpreter {
+    pub issues: std::collections::HashMap<String, ReferenceIssue>,
+    pub prefix: String,
+    pub next_id: usize,
+}
+
+/// Simplified issue representation for reference interpreter
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceIssue {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: Status,
+    pub priority: i32,
+    pub issue_type: IssueType,
+    pub depends_on: std::collections::HashMap<String, DependencyType>,
+}
+
+impl ReferenceInterpreter {
+    /// Create a new reference interpreter with the given prefix
+    pub fn new(prefix: String) -> Self {
+        Self {
+            issues: std::collections::HashMap::new(),
+            prefix,
+            next_id: 1,
+        }
+    }
+
+    /// Execute an action, updating the internal state
+    pub fn execute(&mut self, action: &BeadsAction) -> Result<()> {
+        match action {
+            BeadsAction::Init { prefix } => {
+                if let Some(p) = prefix {
+                    self.prefix = p.clone();
+                }
+                Ok(())
+            }
+
+            BeadsAction::Create {
+                expected_id,
+                title,
+                priority,
+                issue_type,
+                description,
+            } => {
+                // Verify the expected_id matches our sequential numbering
+                let computed_id = format!("{}-{}", self.prefix, self.next_id);
+                if *expected_id != computed_id {
+                    anyhow::bail!(
+                        "Reference interpreter ID mismatch: expected {}, got {}",
+                        computed_id,
+                        expected_id
+                    );
+                }
+
+                let issue = ReferenceIssue {
+                    id: expected_id.clone(),
+                    title: title.clone(),
+                    description: description.clone().unwrap_or_default(),
+                    status: Status::Open,
+                    priority: *priority,
+                    issue_type: *issue_type,
+                    depends_on: std::collections::HashMap::new(),
+                };
+
+                self.issues.insert(expected_id.clone(), issue);
+                self.next_id += 1;
+                Ok(())
+            }
+
+            BeadsAction::List { .. } => {
+                // List doesn't modify state
+                Ok(())
+            }
+
+            BeadsAction::Show { .. } => {
+                // Show doesn't modify state
+                Ok(())
+            }
+
+            BeadsAction::Update {
+                issue_id,
+                status,
+                priority,
+            } => {
+                if let Some(issue) = self.issues.get_mut(issue_id) {
+                    if let Some(s) = status {
+                        issue.status = *s;
+                    }
+                    if let Some(p) = priority {
+                        issue.priority = *p;
+                    }
+                }
+                // Silently ignore updates to non-existent issues (matches bd behavior)
+                Ok(())
+            }
+
+            BeadsAction::Close { issue_id, .. } => {
+                if let Some(issue) = self.issues.get_mut(issue_id) {
+                    issue.status = Status::Closed;
+                }
+                Ok(())
+            }
+
+            BeadsAction::Reopen { issue_id } => {
+                if let Some(issue) = self.issues.get_mut(issue_id) {
+                    issue.status = Status::Open;
+                }
+                Ok(())
+            }
+
+            BeadsAction::AddDependency {
+                issue_id,
+                depends_on,
+                dep_type,
+            } => {
+                if let Some(issue) = self.issues.get_mut(issue_id) {
+                    issue.depends_on.insert(depends_on.clone(), *dep_type);
+                }
+                Ok(())
+            }
+
+            BeadsAction::Export { .. } => {
+                // Export doesn't modify state
+                Ok(())
+            }
+        }
+    }
+
+    /// Get the final state as a reference to the issues HashMap
+    pub fn get_final_state(&self) -> &std::collections::HashMap<String, ReferenceIssue> {
+        &self.issues
+    }
+
+    /// Get the current prefix
+    pub fn get_prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Get the next expected issue ID
+    pub fn get_next_id(&self) -> usize {
+        self.next_id
+    }
+}
