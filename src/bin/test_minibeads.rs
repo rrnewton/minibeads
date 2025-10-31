@@ -260,8 +260,9 @@ fn run_random_actions(
     println!("Testing implementation: {}", impl_name);
     println!("Binary: {}", binary_path);
 
-    // Determine if we should use --no-db flag (for upstream)
-    let use_no_db = matches!(implementation, Implementation::Upstream);
+    // No longer use --no-db flag - let upstream use SQLite database
+    // We'll export to JSONL after execution for verification
+    let use_no_db = false;
 
     // Check for parallel execution
     if let Some(num_workers) = parallel {
@@ -285,6 +286,7 @@ fn run_random_actions(
         println!("Base seed: {}", base_seed);
         println!("Will stop on first failure across all workers\n");
 
+        let is_upstream = matches!(implementation, Implementation::Upstream);
         return run_parallel_stress_test(
             base_seed,
             seconds.unwrap(),
@@ -292,6 +294,7 @@ fn run_random_actions(
             &binary_path,
             verbose,
             use_no_db,
+            is_upstream,
             workers,
             &implementation,
             test_import,
@@ -353,12 +356,14 @@ fn run_random_actions(
 
         // Run the test
         let logger = Logger::new(verbosity, false);
+        let is_upstream = matches!(implementation, Implementation::Upstream);
         if let Err(e) = run_test(
             iter_seed,
             actions_per_iter,
             &binary_path,
             &logger,
             use_no_db,
+            is_upstream,
             test_import,
         ) {
             eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
@@ -407,6 +412,7 @@ fn run_parallel_stress_test(
     binary_path: &str,
     verbose: bool,
     use_no_db: bool,
+    is_upstream: bool,
     workers: usize,
     implementation: &Implementation,
     test_import: bool,
@@ -472,6 +478,7 @@ fn run_parallel_stress_test(
                     &binary_path,
                     &logger,
                     use_no_db,
+                    is_upstream,
                     test_import,
                 ) {
                     // Signal all workers to stop
@@ -569,6 +576,7 @@ fn run_test(
     binary_path: &str,
     logger: &Logger,
     use_no_db: bool,
+    is_upstream: bool,
     test_import: bool,
 ) -> Result<()> {
     // Create a temporary directory for this test
@@ -664,8 +672,15 @@ fn run_test(
     ));
 
     // Verify final state consistency
-    let (bytes_written, num_issues) =
-        verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
+    let (bytes_written, num_issues) = verify_consistency(
+        &executor,
+        work_dir,
+        binary_path,
+        logger,
+        use_no_db,
+        is_upstream,
+        &reference,
+    )?;
 
     // Print summary stats
     logger.log(format!("📊 Issues generated: {}", num_issues));
@@ -676,7 +691,7 @@ fn run_test(
     ));
 
     // If testing upstream and import test is enabled, verify JSONL import
-    if use_no_db && test_import {
+    if is_upstream && test_import {
         logger.log("\n📦 Testing JSONL import capability...".to_string());
         test_jsonl_import(work_dir, binary_path, logger, &reference)?;
     }
@@ -712,8 +727,10 @@ fn is_critical_failure(result: &minibeads::beads_generator::ExecutionResult) -> 
 fn verify_consistency(
     _executor: &ActionExecutor,
     work_dir: &str,
+    binary_path: &str,
     logger: &Logger,
-    use_no_db: bool,
+    _use_no_db: bool,
+    is_upstream: bool,
     reference: &ReferenceInterpreter,
 ) -> Result<(u64, usize)> {
     logger.verbose(
@@ -735,33 +752,13 @@ fn verify_consistency(
         total_size
     ));
 
-    // Step 2: For upstream with --no-db, verify that SQLite databases DO NOT exist
-    if use_no_db {
-        let db_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.path.extension().map(|ext| ext == "db").unwrap_or(false))
-            .collect();
-
-        if !db_files.is_empty() {
-            return Err(anyhow::anyhow!(
-                "SQLite database files found in .beads/ directory when using --no-db: {:?}",
-                db_files
-                    .iter()
-                    .map(|f| f.path.file_name())
-                    .collect::<Vec<_>>()
-            ));
-        }
-
-        logger.verbose("   ✓ No SQLite database files (--no-db mode)".to_string());
-    }
-
-    // Step 3: Verify config.yaml and compare prefix
+    // Step 2: Verify config.yaml and compare prefix
     verify_config(&beads_dir, reference, logger)?;
 
-    // Step 4: Compare actual issues with reference state
-    if use_no_db {
-        // Upstream: verify issues.jsonl
-        verify_upstream_state(&beads_dir, reference, logger)?;
+    // Step 3: Compare actual issues with reference state
+    if is_upstream {
+        // Upstream: Export database to JSONL in two ways and verify both match reference
+        verify_upstream_dual_export(work_dir, binary_path, reference, logger)?;
     } else {
         // Minibeads: verify markdown files in issues/ directory
         verify_minibeads_state(&beads_dir, reference, logger)?;
@@ -882,43 +879,121 @@ fn verify_minibeads_state(
     Ok(())
 }
 
-/// Verify upstream state (issues.jsonl)
-fn verify_upstream_state(
-    beads_dir: &std::path::Path,
+/// Verify upstream state with dual export verification
+/// Exports database using both `bd export` and `bd sync --flush-only` and verifies both match reference
+fn verify_upstream_dual_export(
+    work_dir: &str,
+    binary_path: &str,
     reference: &ReferenceInterpreter,
     logger: &Logger,
 ) -> Result<()> {
-    let jsonl_path = beads_dir.join("issues.jsonl");
+    logger.verbose("   Performing dual export verification...".to_string());
 
-    if !jsonl_path.exists() {
-        // No issues.jsonl is valid if no issues were created
-        if reference.get_final_state().is_empty() {
-            logger.verbose("   ✓ No issues.jsonl (no issues created)".to_string());
-            return Ok(());
-        } else {
-            return Err(anyhow::anyhow!(
-                "Reference has {} issues but issues.jsonl does not exist",
-                reference.get_final_state().len()
-            ));
-        }
+    // Path 1: Export using `bd export -o custom.jsonl`
+    let custom_export_path = PathBuf::from(work_dir).join("custom.jsonl");
+    logger.verbose(format!(
+        "   Exporting via 'bd export -o {}'...",
+        custom_export_path.display()
+    ));
+
+    let export_output = std::process::Command::new(binary_path)
+        .current_dir(work_dir)
+        .args(["export", "-o", custom_export_path.to_str().unwrap()])
+        .output()?;
+
+    if !export_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to export database via 'bd export':\n{}",
+            String::from_utf8_lossy(&export_output.stderr)
+        ));
     }
 
-    // Parse JSONL file
-    let mut actual_issues = std::collections::HashMap::new();
-    let jsonl_content = std::fs::read_to_string(&jsonl_path)?;
-    for line in jsonl_content.lines() {
+    logger.verbose("   ✓ bd export completed".to_string());
+
+    // Path 2: Export using `bd sync --flush-only` to create .beads/issues.jsonl
+    logger.verbose("   Flushing via 'bd sync --flush-only'...".to_string());
+
+    let sync_output = std::process::Command::new(binary_path)
+        .current_dir(work_dir)
+        .args(["sync", "--flush-only"])
+        .output()?;
+
+    if !sync_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to flush database via 'bd sync --flush-only':\n{}",
+            String::from_utf8_lossy(&sync_output.stderr)
+        ));
+    }
+
+    logger.verbose("   ✓ bd sync --flush-only completed".to_string());
+
+    // Parse both JSONL files
+    let beads_dir = PathBuf::from(work_dir).join(".beads");
+    let sync_jsonl_path = beads_dir.join("issues.jsonl");
+
+    // Verify both files exist
+    if !custom_export_path.exists() {
+        return Err(anyhow::anyhow!("custom.jsonl not created by bd export"));
+    }
+    if !sync_jsonl_path.exists() {
+        return Err(anyhow::anyhow!(
+            ".beads/issues.jsonl not created by bd sync --flush-only"
+        ));
+    }
+
+    // Parse custom export
+    logger.verbose("   Parsing custom.jsonl...".to_string());
+    let custom_issues = parse_jsonl_file(&custom_export_path)?;
+    logger.verbose(format!(
+        "   ✓ Parsed {} issues from custom.jsonl",
+        custom_issues.len()
+    ));
+
+    // Parse sync export
+    logger.verbose("   Parsing .beads/issues.jsonl...".to_string());
+    let sync_issues = parse_jsonl_file(&sync_jsonl_path)?;
+    logger.verbose(format!(
+        "   ✓ Parsed {} issues from issues.jsonl",
+        sync_issues.len()
+    ));
+
+    // Verify both exports match each other
+    logger.verbose("   Verifying both exports match each other...".to_string());
+    compare_issue_states(&custom_issues, &sync_issues, logger)?;
+    logger.verbose("   ✓ Both exports match each other".to_string());
+
+    // Verify both exports match reference
+    logger.verbose("   Verifying exports match reference...".to_string());
+    compare_issue_states(&custom_issues, reference.get_final_state(), logger)?;
+    logger.verbose("   ✓ Exports match reference".to_string());
+
+    Ok(())
+}
+
+/// Parse a JSONL file into a HashMap of ReferenceIssue
+fn parse_jsonl_file(
+    path: &PathBuf,
+) -> Result<std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>> {
+    let mut issues = std::collections::HashMap::new();
+    let jsonl_content = std::fs::read_to_string(path)?;
+
+    for (line_num, line) in jsonl_content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let issue: serde_json::Value = serde_json::from_str(line)?;
+        let issue: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse JSONL line {} in {}: {}",
+                line_num + 1,
+                path.display(),
+                e
+            )
+        })?;
         let ref_issue = parse_jsonl_to_reference_issue(&issue)?;
-        actual_issues.insert(ref_issue.id.clone(), ref_issue);
+        issues.insert(ref_issue.id.clone(), ref_issue);
     }
 
-    // Compare with reference
-    compare_issue_states(&actual_issues, reference.get_final_state(), logger)?;
-
-    Ok(())
+    Ok(issues)
 }
 
 /// Parse a minibeads markdown issue file to ReferenceIssue using shared format code
