@@ -11,16 +11,19 @@ updated_at: 2025-10-30T13:56:02.945405078+00:00
 
 Track testing improvements for minibeads.
 
-## Current Status
-- ✅ 3 unit tests passing (format, lock)
+## Current Status (as of 2025-10-31_#67(44885ef))
+- ✅ 3 unit tests passing (format, lock, issue_roundtrip)
 - ✅ Makefile with validate target created
-- ✅ Clippy checks passing
+- ✅ Clippy checks passing with -D warnings
 - ✅ E2E test infrastructure complete with auto-discovery
-- ✅ Shell-based e2e tests: 64 total assertions
-  - basic_operations.sh: 36 assertions (core commands)
-  - help_version.sh: 28 assertions (help/version/quickstart)
+- ✅ Shell-based e2e tests: 104 total assertions across 3 test files
+  - basic_operations.sh: 38 assertions (core commands: create, list, show, update, close, reopen, dep)
+  - help_version.sh: 29 assertions (help, version, quickstart validation)
+  - export_interop.sh: 37 assertions (export functionality, JSONL format)
 - ✅ Rust test harness for automatic shell test discovery
 - ✅ GitHub Actions CI/CD pipeline configured
+  - Multi-platform testing (Linux, macOS, Windows)
+  - All platforms passing as of 2025-10-31
 - ✅ Phase 1 test porting complete (see minibeads-14)
 - 🔲 Need Phase 2 unit tests for edge cases
 - 🔲 Need Phase 4 MCP integration tests
@@ -33,14 +36,16 @@ Track testing improvements for minibeads.
 - [ ] Implement test porting plan from upstream beads (see minibeads-14)
 
 ## Completed
-- [x] Created tests/basic_operations.sh with 36 test assertions
-- [x] Created tests/help_version.sh with 28 test assertions
+- [x] Created tests/basic_operations.sh with 38 test assertions
+- [x] Created tests/help_version.sh with 29 test assertions
+- [x] Created tests/export_interop.sh with 37 test assertions
 - [x] Created tests/e2e_tests.rs Rust harness with auto-discovery
 - [x] Integrated with cargo test
-- [x] All tests passing in make validate
+- [x] All tests passing in make validate (104 shell assertions + 3 unit tests)
 - [x] Phase 1 test porting complete (all implemented commands covered)
 - [x] Added tests for numeric shorthand in bd show
 - [x] Added tests for multi-issue bd show
+- [x] Added comprehensive export/JSONL interop tests
 - [x] GitHub Actions CI with multiple jobs:
   - Test suite (make validate)
   - Code coverage (tarpaulin)
