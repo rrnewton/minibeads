@@ -186,6 +186,20 @@ fn run_random_actions(
     parallel: Option<usize>,
     test_import: bool,
 ) -> Result<()> {
+    // Sample entropy ONCE at the beginning if requested
+    // After this point, everything is deterministic based on this seed
+    let base_seed = if seed_from_entropy {
+        let mut rng = rand::thread_rng();
+        let entropy_seed = rng.next_u64();
+        println!("🎲 Sampled entropy seed: {}", entropy_seed);
+        println!("   (Use --seed {} to reproduce this run)\n", entropy_seed);
+        entropy_seed
+    } else if let Some(s) = seed {
+        s
+    } else {
+        42u64 // Default seed
+    };
+
     // Determine the binary path
     let binary_path = if let Some(path) = binary {
         // Explicit path provided
@@ -267,11 +281,11 @@ fn run_random_actions(
 
         println!("\n🚀 Parallel stress test mode: {} workers", workers);
         println!("Duration: {} seconds", seconds.unwrap());
+        println!("Base seed: {}", base_seed);
         println!("Will stop on first failure across all workers\n");
 
         return run_parallel_stress_test(
-            seed,
-            seed_from_entropy,
+            base_seed,
             seconds.unwrap(),
             actions_per_iter,
             &binary_path,
@@ -283,144 +297,102 @@ fn run_random_actions(
         );
     }
 
-    // Choose between iteration-based or time-based testing
+    // Unified sequential testing loop (handles both time-based and iteration-based modes)
+    let start_time = seconds.map(|_| std::time::Instant::now());
+    let duration = seconds.map(std::time::Duration::from_secs);
+
+    // Print mode-specific header
     if let Some(duration_secs) = seconds {
-        // Time-based stress testing
         println!(
             "\n⏱️  Stress test mode: running for {} seconds",
             duration_secs
         );
         println!("Will stop on first failure or when time expires\n");
+    }
 
-        let start_time = std::time::Instant::now();
-        let duration = std::time::Duration::from_secs(duration_secs);
-        let mut iter = 0;
+    let verbosity = if verbose {
+        LogLevel::Verbose
+    } else {
+        LogLevel::Normal
+    };
 
-        while start_time.elapsed() < duration {
-            iter += 1;
+    let mut iter = 0usize;
+    loop {
+        // Check stopping condition
+        if let Some(d) = duration {
+            if start_time.unwrap().elapsed() >= d {
+                break;
+            }
+        } else if iter >= iters {
+            break;
+        }
 
-            let iter_seed = if seed_from_entropy {
-                // Generate random seed
-                let mut rng = rand::thread_rng();
-                rng.next_u64()
-            } else if let Some(s) = seed {
-                // Use provided seed offset by iteration
-                s.wrapping_add(iter as u64)
-            } else {
-                // Default seed offset by iteration
-                42u64.wrapping_add(iter as u64)
-            };
+        iter += 1;
 
-            let elapsed = start_time.elapsed().as_secs();
-            println!("\n{}", "=".repeat(60));
+        // Deterministic seed based on base_seed + iteration
+        let iter_seed = if iters == 1 && seconds.is_none() {
+            base_seed // Single iteration mode: use exact seed
+        } else {
+            base_seed.wrapping_add(iter as u64)
+        };
+
+        // Print iteration header
+        println!("\n{}", "=".repeat(60));
+        if let Some(duration_secs) = seconds {
+            let elapsed = start_time.unwrap().elapsed().as_secs();
             println!(
                 "Iteration {} | Elapsed: {}s / {}s",
                 iter, elapsed, duration_secs
             );
-            println!("SEED: {}", iter_seed);
-            println!("{}\n", "=".repeat(60));
+        } else {
+            println!("Iteration {}/{}", iter, iters);
+        }
+        println!("SEED: {}", iter_seed);
+        println!("{}\n", "=".repeat(60));
 
-            // Run the test with this seed
-            let verbosity = if verbose {
-                LogLevel::Verbose
-            } else {
-                LogLevel::Normal
+        // Run the test
+        let logger = Logger::new(verbosity, false);
+        if let Err(e) = run_test(
+            iter_seed,
+            actions_per_iter,
+            &binary_path,
+            &logger,
+            use_no_db,
+            test_import,
+        ) {
+            eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
+            eprintln!("Error: {:?}", e);
+            eprintln!("\nTo reproduce this failure, run:");
+            let impl_flag = match implementation {
+                Implementation::Minibeads => "--impl minibeads",
+                Implementation::Upstream => "--impl upstream",
             };
-            let logger = Logger::new(verbosity, false);
-            if let Err(e) = run_test(
-                iter_seed,
-                actions_per_iter,
-                &binary_path,
-                &logger,
-                use_no_db,
-                test_import,
-            ) {
-                eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
-                eprintln!("Error: {:?}", e);
-                eprintln!("\nTo reproduce this failure, run:");
-                let impl_flag = match implementation {
-                    Implementation::Minibeads => "--impl minibeads",
-                    Implementation::Upstream => "--impl upstream",
-                };
-                eprintln!(
-                    "  test_minibeads random-actions --seed {} {}",
-                    iter_seed, impl_flag
-                );
+            eprintln!(
+                "  test_minibeads random-actions --seed {} {}",
+                iter_seed, impl_flag
+            );
+            if seconds.is_some() {
                 eprintln!("\nStopping on first failure after {} iterations", iter);
-                std::process::exit(1);
             }
-
-            println!("✅ Iteration {} completed successfully", iter);
+            std::process::exit(1);
         }
 
-        let total_elapsed = start_time.elapsed();
-        println!("\n{}", "=".repeat(60));
+        println!("✅ Iteration {} completed successfully", iter);
+    }
+
+    // Print summary
+    println!("\n{}", "=".repeat(60));
+    if seconds.is_some() {
+        let total_elapsed = start_time.unwrap().elapsed();
         println!(
             "✅ Stress test completed! {} iterations in {:.1}s",
             iter,
             total_elapsed.as_secs_f64()
         );
-        println!("{}", "=".repeat(60));
     } else {
-        // Iteration-based testing
-        for iter in 0..iters {
-            let iter_seed = if seed_from_entropy {
-                // Generate random seed
-                let mut rng = rand::thread_rng();
-                rng.next_u64()
-            } else if let Some(s) = seed {
-                // Use provided seed (possibly offset for multiple iterations)
-                if iters > 1 {
-                    s.wrapping_add(iter as u64)
-                } else {
-                    s
-                }
-            } else {
-                // Default seed
-                42u64.wrapping_add(iter as u64)
-            };
-
-            println!("\n{}", "=".repeat(60));
-            println!("Iteration {}/{}", iter + 1, iters);
-            println!("SEED: {}", iter_seed);
-            println!("{}\n", "=".repeat(60));
-
-            // Run the test with this seed
-            let verbosity = if verbose {
-                LogLevel::Verbose
-            } else {
-                LogLevel::Normal
-            };
-            let logger = Logger::new(verbosity, false);
-            if let Err(e) = run_test(
-                iter_seed,
-                actions_per_iter,
-                &binary_path,
-                &logger,
-                use_no_db,
-                test_import,
-            ) {
-                eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
-                eprintln!("Error: {:?}", e);
-                eprintln!("\nTo reproduce this failure, run:");
-                let impl_flag = match implementation {
-                    Implementation::Minibeads => "--impl minibeads",
-                    Implementation::Upstream => "--impl upstream",
-                };
-                eprintln!(
-                    "  test_minibeads random-actions --seed {} {}",
-                    iter_seed, impl_flag
-                );
-                std::process::exit(1);
-            }
-
-            println!("✅ Iteration {} completed successfully\n", iter + 1);
-        }
-
-        println!("\n{}", "=".repeat(60));
         println!("✅ All {} iterations passed!", iters);
-        println!("{}", "=".repeat(60));
     }
+    println!("{}", "=".repeat(60));
 
     Ok(())
 }
@@ -428,8 +400,7 @@ fn run_random_actions(
 /// Run parallel stress tests with multiple worker threads
 #[allow(clippy::too_many_arguments)]
 fn run_parallel_stress_test(
-    seed: Option<u64>,
-    seed_from_entropy: bool,
+    base_seed: u64,
     duration_secs: u64,
     actions_per_iter: usize,
     binary_path: &str,
@@ -483,19 +454,15 @@ fn run_parallel_stress_test(
             };
             let logger = Logger::new(verbosity, true);
 
-            // Each worker gets its own seed offset
-            let base_seed = if seed_from_entropy {
-                let mut rng = rand::thread_rng();
-                rng.next_u64()
-            } else if let Some(s) = seed {
-                s.wrapping_add((worker_id as u64) * 1000000)
-            } else {
-                42u64.wrapping_add((worker_id as u64) * 1000000)
-            };
+            // Each worker gets its own deterministic seed offset from the base seed
+            // Worker 0: base_seed + 0
+            // Worker 1: base_seed + 1000000
+            // Worker 2: base_seed + 2000000, etc.
+            let worker_base_seed = base_seed.wrapping_add((worker_id as u64) * 1000000);
 
             while start_time.elapsed() < duration && !should_stop.load(Ordering::Relaxed) {
                 local_iterations += 1;
-                let iter_seed = base_seed.wrapping_add(local_iterations);
+                let iter_seed = worker_base_seed.wrapping_add(local_iterations);
 
                 // Run the test
                 if let Err(e) = run_test(
