@@ -751,12 +751,7 @@ fn verify_consistency(
     }
 
     // Step 3: Verify config.yaml and compare prefix
-    let config_path = beads_dir.join("config.yaml");
-    if !config_path.exists() {
-        return Err(anyhow::anyhow!("config.yaml does not exist"));
-    }
-
-    verify_config(&config_path, reference, logger)?;
+    verify_config(&beads_dir, reference, logger)?;
 
     // Step 4: Compare actual issues with reference state
     if use_no_db {
@@ -816,21 +811,17 @@ fn walk_beads_directory(
     Ok((files, total_size))
 }
 
-/// Parse and verify config.yaml
+/// Parse and verify config.yaml using shared Storage code
 fn verify_config(
-    config_path: &std::path::Path,
+    beads_dir: &std::path::Path,
     reference: &ReferenceInterpreter,
     logger: &Logger,
 ) -> Result<()> {
-    let config_str = std::fs::read_to_string(config_path)?;
-    let config: serde_yaml::Value = serde_yaml::from_str(&config_str)?;
+    use minibeads::storage::Storage;
 
-    // Minibeads uses "issue-prefix" in config.yaml
-    let actual_prefix = config
-        .get("issue-prefix")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("issue-prefix not found in config.yaml"))?;
-
+    // Use Storage::get_prefix() to read config - this is the single source of truth
+    let storage = Storage::open(beads_dir.to_path_buf())?;
+    let actual_prefix = storage.get_prefix()?;
     let expected_prefix = reference.get_prefix();
 
     if actual_prefix != expected_prefix {
@@ -925,75 +916,32 @@ fn verify_upstream_state(
     Ok(())
 }
 
-/// Parse a minibeads markdown issue file to ReferenceIssue
+/// Parse a minibeads markdown issue file to ReferenceIssue using shared format code
 fn parse_minibeads_issue(path: &PathBuf) -> Result<minibeads::beads_generator::ReferenceIssue> {
     use minibeads::beads_generator::ReferenceIssue;
+    use minibeads::format::markdown_to_issue;
 
+    // Extract issue ID from filename
+    let issue_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Cannot extract ID from filename {:?}", path))?;
+
+    // Read file content
     let content = std::fs::read_to_string(path)?;
 
-    // Split into frontmatter and body
-    let parts: Vec<&str> = content.split("---").collect();
-    if parts.len() < 3 {
-        return Err(anyhow::anyhow!("Invalid markdown format in {:?}", path));
-    }
+    // Use the standard markdown parser from the main codebase
+    let issue = markdown_to_issue(issue_id, &content)?;
 
-    let frontmatter: serde_yaml::Value = serde_yaml::from_str(parts[1])?;
-    let body = parts[2].trim();
-
-    let id = if let Some(id_value) = frontmatter.get("id").and_then(|v| v.as_str()) {
-        id_value.to_string()
-    } else {
-        // Extract ID from filename if not in frontmatter
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Cannot extract ID from filename {:?}", path))?
-            .to_string()
-    };
-
-    let title = frontmatter
-        .get("title")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("title not found in {:?}", path))?
-        .to_string();
-
-    let status_str = frontmatter
-        .get("status")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("status not found in {:?}", path))?;
-    let status = status_str.parse()?;
-
-    let priority = frontmatter
-        .get("priority")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow::anyhow!("priority not found in {:?}", path))?
-        as i32;
-
-    let issue_type_str = frontmatter
-        .get("issue_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("issue_type not found in {:?}", path))?;
-    let issue_type = issue_type_str.parse()?;
-
-    // Parse dependencies from frontmatter
-    // In minibeads format, depends_on is a YAML map: { test-1: related, test-2: blocks }
-    let mut depends_on = std::collections::HashMap::new();
-    if let Some(deps) = frontmatter.get("depends_on").and_then(|v| v.as_mapping()) {
-        for (dep_id_val, dep_type_val) in deps {
-            let dep_id = dep_id_val.as_str().unwrap_or("").to_string();
-            let dep_type_str = dep_type_val.as_str().unwrap_or("blocks");
-            let dep_type = dep_type_str.parse()?;
-            depends_on.insert(dep_id, dep_type);
-        }
-    }
-
+    // Convert from full Issue to simplified ReferenceIssue
     Ok(ReferenceIssue {
-        id,
-        title,
-        description: body.to_string(),
-        status,
-        priority,
-        issue_type,
-        depends_on,
+        id: issue.id,
+        title: issue.title,
+        description: issue.description,
+        status: issue.status,
+        priority: issue.priority,
+        issue_type: issue.issue_type,
+        depends_on: issue.depends_on,
     })
 }
 
