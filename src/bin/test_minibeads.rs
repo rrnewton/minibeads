@@ -35,8 +35,14 @@ enum Commands {
         seed_from_entropy: bool,
 
         /// Number of iterations to run (each with a different seed)
-        #[arg(long, default_value = "1")]
+        /// Mutually exclusive with --seconds
+        #[arg(long, default_value = "1", conflicts_with = "seconds")]
         iters: usize,
+
+        /// Run stress test for specified number of seconds
+        /// Mutually exclusive with --iters
+        #[arg(long, conflicts_with = "iters")]
+        seconds: Option<u64>,
 
         /// Number of actions to generate per iteration
         #[arg(long, default_value = "20")]
@@ -70,6 +76,7 @@ fn main() -> Result<()> {
             seed,
             seed_from_entropy,
             iters,
+            seconds,
             actions_per_iter,
             r#impl,
             binary,
@@ -78,6 +85,7 @@ fn main() -> Result<()> {
             seed,
             seed_from_entropy,
             iters,
+            seconds,
             actions_per_iter,
             r#impl,
             binary,
@@ -86,10 +94,12 @@ fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_random_actions(
     seed: Option<u64>,
     seed_from_entropy: bool,
     iters: usize,
+    seconds: Option<u64>,
     actions_per_iter: usize,
     implementation: Implementation,
     binary: Option<String>,
@@ -154,60 +164,133 @@ fn run_random_actions(
     println!("Testing implementation: {}", impl_name);
     println!("Binary: {}", binary_path);
 
-    // Run iterations
-    for iter in 0..iters {
-        let iter_seed = if seed_from_entropy {
-            // Generate random seed
-            let mut rng = rand::thread_rng();
-            rng.next_u64()
-        } else if let Some(s) = seed {
-            // Use provided seed (possibly offset for multiple iterations)
-            if iters > 1 {
+    // Determine if we should use --no-db flag (for upstream)
+    let use_no_db = matches!(implementation, Implementation::Upstream);
+
+    // Choose between iteration-based or time-based testing
+    if let Some(duration_secs) = seconds {
+        // Time-based stress testing
+        println!(
+            "\n⏱️  Stress test mode: running for {} seconds",
+            duration_secs
+        );
+        println!("Will stop on first failure or when time expires\n");
+
+        let start_time = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(duration_secs);
+        let mut iter = 0;
+
+        while start_time.elapsed() < duration {
+            iter += 1;
+
+            let iter_seed = if seed_from_entropy {
+                // Generate random seed
+                let mut rng = rand::thread_rng();
+                rng.next_u64()
+            } else if let Some(s) = seed {
+                // Use provided seed offset by iteration
                 s.wrapping_add(iter as u64)
             } else {
-                s
-            }
-        } else {
-            // Default seed
-            42u64.wrapping_add(iter as u64)
-        };
-
-        println!("\n{}", "=".repeat(60));
-        println!("Iteration {}/{}", iter + 1, iters);
-        println!("SEED: {}", iter_seed);
-        println!("{}\n", "=".repeat(60));
-
-        // Determine if we should use --no-db flag (for upstream)
-        let use_no_db = matches!(implementation, Implementation::Upstream);
-
-        // Run the test with this seed
-        if let Err(e) = run_test(
-            iter_seed,
-            actions_per_iter,
-            &binary_path,
-            verbose,
-            use_no_db,
-        ) {
-            eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
-            eprintln!("Error: {:?}", e);
-            eprintln!("\nTo reproduce this failure, run:");
-            let impl_flag = match implementation {
-                Implementation::Minibeads => "--impl minibeads",
-                Implementation::Upstream => "--impl upstream",
+                // Default seed offset by iteration
+                42u64.wrapping_add(iter as u64)
             };
-            eprintln!(
-                "  test_minibeads random-actions --seed {} {}",
-                iter_seed, impl_flag
+
+            let elapsed = start_time.elapsed().as_secs();
+            println!("\n{}", "=".repeat(60));
+            println!(
+                "Iteration {} | Elapsed: {}s / {}s",
+                iter, elapsed, duration_secs
             );
-            std::process::exit(1);
+            println!("SEED: {}", iter_seed);
+            println!("{}\n", "=".repeat(60));
+
+            // Run the test with this seed
+            if let Err(e) = run_test(
+                iter_seed,
+                actions_per_iter,
+                &binary_path,
+                verbose,
+                use_no_db,
+            ) {
+                eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
+                eprintln!("Error: {:?}", e);
+                eprintln!("\nTo reproduce this failure, run:");
+                let impl_flag = match implementation {
+                    Implementation::Minibeads => "--impl minibeads",
+                    Implementation::Upstream => "--impl upstream",
+                };
+                eprintln!(
+                    "  test_minibeads random-actions --seed {} {}",
+                    iter_seed, impl_flag
+                );
+                eprintln!("\nStopping on first failure after {} iterations", iter);
+                std::process::exit(1);
+            }
+
+            println!("✅ Iteration {} completed successfully", iter);
         }
 
-        println!("✅ Iteration {} completed successfully\n", iter + 1);
-    }
+        let total_elapsed = start_time.elapsed();
+        println!("\n{}", "=".repeat(60));
+        println!(
+            "✅ Stress test completed! {} iterations in {:.1}s",
+            iter,
+            total_elapsed.as_secs_f64()
+        );
+        println!("{}", "=".repeat(60));
+    } else {
+        // Iteration-based testing
+        for iter in 0..iters {
+            let iter_seed = if seed_from_entropy {
+                // Generate random seed
+                let mut rng = rand::thread_rng();
+                rng.next_u64()
+            } else if let Some(s) = seed {
+                // Use provided seed (possibly offset for multiple iterations)
+                if iters > 1 {
+                    s.wrapping_add(iter as u64)
+                } else {
+                    s
+                }
+            } else {
+                // Default seed
+                42u64.wrapping_add(iter as u64)
+            };
 
-    println!("\n{}", "=".repeat(60));
-    println!("✅ All {} iterations passed!", iters);
-    println!("{}", "=".repeat(60));
+            println!("\n{}", "=".repeat(60));
+            println!("Iteration {}/{}", iter + 1, iters);
+            println!("SEED: {}", iter_seed);
+            println!("{}\n", "=".repeat(60));
+
+            // Run the test with this seed
+            if let Err(e) = run_test(
+                iter_seed,
+                actions_per_iter,
+                &binary_path,
+                verbose,
+                use_no_db,
+            ) {
+                eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
+                eprintln!("Error: {:?}", e);
+                eprintln!("\nTo reproduce this failure, run:");
+                let impl_flag = match implementation {
+                    Implementation::Minibeads => "--impl minibeads",
+                    Implementation::Upstream => "--impl upstream",
+                };
+                eprintln!(
+                    "  test_minibeads random-actions --seed {} {}",
+                    iter_seed, impl_flag
+                );
+                std::process::exit(1);
+            }
+
+            println!("✅ Iteration {} completed successfully\n", iter + 1);
+        }
+
+        println!("\n{}", "=".repeat(60));
+        println!("✅ All {} iterations passed!", iters);
+        println!("{}", "=".repeat(60));
+    }
 
     Ok(())
 }
