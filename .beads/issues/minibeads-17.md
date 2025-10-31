@@ -1,10 +1,11 @@
 ---
 title: Implement bd rename operation from upstream
-status: open
+status: closed
 priority: 3
 issue_type: feature
 created_at: 2025-10-30T20:39:02.772892838+00:00
-updated_at: 2025-10-30T20:39:02.772892838+00:00
+updated_at: 2025-10-31T02:59:34.645939466+00:00
+closed_at: 2025-10-31T02:59:34.645939145+00:00
 ---
 
 # Description

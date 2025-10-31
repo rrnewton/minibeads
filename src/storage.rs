@@ -353,6 +353,149 @@ impl Storage {
         Ok(issue)
     }
 
+    /// Rename an issue ID
+    ///
+    /// This operation:
+    /// - Renames the markdown file
+    /// - Updates the ID in the issue frontmatter
+    /// - Updates all references in other issues' dependencies
+    /// - Is atomic (all updates succeed or none)
+    pub fn rename_issue(&self, old_id: &str, new_id: &str, dry_run: bool) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let old_path = self.issues_dir.join(format!("{}.md", old_id));
+        let new_path = self.issues_dir.join(format!("{}.md", new_id));
+
+        // Validate old issue exists
+        if !old_path.exists() {
+            anyhow::bail!("Issue not found: {}", old_id);
+        }
+
+        // Validate new ID doesn't already exist
+        if new_path.exists() {
+            anyhow::bail!("Target issue ID already exists: {}", new_id);
+        }
+
+        // Track all changes for dry-run mode
+        let mut changes = Vec::new();
+        changes.push(format!("Rename file: {}.md -> {}.md", old_id, new_id));
+
+        // Load the issue to rename
+        let content = fs::read_to_string(&old_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(old_id, &content)?;
+
+        // Update the issue's ID
+        issue.id = new_id.to_string();
+        issue.updated_at = chrono::Utc::now();
+        changes.push(format!(
+            "Update ID in frontmatter: {} -> {}",
+            old_id, new_id
+        ));
+
+        // Find all issues that reference the old ID
+        let all_issues = self.list_all_issues_no_dependents()?;
+        let mut issues_to_update = Vec::new();
+
+        for other_issue in all_issues {
+            if other_issue.id == old_id {
+                continue; // Skip the renamed issue itself
+            }
+
+            // Check if this issue depends on the renamed issue
+            if other_issue.depends_on.contains_key(old_id) {
+                changes.push(format!(
+                    "Update dependency in {}: {} -> {}",
+                    other_issue.id, old_id, new_id
+                ));
+                issues_to_update.push(other_issue);
+            }
+        }
+
+        // If dry-run, return changes without applying
+        if dry_run {
+            return Ok(changes);
+        }
+
+        // Apply changes atomically
+        // First, write all updated issues
+        for mut other_issue in issues_to_update {
+            // Update the dependency reference
+            if let Some(dep_type) = other_issue.depends_on.remove(old_id) {
+                other_issue.depends_on.insert(new_id.to_string(), dep_type);
+                other_issue.updated_at = chrono::Utc::now();
+
+                // Write the updated issue
+                let other_path = self.issues_dir.join(format!("{}.md", other_issue.id));
+                let markdown = issue_to_markdown(&other_issue)?;
+                fs::write(&other_path, markdown)
+                    .context(format!("Failed to update issue: {}", other_issue.id))?;
+            }
+        }
+
+        // Write the renamed issue with new ID
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&new_path, markdown).context("Failed to write renamed issue")?;
+
+        // Remove the old file
+        fs::remove_file(&old_path).context("Failed to remove old issue file")?;
+
+        Ok(changes)
+    }
+
+    /// Repair broken references by scanning all issues and fixing stale references
+    ///
+    /// This scans all issues and removes references to nonexistent issues
+    pub fn repair_references(&self, dry_run: bool) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let mut changes = Vec::new();
+        let all_issues = self.list_all_issues_no_dependents()?;
+
+        // Build a set of all valid issue IDs
+        let valid_ids: std::collections::HashSet<String> =
+            all_issues.iter().map(|i| i.id.clone()).collect();
+
+        // Find issues with broken references
+        for issue in all_issues {
+            let mut broken_refs = Vec::new();
+
+            for dep_id in issue.depends_on.keys() {
+                if !valid_ids.contains(dep_id) {
+                    broken_refs.push(dep_id.clone());
+                }
+            }
+
+            if !broken_refs.is_empty() {
+                for broken_ref in &broken_refs {
+                    changes.push(format!(
+                        "Remove broken reference in {}: {} (does not exist)",
+                        issue.id, broken_ref
+                    ));
+                }
+
+                // If not dry-run, apply the fix
+                if !dry_run {
+                    let mut updated_issue = issue.clone();
+                    for broken_ref in &broken_refs {
+                        updated_issue.depends_on.remove(broken_ref);
+                    }
+                    updated_issue.updated_at = chrono::Utc::now();
+
+                    let issue_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
+                    let markdown = issue_to_markdown(&updated_issue)?;
+                    fs::write(&issue_path, markdown)
+                        .context(format!("Failed to update issue: {}", updated_issue.id))?;
+                }
+            }
+        }
+
+        if changes.is_empty() {
+            changes.push("No broken references found".to_string());
+        }
+
+        Ok(changes)
+    }
+
     /// Add a dependency between issues
     pub fn add_dependency(
         &self,

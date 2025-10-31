@@ -267,6 +267,23 @@ enum Commands {
         reason: Option<String>,
     },
 
+    /// Rename an issue ID
+    Rename {
+        /// Current issue ID
+        old_id: String,
+
+        /// New issue ID
+        new_id: String,
+
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Repair broken references (scan all issues and fix stale references)
+        #[arg(long)]
+        repair: bool,
+    },
+
     /// Manage dependencies
     Dep {
         #[command(subcommand)]
@@ -763,6 +780,59 @@ fn run() -> Result<()> {
             } else {
                 for issue in reopened {
                     println!("Reopened issue: {}", issue.id);
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Rename {
+            old_id,
+            new_id,
+            dry_run,
+            repair,
+        } => {
+            let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            if repair {
+                // Repair mode: scan all issues and fix broken references
+                let changes = storage.repair_references(dry_run)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&changes)?);
+                } else if dry_run {
+                    println!("Dry run - would make the following changes:");
+                    for change in &changes {
+                        println!("  {}", change);
+                    }
+                } else if changes.len() == 1 && changes[0] == "No broken references found" {
+                    println!("No broken references found");
+                } else {
+                    println!("Repaired {} broken reference(s)", changes.len());
+                    for change in &changes {
+                        println!("  {}", change);
+                    }
+                }
+            } else {
+                // Rename mode
+                let changes = storage.rename_issue(&old_id, &new_id, dry_run)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&changes)?);
+                } else if dry_run {
+                    println!("Dry run - would make the following changes:");
+                    for change in &changes {
+                        println!("  {}", change);
+                    }
+                } else {
+                    println!("Successfully renamed {} to {}", old_id, new_id);
+                    if changes.len() > 2 {
+                        println!("Updated {} file(s) with references", changes.len() - 2);
+                    }
                 }
             }
             Ok(())
