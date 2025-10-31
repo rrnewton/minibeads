@@ -1,10 +1,11 @@
 ---
 title: Complete remaining DRY refactoring in test_minibeads.rs
-status: open
+status: closed
 priority: 3
 issue_type: task
 created_at: 2025-10-31T19:25:46.021172621+00:00
-updated_at: 2025-10-31T19:25:46.021172621+00:00
+updated_at: 2025-10-31T19:28:47.239208845+00:00
+closed_at: 2025-10-31T19:28:47.239208565+00:00
 ---
 
 # Description

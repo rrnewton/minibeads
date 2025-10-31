@@ -664,11 +664,16 @@ fn run_test(
     ));
 
     // Verify final state consistency
-    let (bytes_written, num_issues) = verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
+    let (bytes_written, num_issues) =
+        verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
 
     // Print summary stats
     logger.log(format!("📊 Issues generated: {}", num_issues));
-    logger.log(format!("💾 Bytes written: {} ({:.1} KB)", bytes_written, bytes_written as f64 / 1024.0));
+    logger.log(format!(
+        "💾 Bytes written: {} ({:.1} KB)",
+        bytes_written,
+        bytes_written as f64 / 1024.0
+    ));
 
     // If testing upstream and import test is enabled, verify JSONL import
     if use_no_db && test_import {
