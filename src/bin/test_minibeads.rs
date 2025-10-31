@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use minibeads::beads_generator::{ActionExecutor, ActionGenerator, ReferenceInterpreter};
+use minibeads::beads_generator::{ActionExecutor, ActionGenerator, BeadsAction, ReferenceInterpreter};
 use rand::RngCore;
 use std::io::Write;
 use std::path::PathBuf;
@@ -134,6 +134,11 @@ enum Commands {
         /// Exports upstream database to JSONL and verifies minibeads can import it
         #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
         test_import: bool,
+
+        /// ID generation mode: numeric (sequential) or hash (content-based)
+        /// Upstream only supports hash mode
+        #[arg(long, default_value = "numeric")]
+        ids: IdMode,
     },
 }
 
@@ -141,6 +146,12 @@ enum Commands {
 enum Implementation {
     Minibeads,
     Upstream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum IdMode {
+    Numeric,
+    Hash,
 }
 
 fn main() -> Result<()> {
@@ -158,6 +169,7 @@ fn main() -> Result<()> {
             verbose,
             parallel,
             test_import,
+            ids,
         } => run_random_actions(
             seed,
             seed_from_entropy,
@@ -169,6 +181,7 @@ fn main() -> Result<()> {
             verbose,
             parallel,
             test_import,
+            ids,
         ),
     }
 }
@@ -185,6 +198,7 @@ fn run_random_actions(
     verbose: bool,
     parallel: Option<usize>,
     test_import: bool,
+    ids: IdMode,
 ) -> Result<()> {
     // Sample entropy ONCE at the beginning if requested
     // After this point, everything is deterministic based on this seed
@@ -247,6 +261,13 @@ fn run_random_actions(
         Implementation::Upstream => "upstream bd",
     };
 
+    // Validate ID mode compatibility with implementation
+    if matches!(implementation, Implementation::Upstream) && ids == IdMode::Numeric {
+        eprintln!("ERROR: Upstream bd only supports hash-based IDs");
+        eprintln!("       Use --ids=hash when testing with --impl=upstream");
+        std::process::exit(1);
+    }
+
     // Check if binary exists
     if !PathBuf::from(&binary_path).exists() {
         eprintln!("ERROR: Binary not found at: {}", binary_path);
@@ -298,6 +319,7 @@ fn run_random_actions(
             workers,
             &implementation,
             test_import,
+            ids,
         );
     }
 
@@ -365,6 +387,7 @@ fn run_random_actions(
             use_no_db,
             is_upstream,
             test_import,
+            ids,
         ) {
             eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
             eprintln!("Error: {:?}", e);
@@ -416,6 +439,7 @@ fn run_parallel_stress_test(
     workers: usize,
     implementation: &Implementation,
     test_import: bool,
+    ids: IdMode,
 ) -> Result<()> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
@@ -480,6 +504,7 @@ fn run_parallel_stress_test(
                     use_no_db,
                     is_upstream,
                     test_import,
+                    ids,
                 ) {
                     // Signal all workers to stop
                     should_stop.store(true, Ordering::Relaxed);
@@ -578,6 +603,7 @@ fn run_test(
     use_no_db: bool,
     is_upstream: bool,
     test_import: bool,
+    ids: IdMode,
 ) -> Result<()> {
     // Create a temporary directory for this test
     let temp_dir = tempfile::tempdir()?;
@@ -586,7 +612,8 @@ fn run_test(
     logger.log(format!("Working directory: {}", work_dir));
 
     // Create action generator
-    let mut generator = ActionGenerator::new(seed);
+    let use_hash_ids = ids == IdMode::Hash;
+    let mut generator = ActionGenerator::new_with_mode(seed, use_hash_ids);
 
     // Generate action sequence
     let actions = generator.generate_sequence(num_actions);
@@ -603,7 +630,10 @@ fn run_test(
     let executor = ActionExecutor::new(binary_path, work_dir, use_no_db);
 
     // Create reference interpreter to maintain golden state
-    let mut reference = ReferenceInterpreter::new("test".to_string());
+    let mut reference = match ids {
+        IdMode::Numeric => ReferenceInterpreter::new("test".to_string()),
+        IdMode::Hash => ReferenceInterpreter::new_with_hash_ids("test".to_string()),
+    };
 
     // Execute actions
     logger.log("\nExecuting actions (use --verbose for details)...".to_string());
@@ -618,7 +648,36 @@ fn run_test(
                 if result.success {
                     success_count += 1;
                     // Update reference interpreter with successful actions
-                    if let Err(e) = reference.execute(action) {
+                    // For hash mode Create actions, replace the placeholder ID with actual ID
+                    let action_for_ref = if let Some(ref actual_id) = result.actual_issue_id {
+                        if let BeadsAction::Create {
+                            expected_id,
+                            title,
+                            priority,
+                            issue_type,
+                            description,
+                        } = action
+                        {
+                            if expected_id.contains("HASH") {
+                                // Replace placeholder with actual ID for hash mode
+                                BeadsAction::Create {
+                                    expected_id: actual_id.clone(),
+                                    title: title.clone(),
+                                    priority: *priority,
+                                    issue_type: *issue_type,
+                                    description: description.clone(),
+                                }
+                            } else {
+                                action.clone()
+                            }
+                        } else {
+                            action.clone()
+                        }
+                    } else {
+                        action.clone()
+                    };
+
+                    if let Err(e) = reference.execute(&action_for_ref) {
                         let err_msg = format!("     ❌ Reference interpreter failed: {:?}", e);
                         logger.log(err_msg.clone());
                         logger.dump(); // Dump buffer on failure
@@ -679,7 +738,7 @@ fn run_test(
         logger,
         use_no_db,
         is_upstream,
-        &reference,
+        &mut reference,
     )?;
 
     // Print summary stats
@@ -731,7 +790,7 @@ fn verify_consistency(
     logger: &Logger,
     _use_no_db: bool,
     is_upstream: bool,
-    reference: &ReferenceInterpreter,
+    reference: &mut ReferenceInterpreter,
 ) -> Result<(u64, usize)> {
     logger.verbose(
         "\n🔍 Deep verification: comparing actual state with reference interpreter...".to_string(),
@@ -753,7 +812,9 @@ fn verify_consistency(
     ));
 
     // Step 2: Verify config.yaml and compare prefix
-    verify_config(&beads_dir, reference, logger)?;
+    // For upstream, we need to accept whatever prefix it chose (it ignores --prefix flag)
+    // and update the reference interpreter to match
+    verify_config(&beads_dir, reference, logger, is_upstream)?;
 
     // Step 3: Compare actual issues with reference state
     if is_upstream {
@@ -816,28 +877,38 @@ fn walk_beads_directory(
 /// Parse and verify config.yaml using shared Storage code
 fn verify_config(
     beads_dir: &std::path::Path,
-    reference: &ReferenceInterpreter,
+    reference: &mut ReferenceInterpreter,
     logger: &Logger,
+    is_upstream: bool,
 ) -> Result<()> {
     use minibeads::storage::Storage;
 
     // Use Storage::get_prefix() to read config - this is the single source of truth
     let storage = Storage::open(beads_dir.to_path_buf())?;
     let actual_prefix = storage.get_prefix()?;
-    let expected_prefix = reference.get_prefix();
+    let expected_prefix = reference.get_prefix().to_string(); // Clone to avoid borrow issues
 
     if actual_prefix != expected_prefix {
-        return Err(anyhow::anyhow!(
-            "Prefix mismatch: expected '{}', got '{}'",
-            expected_prefix,
+        if is_upstream {
+            // Upstream bd writes directory name to config.json but DOES use the requested
+            // prefix for issue IDs. So tolerate config mismatch for upstream.
+            logger.verbose(format!(
+                "   ⚠️  Upstream config.json has prefix '{}' but uses '{}' for issue IDs",
+                actual_prefix, expected_prefix
+            ));
+        } else {
+            return Err(anyhow::anyhow!(
+                "Prefix mismatch: expected '{}', got '{}'",
+                expected_prefix,
+                actual_prefix
+            ));
+        }
+    } else {
+        logger.verbose(format!(
+            "   ✓ config.yaml: prefix matches ('{}')",
             actual_prefix
         ));
     }
-
-    logger.verbose(format!(
-        "   ✓ config.yaml: prefix matches ('{}')",
-        actual_prefix
-    ));
 
     Ok(())
 }

@@ -82,18 +82,29 @@ fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
 
 #[test]
 #[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
-fn test_random_actions_minibeads() {
+fn test_random_actions_minibeads_numeric() {
     let binary_path = build_minibeads();
     run_test(
         &binary_path,
-        &["--seed", "42", "--impl", "minibeads"],
-        "Random test against minibeads",
+        &["--seed", "42", "--impl", "minibeads", "--ids", "numeric"],
+        "Random test against minibeads with numeric IDs",
     );
 }
 
 #[test]
 #[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
-fn test_stress_minibeads_parallel() {
+fn test_random_actions_minibeads_hash() {
+    let binary_path = build_minibeads();
+    run_test(
+        &binary_path,
+        &["--seed", "42", "--impl", "minibeads", "--ids", "hash"],
+        "Random test against minibeads with hash IDs",
+    );
+}
+
+#[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
+fn test_stress_minibeads_parallel_numeric() {
     let binary_path = build_minibeads();
     run_test(
         &binary_path,
@@ -105,13 +116,36 @@ fn test_stress_minibeads_parallel() {
             "--seconds",
             "3",
             "--parallel=3",
+            "--ids",
+            "numeric",
         ],
-        "Parallel stress test against minibeads",
+        "Parallel stress test against minibeads with numeric IDs",
     );
 }
 
 #[test]
-#[ignore] // TODO: Fix upstream prefix handling - upstream uses "bd-" prefix instead of respecting --prefix
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
+fn test_stress_minibeads_parallel_hash() {
+    let binary_path = build_minibeads();
+    run_test(
+        &binary_path,
+        &[
+            "--seed",
+            "42",
+            "--impl",
+            "minibeads",
+            "--seconds",
+            "3",
+            "--parallel=3",
+            "--ids",
+            "hash",
+        ],
+        "Parallel stress test against minibeads with hash IDs",
+    );
+}
+
+#[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
 fn test_random_actions_upstream() {
     if !build_upstream() {
         return;
@@ -119,12 +153,21 @@ fn test_random_actions_upstream() {
     let binary_path = build_minibeads();
     run_test(
         &binary_path,
-        &["--seed", "42", "--impl", "upstream"],
-        "Random test against upstream bd",
+        &[
+            "--seed",
+            "42",
+            "--impl",
+            "upstream",
+            "--ids",
+            "hash",
+            "--test-import=false",
+        ],
+        "Random test against upstream bd with hash IDs",
     );
 }
 
 #[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
 #[ignore] // Requires upstream bd to be built
 fn test_stress_upstream_parallel() {
     if !build_upstream() {
@@ -143,7 +186,9 @@ fn test_stress_upstream_parallel() {
             "--parallel=3",
             "--test-import",
             "true",
+            "--ids",
+            "hash",
         ],
-        "Parallel stress test against upstream bd with import",
+        "Parallel stress test against upstream bd with hash IDs and import",
     );
 }

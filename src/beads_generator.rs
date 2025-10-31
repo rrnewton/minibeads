@@ -39,7 +39,6 @@
 //! ```
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
@@ -52,7 +51,10 @@ pub use crate::types::{DependencyType, IssueType, Status};
 #[derive(Debug, Clone, PartialEq)]
 pub enum BeadsAction {
     /// Initialize beads in directory
-    Init { prefix: Option<String> },
+    Init {
+        prefix: Option<String>,
+        mb_hash_ids: Option<bool>,
+    },
 
     /// Create a new issue with expected ID for verification
     Create {
@@ -99,12 +101,18 @@ pub enum BeadsAction {
 impl std::fmt::Display for BeadsAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BeadsAction::Init { prefix } => {
+            BeadsAction::Init {
+                prefix,
+                mb_hash_ids,
+            } => {
+                let mut parts = vec!["init".to_string()];
                 if let Some(p) = prefix {
-                    write!(f, "init --prefix {}", p)
-                } else {
-                    write!(f, "init")
+                    parts.push(format!("--prefix {}", p));
                 }
+                if let Some(true) = mb_hash_ids {
+                    parts.push("--mb-hash-ids".to_string());
+                }
+                write!(f, "{}", parts.join(" "))
             }
             BeadsAction::Create {
                 expected_id,
@@ -173,17 +181,24 @@ pub struct ActionGenerator {
     next_issue_num: usize,
     existing_issues: Vec<String>, // Maintains creation order
     closed_issues: HashSet<String>,
+    use_hash_ids: bool,
 }
 
 impl ActionGenerator {
     /// Create a new generator with the given seed
     pub fn new(seed: u64) -> Self {
+        Self::new_with_mode(seed, false)
+    }
+
+    /// Create a new generator with explicit hash ID mode
+    pub fn new_with_mode(seed: u64, use_hash_ids: bool) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
             prefix: "test".to_string(),
             next_issue_num: 1,
             existing_issues: Vec::new(),
             closed_issues: HashSet::new(),
+            use_hash_ids,
         }
     }
 
@@ -196,6 +211,7 @@ impl ActionGenerator {
         // Always start with init
         actions.push(BeadsAction::Init {
             prefix: Some(self.prefix.clone()),
+            mb_hash_ids: Some(self.use_hash_ids),
         });
 
         // Generate random actions
@@ -249,10 +265,6 @@ impl ActionGenerator {
     }
 
     fn generate_create(&mut self) -> BeadsAction {
-        let expected_id = format!("{}-{}", self.prefix, self.next_issue_num);
-        self.next_issue_num += 1;
-        self.existing_issues.push(expected_id.clone());
-
         let title = format!("Issue {}", self.rng.gen_range(1000..9999));
         let priority = self.rng.gen_range(0..5);
         let issue_type = match self.rng.gen_range(0..5) {
@@ -268,6 +280,23 @@ impl ActionGenerator {
         } else {
             None
         };
+
+        // Compute expected ID based on mode
+        let expected_id = if self.use_hash_ids {
+            // For hash mode, use a placeholder since hash IDs are timestamp-based
+            // and cannot be predicted in advance (they depend on execution-time timestamp)
+            format!("{}-HASH", self.prefix)
+        } else {
+            // Use sequential numbering
+            format!("{}-{}", self.prefix, self.next_issue_num)
+        };
+
+        // Track the issue (will be updated with actual ID for hash mode)
+        self.next_issue_num += 1;
+        if !self.use_hash_ids {
+            // Only pre-add for numeric mode; hash mode adds after execution
+            self.existing_issues.push(expected_id.clone());
+        }
 
         BeadsAction::Create {
             expected_id,
@@ -440,12 +469,26 @@ impl ActionExecutor {
     ///
     /// For Create actions, verifies that the created issue ID matches expected_id
     pub fn execute(&self, action: &BeadsAction) -> Result<ExecutionResult> {
+        // Track actual_issue_id for Create actions
+        let mut actual_issue_id: Option<String> = None;
+
         let output = match action {
-            BeadsAction::Init { prefix } => {
+            BeadsAction::Init {
+                prefix,
+                mb_hash_ids,
+            } => {
                 let mut cmd = self.build_command();
                 cmd.arg("init");
                 if let Some(p) = prefix {
                     cmd.arg("--prefix").arg(p);
+                }
+                // Only pass --mb-hash-ids to minibeads, not upstream
+                // Upstream doesn't support this flag (it always uses hash IDs)
+                let is_upstream = self.binary_path.contains("upstream");
+                if let Some(true) = mb_hash_ids {
+                    if !is_upstream {
+                        cmd.arg("--mb-hash-ids");
+                    }
                 }
                 cmd.output().context("Failed to execute init command")?
             }
@@ -471,21 +514,26 @@ impl ActionExecutor {
 
                 let output = cmd.output().context("Failed to execute create command")?;
 
-                // Verify the created issue ID matches our expectation
+                // Extract the actual issue ID from output
                 if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if let Some(actual_id) = extract_issue_id(&stdout) {
-                        if actual_id != *expected_id {
+                    actual_issue_id = extract_issue_id(&String::from_utf8_lossy(&output.stdout));
+                }
+
+                // Verify the created issue ID matches our expectation
+                // Skip verification for hash mode (expected_id contains "HASH")
+                if output.status.success() && !expected_id.contains("HASH") {
+                    if let Some(ref actual) = actual_issue_id {
+                        if actual != expected_id {
                             // Parse both IDs to understand the mismatch
                             let expected_parts: Vec<&str> = expected_id.split('-').collect();
-                            let actual_parts: Vec<&str> = actual_id.split('-').collect();
+                            let actual_parts: Vec<&str> = actual.split('-').collect();
 
                             let prefix_mismatch = expected_parts.first() != actual_parts.first();
                             let number_mismatch = expected_parts.get(1) != actual_parts.get(1);
 
                             let mut error_msg = String::from("ISSUE ID MISMATCH!\n");
                             error_msg.push_str(&format!("Expected: {}\n", expected_id));
-                            error_msg.push_str(&format!("Actual:   {}\n\n", actual_id));
+                            error_msg.push_str(&format!("Actual:   {}\n\n", actual));
 
                             if prefix_mismatch {
                                 error_msg.push_str(&format!(
@@ -599,6 +647,7 @@ impl ActionExecutor {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             exit_code: output.status.code(),
+            actual_issue_id,
         })
     }
 
@@ -670,6 +719,8 @@ pub struct ExecutionResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    /// For Create actions, the actual issue ID that was created
+    pub actual_issue_id: Option<String>,
 }
 
 /// Reference interpreter for beads actions
@@ -719,9 +770,15 @@ impl ReferenceInterpreter {
     /// Execute an action, updating the internal state
     pub fn execute(&mut self, action: &BeadsAction) -> Result<()> {
         match action {
-            BeadsAction::Init { prefix } => {
+            BeadsAction::Init {
+                prefix,
+                mb_hash_ids,
+            } => {
                 if let Some(p) = prefix {
                     self.prefix = p.clone();
+                }
+                if let Some(use_hash) = mb_hash_ids {
+                    self.use_hash_ids = *use_hash;
                 }
                 Ok(())
             }
@@ -733,32 +790,18 @@ impl ReferenceInterpreter {
                 issue_type,
                 description,
             } => {
-                // Compute the expected ID based on whether we're using hash IDs
-                let computed_id = if self.use_hash_ids {
-                    // Use hash::generate_hash_id_with_collision_check with HashMap checker
-                    let timestamp = Utc::now();
-                    let desc = description.as_deref().unwrap_or("");
-                    let issue_count = self.issues.len();
-
-                    crate::hash::generate_hash_id_with_collision_check(
-                        &self.prefix,
-                        title,
-                        desc,
-                        timestamp,
-                        issue_count,
-                        |candidate| self.issues.contains_key(candidate),
-                    )?
-                } else {
-                    // Use sequential numbering
-                    format!("{}-{}", self.prefix, self.next_id)
-                };
-
-                if *expected_id != computed_id {
-                    anyhow::bail!(
-                        "Reference interpreter ID mismatch: expected {}, got {}",
-                        computed_id,
-                        expected_id
-                    );
+                // For hash mode, the expected_id has already been replaced with the actual ID
+                // by the test harness, so we just use it directly
+                // For numeric mode, verify it matches the expected sequential ID
+                if !self.use_hash_ids {
+                    let computed_id = format!("{}-{}", self.prefix, self.next_id);
+                    if *expected_id != computed_id {
+                        anyhow::bail!(
+                            "Reference interpreter ID mismatch: expected {}, got {}",
+                            computed_id,
+                            expected_id
+                        );
+                    }
                 }
 
                 let issue = ReferenceIssue {
