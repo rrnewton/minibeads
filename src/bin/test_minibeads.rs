@@ -129,6 +129,11 @@ enum Commands {
         /// Only works with --seconds mode
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0", require_equals = true)]
         parallel: Option<usize>,
+
+        /// Test JSONL import after upstream execution (only applies when --impl=upstream)
+        /// Exports upstream database to JSONL and verifies minibeads can import it
+        #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+        test_import: bool,
     },
 }
 
@@ -152,6 +157,7 @@ fn main() -> Result<()> {
             binary,
             verbose,
             parallel,
+            test_import,
         } => run_random_actions(
             seed,
             seed_from_entropy,
@@ -162,6 +168,7 @@ fn main() -> Result<()> {
             binary,
             verbose,
             parallel,
+            test_import,
         ),
     }
 }
@@ -177,6 +184,7 @@ fn run_random_actions(
     binary: Option<String>,
     verbose: bool,
     parallel: Option<usize>,
+    _test_import: bool,
 ) -> Result<()> {
     // Determine the binary path
     let binary_path = if let Some(path) = binary {
