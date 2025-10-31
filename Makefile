@@ -1,4 +1,4 @@
-.PHONY: all build test validate validate-inner clean install help upstream bench
+.PHONY: all build test validate validate-inner purge clean install help upstream bench
 
 # Default target
 all: build
@@ -24,12 +24,17 @@ validate:
 	@time $(MAKE) validate-inner
 
 # Internal validation target that does the actual work
-validate-inner: test
+validate-inner: purge test
 	@echo "Running cargo fmt check..."
 	cargo fmt -- --check
 	@echo "Running clippy..."
 	cargo clippy -- -D warnings
 	@echo "All validation checks passed!"
+
+# Purge upstream bd processes and database files before validation
+purge:
+	@echo "Purging upstream bd artifacts..."
+	@./purge-bd-upstream.sh
 
 # Format code
 fmt:
