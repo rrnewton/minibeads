@@ -60,3 +60,12 @@ Track performance optimization work following PROJECT_VISION conventions.
 
 ## Related Issues
 TBD as granular tasks are filed
+
+---
+
+**Checked up-to-date as of 2025-10-31_#66(29b9753)**
+
+All code references validated:
+- src/types.rs:235 - get_blocking_dependencies() returns impl Iterator ✓
+- src/types.rs:243 - has_blocking_dependencies() for O(1) checks ✓
+- src/storage.rs:782-784 - populate_dependents() uses remove() instead of clone() ✓

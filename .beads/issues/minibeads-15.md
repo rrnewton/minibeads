@@ -44,7 +44,13 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `update` - Update an issue
 - `close` - Close an issue
 - `reopen` - Reopen closed issues
+- `rename` - Rename an issue ID
+- `rename-prefix` - Rename the issue prefix for all issues
 - `dep add` - Add a dependency
+- `dep remove` - Remove a dependency
+- `dep tree` - Show dependency tree
+- `dep cycles` - Detect dependency cycles
+- `export` - Export issues to JSONL format
 - `stats` - Get statistics
 - `blocked` - Get blocked issues
 - `ready` - Find ready work
@@ -65,18 +71,13 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `label` - Manage issue labels
 - `merge` - Merge duplicate issues
 - `onboard` - Display AGENTS.md configuration instructions
-- `rename-prefix` - Rename issue prefix
 - `renumber` - Renumber issues to compact ID space
 - `restore` - Restore full history of compacted issue
 - `stale` - Show orphaned claims and dead executors
 - `sync` - Synchronize issues with git remote (see minibeads-12)
 
 ### ⚠️ Missing Commands (Priority - MCP Needed)
-- `export` - Export issues to JSONL format (see minibeads-11)
 - `import` - Import issues from JSONL format (see minibeads-11)
-- `dep remove` - Remove a dependency
-- `dep tree` - Show dependency tree
-- `dep cycles` - Detect dependency cycles
 
 ---
 
@@ -220,23 +221,54 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 ---
 
+### `bd rename`
+
+**✅ Implemented Features:**
+- Rename an issue ID from old-id to new-id
+- `--dry-run` - Preview changes without applying them
+- `--repair` - Repair broken references (scan all issues and fix stale references)
+
+**Status:** ✅ Feature-complete
+
+---
+
+### `bd rename-prefix`
+
+**✅ Implemented Features:**
+- Rename the issue prefix for all issues in the database
+- `--dry-run` - Preview changes without applying them
+- `--force` - Force rename even if issues would conflict
+- Atomically updates all files, IDs, dependencies, and config.yaml
+- Validates prefix format (alphanumeric and hyphens only)
+
+**Status:** ✅ Feature-complete
+
+---
+
+### `bd export`
+
+**✅ Implemented Features:**
+- Export issues to JSONL format
+- `-o, --output` - Output file path (defaults to stdout)
+- `--mb-output-default` - Use default file output (.beads/issues.jsonl)
+- Filter options: `--status`, `--priority`, `--type`, `--assignee`
+
+**Status:** ✅ Feature-complete
+
+---
+
 ### `bd dep`
 
 **✅ Implemented Subcommands:**
 - `dep add` - Add a dependency
-  - `--type` - Dependency type (blocks/related/parent-child/discovered-from)
-
-**❌ Missing Subcommands:**
+  - `-t, --type` - Dependency type (blocks/related/parent-child/discovered-from)
 - `dep remove` - Remove a dependency
 - `dep tree` - Show dependency tree
   - `-d, --max-depth` - Maximum tree depth (default 50)
   - `--show-all-paths` - Show all paths to nodes
 - `dep cycles` - Detect dependency cycles
 
-**Missing Flags in `dep add`:**
-- `-t` short form for `--type`
-
-**Status:** Only basic dep add implemented, missing tree visualization and cycle detection
+**Status:** ✅ Feature-complete
 
 ---
 
@@ -262,17 +294,12 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 ### `bd ready`
 
 **✅ Implemented Features:**
-- `--assignee` - Filter by assignee
-- `--priority` - Filter by priority
-- `--limit` - Maximum issues to show (default: 10)
+- `-a, --assignee` - Filter by assignee
+- `-p, --priority` - Filter by priority
+- `-n, --limit` - Maximum issues to show (default: 10)
+- `-s, --sort` - Sort policy (hybrid, priority, oldest) - default: "hybrid"
 
-**❌ Missing Flags:**
-- `-a` short form for `--assignee`
-- `-p` short form for `--priority`
-- `-n` short form for `--limit`
-- `-s, --sort` - Sort policy (hybrid, priority, oldest) - upstream default: "hybrid"
-
-**Status:** Core features work, missing sort policy and short flags
+**Status:** ✅ Feature-complete
 
 ---
 
@@ -315,12 +342,15 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 1. `bd show --all-issues` - Show all issues
 2. `bd show -p 0 -p 1` - Show by priority
 3. ✅ DONE - `bd ready --sort` - Sort policy for ready work
-4. `bd list --format` - Custom output formats (digraph, dot, templates)
-5. `bd init -q` - Quiet mode
-6. `bd create -f` - Bulk create from markdown file
+4. ✅ DONE - `bd export` - Export issues to JSONL format
+5. ✅ DONE - `bd rename` - Rename an issue ID with --dry-run and --repair
+6. ✅ DONE - `bd rename-prefix` - Rename issue prefix with --dry-run and --force
+7. `bd list --format` - Custom output formats (digraph, dot, templates)
+8. `bd init -q` - Quiet mode
+9. `bd create -f` - Bulk create from markdown file
 
 ### P4 - Not Planned (Advanced Features)
-- `bd export` / `bd import` - See minibeads-11
+- `bd import` - Import issues from JSONL format (see minibeads-11)
 - `bd comments` - See minibeads-9
 - `bd label` - Label management
 - `bd edit` - Edit in $EDITOR
@@ -328,7 +358,6 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `bd daemon` - Background sync daemon
 - `bd compact` - Issue compaction
 - `bd sync` - Git remote sync (see minibeads-12)
-- `bd rename-prefix` - Rename prefix
 - `bd renumber` - Renumber issues
 - `bd completion` - Shell completion
 - `bd config` - Config management
@@ -369,3 +398,9 @@ After implementing priority items:
 This issue serves as the **central tracking issue for feature parity** with upstream beads. Individual features may be split into separate issues as work progresses.
 
 **Key principle:** We prioritize MCP compatibility first, then common CLI usage patterns, then advanced features.
+
+---
+
+**Checked up-to-date as of 2025-10-31_#66(29b9753)**
+
+All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state. All P0, P1, and P2 features are now complete. Many P3 features also completed (export, rename, rename-prefix, ready --sort).
