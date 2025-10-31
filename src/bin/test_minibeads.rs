@@ -664,7 +664,11 @@ fn run_test(
     ));
 
     // Verify final state consistency
-    verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
+    let (bytes_written, num_issues) = verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
+
+    // Print summary stats
+    logger.log(format!("📊 Issues generated: {}", num_issues));
+    logger.log(format!("💾 Bytes written: {} ({:.1} KB)", bytes_written, bytes_written as f64 / 1024.0));
 
     // If testing upstream and import test is enabled, verify JSONL import
     if use_no_db && test_import {
@@ -699,13 +703,14 @@ fn is_critical_failure(result: &minibeads::beads_generator::ExecutionResult) -> 
 }
 
 /// Verify the final state is consistent with the reference interpreter
+/// Returns (bytes_written, num_issues) on success
 fn verify_consistency(
     _executor: &ActionExecutor,
     work_dir: &str,
     logger: &Logger,
     use_no_db: bool,
     reference: &ReferenceInterpreter,
-) -> Result<()> {
+) -> Result<(u64, usize)> {
     logger.verbose(
         "\n🔍 Deep verification: comparing actual state with reference interpreter...".to_string(),
     );
@@ -764,7 +769,9 @@ fn verify_consistency(
 
     logger.log("✅ Verification passed".to_string());
 
-    Ok(())
+    // Return metrics
+    let num_issues = reference.get_final_state().len();
+    Ok((total_size, num_issues))
 }
 
 #[derive(Debug)]
