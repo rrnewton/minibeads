@@ -203,17 +203,24 @@ where
 pub struct Issue {
     pub id: String,
     pub title: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub design: String,
+    #[serde(default)]
     pub notes: String,
+    #[serde(default)]
     pub acceptance_criteria: String,
     pub status: Status,
     pub priority: i32,
     pub issue_type: IssueType,
+    #[serde(default)]
     pub assignee: String,
     pub external_ref: Option<String>,
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(
+        default,
         rename = "dependencies",
         serialize_with = "serialize_dependencies",
         deserialize_with = "deserialize_dependencies"

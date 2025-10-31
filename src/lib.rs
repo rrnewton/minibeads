@@ -8,4 +8,5 @@ pub mod format;
 pub mod hash;
 pub mod lock;
 pub mod storage;
+pub mod sync;
 pub mod types;

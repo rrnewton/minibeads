@@ -8,7 +8,9 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use minibeads::beads_generator::{ActionExecutor, ActionGenerator, BeadsAction, ReferenceInterpreter};
+use minibeads::beads_generator::{
+    ActionExecutor, ActionGenerator, BeadsAction, ReferenceInterpreter,
+};
 use rand::RngCore;
 use std::io::Write;
 use std::path::PathBuf;
@@ -88,6 +90,30 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Bidirectional sync testing alternating between minibeads and upstream
+    #[command(name = "sync-test")]
+    SyncTest {
+        /// Seed for deterministic RNG
+        #[arg(long)]
+        seed: Option<u64>,
+
+        /// Use entropy for random seed (non-deterministic)
+        #[arg(long)]
+        seed_from_entropy: bool,
+
+        /// Number of sync cycles to run
+        #[arg(long, default_value = "5")]
+        cycles: usize,
+
+        /// Number of actions to generate per phase
+        #[arg(long, default_value = "10")]
+        actions_per_phase: usize,
+
+        /// Enable verbose output (print action sequence and detailed checks)
+        #[arg(long, short)]
+        verbose: bool,
+    },
+
     /// Random property-based testing for beads implementations
     #[command(name = "random-actions")]
     RandomActions {
@@ -160,7 +186,10 @@ fn main() -> Result<()> {
     // Determine worker thread count based on parallel flag
     // For parallel mode, we want worker threads = min(parallel_workers, num_cores)
     // to avoid wasting resources when parallel < cores
-    let worker_threads = if let Commands::RandomActions { parallel: Some(n), .. } = &cli.command {
+    let worker_threads = if let Commands::RandomActions {
+        parallel: Some(n), ..
+    } = &cli.command
+    {
         let num_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -181,6 +210,13 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         match cli.command {
+            Commands::SyncTest {
+                seed,
+                seed_from_entropy,
+                cycles,
+                actions_per_phase,
+                verbose,
+            } => run_sync_test(seed, seed_from_entropy, cycles, actions_per_phase, verbose).await,
             Commands::RandomActions {
                 seed,
                 seed_from_entropy,
@@ -193,21 +229,203 @@ fn main() -> Result<()> {
                 parallel,
                 test_import,
                 ids,
-            } => run_random_actions(
-                seed,
-                seed_from_entropy,
-                iters,
-                seconds,
-                actions_per_iter,
-                r#impl,
-                binary,
-                verbose,
-                parallel,
-                test_import,
-                ids,
-            ).await,
+            } => {
+                run_random_actions(
+                    seed,
+                    seed_from_entropy,
+                    iters,
+                    seconds,
+                    actions_per_iter,
+                    r#impl,
+                    binary,
+                    verbose,
+                    parallel,
+                    test_import,
+                    ids,
+                )
+                .await
+            }
         }
     })
+}
+
+/// Bidirectional sync test - alternates between minibeads and upstream
+async fn run_sync_test(
+    seed: Option<u64>,
+    seed_from_entropy: bool,
+    cycles: usize,
+    actions_per_phase: usize,
+    verbose: bool,
+) -> Result<()> {
+    use rand::RngCore;
+
+    // Sample entropy ONCE at the beginning if requested
+    let base_seed = if seed_from_entropy {
+        let mut rng = rand::thread_rng();
+        let entropy_seed = rng.next_u64();
+        println!("🎲 Sampled entropy seed: {}", entropy_seed);
+        println!("   (Use --seed {} to reproduce this run)\n", entropy_seed);
+        entropy_seed
+    } else {
+        seed.unwrap_or(42u64) // Default seed
+    };
+
+    println!("🔄 Bidirectional Sync Test");
+    println!("Seed: {}", base_seed);
+    println!("Cycles: {}", cycles);
+    println!("Actions per phase: {}", actions_per_phase);
+    println!();
+
+    // Find binary paths
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path
+        .parent()
+        .expect("Failed to get executable directory");
+    let minibeads_binary = exe_dir.join(format!("bd{}", std::env::consts::EXE_SUFFIX));
+
+    // Find project root for upstream binary
+    let mut current = exe_dir;
+    while !current.join("Cargo.toml").exists() {
+        current = current
+            .parent()
+            .unwrap_or_else(|| panic!("Could not find project root"));
+    }
+    let upstream_binary = current
+        .join("beads")
+        .join(format!("bd-upstream{}", std::env::consts::EXE_SUFFIX));
+
+    // Validate binaries exist
+    if !minibeads_binary.exists() {
+        eprintln!(
+            "ERROR: Minibeads binary not found at: {}",
+            minibeads_binary.display()
+        );
+        eprintln!("Build it first with: cargo build");
+        std::process::exit(1);
+    }
+    if !upstream_binary.exists() {
+        eprintln!(
+            "ERROR: Upstream binary not found at: {}",
+            upstream_binary.display()
+        );
+        eprintln!("Build it first with: make upstream");
+        std::process::exit(1);
+    }
+
+    println!("📦 Minibeads: {}", minibeads_binary.display());
+    println!("📦 Upstream: {}", upstream_binary.display());
+    println!();
+
+    // Create working directory
+    let temp_dir = tempfile::tempdir()?;
+    let work_dir = temp_dir.path();
+    println!("📁 Working directory: {}", work_dir.display());
+    println!();
+
+    let verbosity = if verbose {
+        LogLevel::Verbose
+    } else {
+        LogLevel::Normal
+    };
+    let logger = Logger::new(verbosity, false);
+
+    // Phase 1: Initialize with minibeads and populate with random actions
+    println!("{}", "=".repeat(70));
+    println!("Phase 1: Initialize with minibeads and populate");
+    println!("{}", "=".repeat(70));
+
+    let phase1_seed = base_seed;
+    let mut generator = ActionGenerator::new_with_mode(phase1_seed, true); // hash mode for upstream compat
+    let mut reference = ReferenceInterpreter::new_with_hash_ids("test".to_string());
+
+    let executor = ActionExecutor::new(
+        minibeads_binary.to_str().unwrap(),
+        work_dir.to_str().unwrap(),
+        false,
+    );
+
+    let actions = generator.generate_sequence(actions_per_phase);
+    logger.log(format!("Generated {} initial actions", actions.len()));
+
+    execute_actions(&executor, &actions, &mut reference, &logger)?;
+
+    // Phase 2: Sync to create JSONL
+    println!("\n{}", "=".repeat(70));
+    println!("Phase 2: Sync to create JSONL");
+    println!("{}", "=".repeat(70));
+
+    run_minibeads_sync(work_dir, &minibeads_binary, &logger)?;
+
+    // Main test loop: Alternate between minibeads and upstream
+    for cycle in 1..=cycles {
+        println!("\n{}", "=".repeat(70));
+        println!("Cycle {}/{}: Upstream phase", cycle, cycles);
+        println!("{}", "=".repeat(70));
+
+        // Generate actions for upstream phase
+        let upstream_seed = base_seed.wrapping_add((cycle * 2 - 1) as u64);
+        let mut upstream_gen = ActionGenerator::new_with_mode(upstream_seed, true);
+        let upstream_actions = upstream_gen.generate_sequence(actions_per_phase);
+
+        logger.log(format!(
+            "Generated {} actions for upstream",
+            upstream_actions.len()
+        ));
+
+        // Execute with upstream
+        let upstream_executor = ActionExecutor::new(
+            upstream_binary.to_str().unwrap(),
+            work_dir.to_str().unwrap(),
+            false,
+        );
+
+        execute_actions(
+            &upstream_executor,
+            &upstream_actions,
+            &mut reference,
+            &logger,
+        )?;
+
+        // Flush upstream to JSONL
+        run_upstream_sync_flush(work_dir, &upstream_binary, &logger)?;
+
+        println!("\n{}", "=".repeat(70));
+        println!("Cycle {}/{}: Minibeads phase", cycle, cycles);
+        println!("{}", "=".repeat(70));
+
+        // Generate actions for minibeads phase
+        let minibeads_seed = base_seed.wrapping_add((cycle * 2) as u64);
+        let mut minibeads_gen = ActionGenerator::new_with_mode(minibeads_seed, true);
+        let minibeads_actions = minibeads_gen.generate_sequence(actions_per_phase);
+
+        logger.log(format!(
+            "Generated {} actions for minibeads",
+            minibeads_actions.len()
+        ));
+
+        // Execute with minibeads
+        execute_actions(&executor, &minibeads_actions, &mut reference, &logger)?;
+
+        // Sync minibeads (bidirectional)
+        run_minibeads_sync(work_dir, &minibeads_binary, &logger)?;
+
+        // Verify consistency at end of cycle
+        println!("\n🔍 Verifying consistency after cycle {}...", cycle);
+        verify_sync_consistency(
+            work_dir,
+            &minibeads_binary,
+            &upstream_binary,
+            &reference,
+            &logger,
+        )?;
+        println!("✅ Cycle {} completed successfully", cycle);
+    }
+
+    println!("\n{}", "=".repeat(70));
+    println!("✅ All {} cycles completed successfully!", cycles);
+    println!("{}", "=".repeat(70));
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -344,7 +562,8 @@ async fn run_random_actions(
             &implementation,
             test_import,
             ids,
-        ).await;
+        )
+        .await;
     }
 
     // Unified sequential testing loop (handles both time-based and iteration-based modes)
@@ -619,6 +838,7 @@ async fn run_parallel_stress_test(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_test(
     seed: u64,
     num_actions: usize,
@@ -1445,6 +1665,181 @@ fn test_jsonl_import(
     verify_minibeads_state(&import_beads_dir, reference, logger)?;
 
     logger.log("✅ JSONL import test passed".to_string());
+
+    Ok(())
+}
+
+/// Execute a sequence of actions and update reference
+fn execute_actions(
+    executor: &ActionExecutor,
+    actions: &[BeadsAction],
+    reference: &mut ReferenceInterpreter,
+    logger: &Logger,
+) -> Result<()> {
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for (i, action) in actions.iter().enumerate() {
+        logger.verbose(format!("{:3}. {:?}", i + 1, action));
+
+        match executor.execute(action) {
+            Ok(result) => {
+                if result.success {
+                    success_count += 1;
+                    // Update reference interpreter with successful actions
+                    let action_for_ref = if let Some(ref actual_id) = result.actual_issue_id {
+                        if let BeadsAction::Create {
+                            expected_id,
+                            title,
+                            priority,
+                            issue_type,
+                            description,
+                        } = action
+                        {
+                            if expected_id.contains("HASH") {
+                                BeadsAction::Create {
+                                    expected_id: actual_id.clone(),
+                                    title: title.clone(),
+                                    priority: *priority,
+                                    issue_type: *issue_type,
+                                    description: description.clone(),
+                                }
+                            } else {
+                                action.clone()
+                            }
+                        } else {
+                            action.clone()
+                        }
+                    } else {
+                        action.clone()
+                    };
+
+                    if let Err(e) = reference.execute(&action_for_ref) {
+                        logger.log(format!("❌ Reference interpreter failed: {:?}", e));
+                        return Err(e);
+                    }
+                } else if is_critical_failure(&result) {
+                    logger.log(format!("❌ CRITICAL FAILURE: {}", result.stderr));
+                    return Err(anyhow::anyhow!(
+                        "Critical failure on action {}: {:?}",
+                        i + 1,
+                        action
+                    ));
+                } else {
+                    failure_count += 1;
+                    logger.verbose(format!(
+                        "     ⚠️  Expected failure: {}",
+                        result.stderr.lines().next().unwrap_or("")
+                    ));
+                }
+            }
+            Err(e) => {
+                logger.log(format!("❌ Failed to execute action: {:?}", e));
+                return Err(e);
+            }
+        }
+    }
+
+    logger.log(format!(
+        "Results: {} successful, {} expected failures",
+        success_count, failure_count
+    ));
+    Ok(())
+}
+
+/// Run minibeads sync (bidirectional)
+fn run_minibeads_sync(
+    work_dir: &std::path::Path,
+    minibeads_binary: &std::path::Path,
+    logger: &Logger,
+) -> Result<()> {
+    logger.log("Running minibeads sync...".to_string());
+
+    let output = std::process::Command::new(minibeads_binary)
+        .current_dir(work_dir)
+        .args(["sync"])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Minibeads sync failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    logger.verbose(format!(
+        "  {}",
+        String::from_utf8_lossy(&output.stdout).trim()
+    ));
+    logger.log("✅ Minibeads sync completed".to_string());
+    Ok(())
+}
+
+/// Run upstream sync --flush-only
+fn run_upstream_sync_flush(
+    work_dir: &std::path::Path,
+    upstream_binary: &std::path::Path,
+    logger: &Logger,
+) -> Result<()> {
+    logger.log("Running upstream sync --flush-only...".to_string());
+
+    let output = std::process::Command::new(upstream_binary)
+        .current_dir(work_dir)
+        .args(["sync", "--flush-only"])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Upstream sync --flush-only failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    logger.verbose(format!(
+        "  {}",
+        String::from_utf8_lossy(&output.stdout).trim()
+    ));
+    logger.log("✅ Upstream sync --flush-only completed".to_string());
+    Ok(())
+}
+
+/// Verify sync consistency by comparing both implementations' states with reference
+fn verify_sync_consistency(
+    work_dir: &std::path::Path,
+    _minibeads_binary: &std::path::Path,
+    upstream_binary: &std::path::Path,
+    reference: &ReferenceInterpreter,
+    logger: &Logger,
+) -> Result<()> {
+    let beads_dir = work_dir.join(".beads");
+
+    // Verify minibeads markdown state
+    logger.verbose("Verifying minibeads markdown state...".to_string());
+    verify_minibeads_state(&beads_dir, reference, logger)?;
+    logger.verbose("✅ Minibeads markdown matches reference".to_string());
+
+    // Verify upstream by exporting and comparing
+    logger.verbose("Verifying upstream state via export...".to_string());
+    verify_upstream_dual_export(
+        work_dir.to_str().unwrap(),
+        upstream_binary.to_str().unwrap(),
+        reference,
+        logger,
+    )?;
+    logger.verbose("✅ Upstream state matches reference".to_string());
+
+    // Verify .beads/issues.jsonl exists and matches (created by both implementations)
+    let jsonl_path = beads_dir.join("issues.jsonl");
+    if !jsonl_path.exists() {
+        return Err(anyhow::anyhow!(
+            ".beads/issues.jsonl does not exist after sync"
+        ));
+    }
+
+    logger.verbose("Verifying .beads/issues.jsonl...".to_string());
+    let jsonl_issues = parse_jsonl_file(&jsonl_path)?;
+    compare_issue_states(&jsonl_issues, reference.get_final_state(), logger)?;
+    logger.verbose("✅ .beads/issues.jsonl matches reference".to_string());
 
     Ok(())
 }
