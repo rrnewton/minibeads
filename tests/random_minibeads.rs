@@ -8,8 +8,8 @@
 //!   ./target/release/test_minibeads random-actions --seed 42 --impl upstream
 //!   ./target/release/test_minibeads random-actions --seed-from-entropy --iters 10
 
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Build minibeads binaries in release mode
 fn build_minibeads() -> PathBuf {
@@ -25,7 +25,10 @@ fn build_minibeads() -> PathBuf {
         .args(["build", "--release", "--bin", "test_minibeads"])
         .status()
         .expect("Failed to build test_minibeads binary");
-    assert!(test_build.success(), "Failed to build test_minibeads binary");
+    assert!(
+        test_build.success(),
+        "Failed to build test_minibeads binary"
+    );
 
     // Return path to test_minibeads binary
     std::env::current_dir()
@@ -51,7 +54,11 @@ fn build_upstream() -> bool {
 
 /// Run test_minibeads with specified arguments
 fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
-    println!("\nRunning: {} random-actions {}", binary_path.display(), args.join(" "));
+    println!(
+        "\nRunning: {} random-actions {}",
+        binary_path.display(),
+        args.join(" ")
+    );
 
     let output = Command::new(binary_path)
         .arg("random-actions")
@@ -76,7 +83,11 @@ fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
 #[test]
 fn test_random_actions_minibeads() {
     let binary_path = build_minibeads();
-    run_test(&binary_path, &["--seed", "42", "--impl", "minibeads"], "Random test against minibeads");
+    run_test(
+        &binary_path,
+        &["--seed", "42", "--impl", "minibeads"],
+        "Random test against minibeads",
+    );
 }
 
 #[test]
@@ -84,8 +95,16 @@ fn test_stress_minibeads_parallel() {
     let binary_path = build_minibeads();
     run_test(
         &binary_path,
-        &["--seed", "42", "--impl", "minibeads", "--seconds", "3", "--parallel=3"],
-        "Parallel stress test against minibeads"
+        &[
+            "--seed",
+            "42",
+            "--impl",
+            "minibeads",
+            "--seconds",
+            "3",
+            "--parallel=3",
+        ],
+        "Parallel stress test against minibeads",
     );
 }
 
@@ -96,7 +115,11 @@ fn test_random_actions_upstream() {
         return;
     }
     let binary_path = build_minibeads();
-    run_test(&binary_path, &["--seed", "42", "--impl", "upstream"], "Random test against upstream bd");
+    run_test(
+        &binary_path,
+        &["--seed", "42", "--impl", "upstream"],
+        "Random test against upstream bd",
+    );
 }
 
 #[test]
@@ -108,7 +131,17 @@ fn test_stress_upstream_parallel() {
     let binary_path = build_minibeads();
     run_test(
         &binary_path,
-        &["--seed", "42", "--impl", "upstream", "--seconds", "3", "--parallel=3", "--test-import", "true"],
-        "Parallel stress test against upstream bd with import"
+        &[
+            "--seed",
+            "42",
+            "--impl",
+            "upstream",
+            "--seconds",
+            "3",
+            "--parallel=3",
+            "--test-import",
+            "true",
+        ],
+        "Parallel stress test against upstream bd with import",
     );
 }

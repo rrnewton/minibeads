@@ -46,6 +46,12 @@ impl Storage {
             }
         }
 
+        // Ensure config-minibeads.yaml exists with defaults (don't clobber if exists)
+        let minibeads_config_path = beads_dir.join("config-minibeads.yaml");
+        if !minibeads_config_path.exists() {
+            create_minibeads_config(&beads_dir, false)?; // Default to false for existing repos
+        }
+
         // Ensure .gitignore exists and has required entries
         ensure_gitignore(&beads_dir)?;
 
@@ -56,7 +62,7 @@ impl Storage {
     }
 
     /// Initialize a new beads database
-    pub fn init(beads_dir: PathBuf, prefix: Option<String>) -> Result<Self> {
+    pub fn init(beads_dir: PathBuf, prefix: Option<String>, mb_hash_ids: bool) -> Result<Self> {
         // Create .beads directory
         fs::create_dir_all(&beads_dir).context("Failed to create .beads directory")?;
 
@@ -69,13 +75,15 @@ impl Storage {
             .or_else(|| infer_prefix(&beads_dir))
             .unwrap_or_else(|| "bd".to_string());
 
-        // Create config.yaml with issue-prefix and mb-hash-ids (default: false)
+        // Create config.yaml with only upstream-compatible options
         let config_path = beads_dir.join("config.yaml");
         let mut config = HashMap::new();
         config.insert("issue-prefix".to_string(), prefix);
-        config.insert("mb-hash-ids".to_string(), "false".to_string());
         let config_yaml = serde_yaml::to_string(&config)?;
         fs::write(&config_path, config_yaml).context("Failed to write config.yaml")?;
+
+        // Create config-minibeads.yaml with minibeads-specific options
+        create_minibeads_config(&beads_dir, mb_hash_ids)?;
 
         // Ensure .gitignore exists and has required entries
         ensure_gitignore(&beads_dir)?;
@@ -105,17 +113,18 @@ impl Storage {
             .ok_or_else(|| anyhow::anyhow!("issue-prefix not found in config.yaml"))
     }
 
-    /// Check if hash-based IDs are enabled in config
+    /// Check if hash-based IDs are enabled in config-minibeads.yaml
     fn use_hash_ids(&self) -> Result<bool> {
-        let config_path = self.beads_dir.join("config.yaml");
+        let config_path = self.beads_dir.join("config-minibeads.yaml");
 
         if !config_path.exists() {
             return Ok(false); // Default to false if no config
         }
 
-        let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
+        let content =
+            fs::read_to_string(&config_path).context("Failed to read config-minibeads.yaml")?;
         let config: HashMap<String, String> =
-            serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
+            serde_yaml::from_str(&content).context("Failed to parse config-minibeads.yaml")?;
 
         // Parse mb-hash-ids field (default to false if not present)
         match config.get("mb-hash-ids") {
@@ -1292,6 +1301,51 @@ fn infer_prefix(beads_dir: &Path) -> Option<String> {
     let prefix = name.to_lowercase().replace([' ', '_'], "-");
 
     Some(prefix)
+}
+
+/// Create config-minibeads.yaml with minibeads-specific options
+/// This file contains options that are NOT compatible with upstream bd
+fn create_minibeads_config(beads_dir: &Path, mb_hash_ids: bool) -> Result<()> {
+    use std::io::Write;
+
+    let config_path = beads_dir.join("config-minibeads.yaml");
+
+    // Don't clobber existing config
+    if config_path.exists() {
+        return Ok(());
+    }
+
+    let mut file =
+        fs::File::create(&config_path).context("Failed to create config-minibeads.yaml")?;
+
+    // Write header with commented explanation
+    writeln!(file, "# Minibeads-specific configuration options")?;
+    writeln!(
+        file,
+        "# This file contains options that are NOT compatible with upstream bd"
+    )?;
+    writeln!(file)?;
+
+    writeln!(
+        file,
+        "# Use hash-based issue IDs instead of sequential numbers"
+    )?;
+    writeln!(
+        file,
+        "# When true, issues are named like: prefix-a1b2c3 (based on content hash)"
+    )?;
+    writeln!(
+        file,
+        "# When false, issues are named like: prefix-1, prefix-2, ... (sequential)"
+    )?;
+    writeln!(file, "# Default: false")?;
+    writeln!(
+        file,
+        "mb-hash-ids: {}",
+        if mb_hash_ids { "true" } else { "false" }
+    )?;
+
+    Ok(())
 }
 
 /// Ensure .gitignore exists and contains required entries

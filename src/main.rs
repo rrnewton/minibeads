@@ -121,6 +121,10 @@ enum Commands {
         /// Issue prefix (e.g., 'myproject' for myproject-1, myproject-2)
         #[arg(short, long)]
         prefix: Option<String>,
+
+        /// Use hash-based issue IDs instead of sequential numbers (minibeads-specific)
+        #[arg(long = "mb-hash-ids")]
+        mb_hash_ids: bool,
     },
 
     /// Create a new issue
@@ -480,7 +484,10 @@ fn run() -> Result<()> {
     let mb_no_cmd_logging = cli.mb_no_cmd_logging;
 
     match cli.command {
-        Commands::Init { prefix } => {
+        Commands::Init {
+            prefix,
+            mb_hash_ids,
+        } => {
             // IMPORTANT: init always creates .beads in current directory
             // It does NOT use find_beads_dir() or respect --db/--mb-beads-dir flags
             // This ensures init always initializes in CWD, never in ancestor directories
@@ -490,7 +497,7 @@ fn run() -> Result<()> {
             }
 
             let beads_dir = PathBuf::from(".beads");
-            let storage = Storage::init(beads_dir, prefix)?;
+            let storage = Storage::init(beads_dir, prefix, mb_hash_ids)?;
 
             // Log command after successful init
             if !mb_no_cmd_logging {
