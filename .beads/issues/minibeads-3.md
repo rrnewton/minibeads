@@ -11,7 +11,7 @@ updated_at: 2025-10-30T13:56:02.945405078+00:00
 
 Track testing improvements for minibeads.
 
-## Current Status (as of 2025-10-31_#67(44885ef))
+## Current Status (as of 2025-10-31_#76(209a9ce))
 - ✅ 3 unit tests passing (format, lock, issue_roundtrip)
 - ✅ Makefile with validate target created
 - ✅ Clippy checks passing with -D warnings
@@ -21,6 +21,12 @@ Track testing improvements for minibeads.
   - help_version.sh: 29 assertions (help, version, quickstart validation)
   - export_interop.sh: 37 assertions (export functionality, JSONL format)
 - ✅ Rust test harness for automatic shell test discovery
+- ✅ Random property-based test generator (tests/beads_generator.rs + tests/random_minibeads.rs)
+  - Sequential numbering verification with expected_id checking
+  - State tracking for valid action sequence generation
+  - Deterministic testing with seed support for reproducibility
+  - Verbose output mode with concise Display format
+  - Distinguishes expected failures from critical errors
 - ✅ GitHub Actions CI/CD pipeline configured
   - Multi-platform testing (Linux, macOS, Windows)
   - All platforms passing as of 2025-10-31
@@ -31,9 +37,10 @@ Track testing improvements for minibeads.
 ## TODO
 - [ ] Add more unit tests for storage operations
 - [ ] Add more e2e test scenarios (concurrent access, error handling, edge cases)
-- [ ] Add property-based tests for markdown format
+- [ ] Extend property-based tests to markdown format validation
 - [ ] Add code coverage reporting
 - [ ] Implement test porting plan from upstream beads (see minibeads-14)
+- [ ] Run random tests against upstream bd for compatibility verification
 
 ## Completed
 - [x] Created tests/basic_operations.sh with 38 test assertions
@@ -46,6 +53,12 @@ Track testing improvements for minibeads.
 - [x] Added tests for numeric shorthand in bd show
 - [x] Added tests for multi-issue bd show
 - [x] Added comprehensive export/JSONL interop tests
+- [x] Random property-based test generator for beads commands (commit #76/209a9ce)
+  - BeadsAction enum with all command types
+  - ActionGenerator with weighted random generation
+  - ActionExecutor with sequential numbering verification
+  - CLI with --seed, --seed-from-entropy, --iters, --verbose flags
+  - Display trait for concise action summaries
 - [x] GitHub Actions CI with multiple jobs:
   - Test suite (make validate)
   - Code coverage (tarpaulin)
