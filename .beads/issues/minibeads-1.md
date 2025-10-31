@@ -5,14 +5,14 @@ priority: 0
 issue_type: epic
 assignee: claude
 created_at: 2025-10-30T13:22:12.679166235+00:00
-updated_at: 2025-10-30T13:22:12.679166235+00:00
+updated_at: 2025-10-31T04:26:26.036565348+00:00
 ---
 
 # Description
 
 Main tracking issue for minibeads - a minimal, filesystem-based issue tracker in Rust.
 
-## Status (as of 2025-10-31_#67(44885ef))
+## Status (as of 2025-10-31_#71(0692919))
 - ✅ Core implementation complete (storage, types, CLI, locking)
 - ✅ MCP integration working (dependencies/dependents fixed in minibeads-13)
 - ✅ Feature parity largely achieved (see minibeads-15)
@@ -45,9 +45,21 @@ Main tracking issue for minibeads - a minimal, filesystem-based issue tracker in
 - minibeads-8: CI pipeline setup
 - minibeads-5: Status enum serialization fixes
 
+## Architectural Notes
+- minibeads-12, minibeads-16: Sync issues marked with architectural mismatch (2025-10-31)
+  - Clarified that markdown is the ONLY source of truth
+  - issues.jsonl is export-only, not part of core storage
+  - No bidirectional sync needed
+
 ## Project Conventions
 - Use `bd` CLI or MCP tools to manage issues
 - Keep all content in description field (not notes)
 - Reference issues in code TODOs: `// TODO(minibeads-N): description`
 - Track transient info with timestamps: YYYY-MM-DD_#DEPTH(hash)
 - Validate tracking issues periodically and add timestamps
+
+---
+
+**Checked up-to-date as of 2025-10-31_#71(0692919)**
+
+All stats verified, architecture clarifications added for sync issues.
