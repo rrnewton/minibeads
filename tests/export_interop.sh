@@ -262,22 +262,22 @@ if [ -n "$UPSTREAM_BD" ]; then
     echo -e "${BLUE}→ cp $JSONL_FILE .beads/issues.jsonl${NC}"
     cp "$JSONL_FILE" .beads/issues.jsonl
 
-    # Test upstream bd list with --no-db flag
-    echo -e "${BLUE}→ $UPSTREAM_BD list --no-db${NC}"
-    UPSTREAM_LIST=$("$UPSTREAM_BD" list --no-db 2>&1)
+    # Test upstream bd list (latest upstream uses database mode, not --no-db)
+    echo -e "${BLUE}→ $UPSTREAM_BD list${NC}"
+    UPSTREAM_LIST=$("$UPSTREAM_BD" list 2>&1)
     assert_contains "$UPSTREAM_LIST" "exp-1" "Upstream bd should list exp-1"
     assert_contains "$UPSTREAM_LIST" "exp-2" "Upstream bd should list exp-2"
     assert_contains "$UPSTREAM_LIST" "exp-3" "Upstream bd should list exp-3"
 
-    # Test upstream bd show with --no-db flag
-    echo -e "${BLUE}→ $UPSTREAM_BD show exp-1 --no-db${NC}"
-    UPSTREAM_SHOW=$("$UPSTREAM_BD" show exp-1 --no-db 2>&1)
+    # Test upstream bd show
+    echo -e "${BLUE}→ $UPSTREAM_BD show exp-1${NC}"
+    UPSTREAM_SHOW=$("$UPSTREAM_BD" show exp-1 2>&1)
     assert_contains "$UPSTREAM_SHOW" "exp-1" "Upstream bd should show exp-1"
     assert_contains "$UPSTREAM_SHOW" "Bug Fix A" "Upstream bd should show title"
 
-    # Test upstream bd stats with --no-db flag
-    echo -e "${BLUE}→ $UPSTREAM_BD stats --no-db${NC}"
-    UPSTREAM_STATS=$("$UPSTREAM_BD" stats --no-db 2>&1)
+    # Test upstream bd stats
+    echo -e "${BLUE}→ $UPSTREAM_BD stats${NC}"
+    UPSTREAM_STATS=$("$UPSTREAM_BD" stats 2>&1)
     assert_contains "$UPSTREAM_STATS" "Total Issues:" "Upstream bd should show total issues"
     assert_contains "$UPSTREAM_STATS" "3" "Upstream bd should show 3 as total"
 

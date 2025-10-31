@@ -1,4 +1,5 @@
 use crate::format::{issue_to_markdown, markdown_to_issue};
+use crate::hash;
 use crate::lock::Lock;
 use crate::types::{BlockedIssue, DependencyType, Issue, IssueType, Stats, Status};
 use anyhow::{Context, Result};
@@ -68,10 +69,11 @@ impl Storage {
             .or_else(|| infer_prefix(&beads_dir))
             .unwrap_or_else(|| "bd".to_string());
 
-        // Create config.yaml with issue-prefix
+        // Create config.yaml with issue-prefix and mb-hash-ids (default: false)
         let config_path = beads_dir.join("config.yaml");
         let mut config = HashMap::new();
         config.insert("issue-prefix".to_string(), prefix);
+        config.insert("mb-hash-ids".to_string(), "false".to_string());
         let config_yaml = serde_yaml::to_string(&config)?;
         fs::write(&config_path, config_yaml).context("Failed to write config.yaml")?;
 
@@ -101,6 +103,25 @@ impl Storage {
             .get("issue-prefix")
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("issue-prefix not found in config.yaml"))
+    }
+
+    /// Check if hash-based IDs are enabled in config
+    fn use_hash_ids(&self) -> Result<bool> {
+        let config_path = self.beads_dir.join("config.yaml");
+
+        if !config_path.exists() {
+            return Ok(false); // Default to false if no config
+        }
+
+        let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
+        let config: HashMap<String, String> =
+            serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
+
+        // Parse mb-hash-ids field (default to false if not present)
+        match config.get("mb-hash-ids") {
+            Some(value) => Ok(value == "true"),
+            None => Ok(false),
+        }
     }
 
     /// Infer prefix from existing issues in the filesystem
@@ -155,6 +176,27 @@ impl Storage {
         Ok(max_num + 1)
     }
 
+    /// Generate a hash-based ID with adaptive length and collision handling
+    fn generate_hash_id(&self, prefix: &str, title: &str, description: &str) -> Result<String> {
+        use chrono::Utc;
+
+        let timestamp = Utc::now();
+
+        // Count existing issues to determine adaptive length
+        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
+        let issue_count = entries.count();
+
+        // Use hash::generate_hash_id_with_collision_check with filesystem checker
+        hash::generate_hash_id_with_collision_check(
+            prefix,
+            title,
+            description,
+            timestamp,
+            issue_count,
+            |candidate| self.issues_dir.join(format!("{}.md", candidate)).exists(),
+        )
+    }
+
     /// Create a new issue
     #[allow(clippy::too_many_arguments)]
     pub fn create_issue(
@@ -178,8 +220,16 @@ impl Storage {
             id
         } else {
             let prefix = self.get_prefix()?;
-            let num = self.get_next_number(&prefix)?;
-            format!("{}-{}", prefix, num)
+            let use_hash_ids = self.use_hash_ids()?;
+
+            if use_hash_ids {
+                // Use hash-based ID generation
+                self.generate_hash_id(&prefix, &title, &description)?
+            } else {
+                // Use sequential numbering
+                let num = self.get_next_number(&prefix)?;
+                format!("{}-{}", prefix, num)
+            }
         };
 
         // Create issue

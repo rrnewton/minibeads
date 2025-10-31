@@ -39,6 +39,7 @@
 //! ```
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
@@ -633,9 +634,10 @@ impl ActionExecutor {
 /// Extract issue ID from create command output
 ///
 /// Looks for patterns like:
-/// - "Created issue: test-1"
-/// - "Created: test-1"
-/// - "test-1"
+/// - "Created issue: test-1" (sequential)
+/// - "Created: test-1" (sequential)
+/// - "Created issue: test-4f10" (hash)
+/// - "Created: test-4f10" (hash)
 fn extract_issue_id(output: &str) -> Option<String> {
     // Try to find issue ID in various formats
     for line in output.lines() {
@@ -655,17 +657,22 @@ fn extract_issue_id(output: &str) -> Option<String> {
             }
         }
 
-        // Look for issue ID pattern (prefix-number)
+        // Look for issue ID pattern (prefix-number or prefix-hexhash)
         let words: Vec<&str> = line.split_whitespace().collect();
         for word in words {
-            if word.contains('-')
-                && word
-                    .split('-')
-                    .next_back()
-                    .map(|s| s.parse::<usize>().is_ok())
-                    .unwrap_or(false)
-            {
-                return Some(word.to_string());
+            if word.contains('-') {
+                let suffix = word.split('-').next_back().unwrap_or("");
+
+                // Check if it's a sequential number
+                if suffix.parse::<usize>().is_ok() {
+                    return Some(word.to_string());
+                }
+
+                // Check if it's a hex hash (4-8 hex characters)
+                if (4..=8).contains(&suffix.len()) && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return Some(word.to_string());
+                }
             }
         }
     }
@@ -690,6 +697,7 @@ pub struct ReferenceInterpreter {
     pub issues: std::collections::HashMap<String, ReferenceIssue>,
     pub prefix: String,
     pub next_id: usize,
+    pub use_hash_ids: bool,
 }
 
 /// Simplified issue representation for reference interpreter
@@ -711,6 +719,17 @@ impl ReferenceInterpreter {
             issues: std::collections::HashMap::new(),
             prefix,
             next_id: 1,
+            use_hash_ids: false,
+        }
+    }
+
+    /// Create a new reference interpreter with hash IDs enabled
+    pub fn new_with_hash_ids(prefix: String) -> Self {
+        Self {
+            issues: std::collections::HashMap::new(),
+            prefix,
+            next_id: 1,
+            use_hash_ids: true,
         }
     }
 
@@ -731,8 +750,26 @@ impl ReferenceInterpreter {
                 issue_type,
                 description,
             } => {
-                // Verify the expected_id matches our sequential numbering
-                let computed_id = format!("{}-{}", self.prefix, self.next_id);
+                // Compute the expected ID based on whether we're using hash IDs
+                let computed_id = if self.use_hash_ids {
+                    // Use hash::generate_hash_id_with_collision_check with HashMap checker
+                    let timestamp = Utc::now();
+                    let desc = description.as_deref().unwrap_or("");
+                    let issue_count = self.issues.len();
+
+                    crate::hash::generate_hash_id_with_collision_check(
+                        &self.prefix,
+                        title,
+                        desc,
+                        timestamp,
+                        issue_count,
+                        |candidate| self.issues.contains_key(candidate),
+                    )?
+                } else {
+                    // Use sequential numbering
+                    format!("{}-{}", self.prefix, self.next_id)
+                };
+
                 if *expected_id != computed_id {
                     anyhow::bail!(
                         "Reference interpreter ID mismatch: expected {}, got {}",

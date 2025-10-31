@@ -4,3 +4,4 @@
 //! and test utilities.
 
 pub mod beads_generator;
+pub mod hash;

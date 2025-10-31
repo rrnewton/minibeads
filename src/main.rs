@@ -1,4 +1,5 @@
 mod format;
+mod hash;
 mod lock;
 mod storage;
 mod types;
