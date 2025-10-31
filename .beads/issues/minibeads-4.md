@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.980878549+00:00
-updated_at: 2025-10-31T03:23:02.728009815+00:00
+updated_at: 2025-10-31T04:32:31.206935060+00:00
 ---
 
 # Description
@@ -63,7 +63,7 @@ TBD as granular tasks are filed
 
 ---
 
-**Checked up-to-date as of 2025-10-31_#66(29b9753)**
+**Checked up-to-date as of 2025-10-31_#72(ddc372b)**
 
 All code references validated:
 - src/types.rs:235 - get_blocking_dependencies() returns impl Iterator ✓
