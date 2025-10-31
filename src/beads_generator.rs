@@ -655,7 +655,7 @@ fn extract_issue_id(output: &str) -> Option<String> {
             if word.contains('-')
                 && word
                     .split('-')
-                    .last()
+                    .next_back()
                     .map(|s| s.parse::<usize>().is_ok())
                     .unwrap_or(false)
             {
