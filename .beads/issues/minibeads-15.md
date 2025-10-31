@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2025-10-30T16:22:39.915813892+00:00
+updated_at: 2025-10-31T04:36:53.632130617+00:00
 ---
 
 # Description
@@ -113,111 +113,94 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `--id` - Explicit issue ID
 - `--deps` - Dependencies (comma-separated)
 
+**✅ Implemented Short Flags:**
+- `-a, --assignee` - Assignee ✅
+
 **❌ Missing Flags:**
-- `-a` short form for `--assignee`
 - `-f, --file` - Create multiple issues from markdown file
 - `--force` - Force creation even if prefix doesn't match
 - `--title` - Alternative to positional title argument
 
-**⚠️ Feature Gaps:**
-- `--deps` format: Upstream supports `type:id` format (e.g., `discovered-from:bd-20,blocks:bd-15`), we only support comma-separated IDs
-- `-l, --labels` vs our `-l, --label` - Upstream uses plural, we use singular (but both work)
+**✅ Advanced --deps Syntax:**
+- Simple format: `bd-1,bd-2` (defaults to 'blocks') ✅
+- Advanced typed format: `blocks:bd-1,related:bd-2,discovered-from:bd-3` ✅
 
-**Status:** Core features complete, missing bulk creation and advanced dep syntax
+**Status:** Core features complete, missing only bulk creation from file
 
 ---
 
 ### `bd list`
 
 **✅ Implemented Features:**
-- `-s, --status` - Filter by status ✅ (just added)
-- `-p, --priority` - Filter by priority ✅ (just added)
-- `-t, --type` - Filter by type
-- `--assignee` - Filter by assignee
-- `--limit` - Limit results (no default) ✅ (just fixed)
+- `-s, --status` - Filter by status ✅
+- `-p, --priority` - Filter by priority ✅
+- `-t, --type` - Filter by type ✅
+- `--assignee` - Filter by assignee ✅
+- `--limit` - Limit results (no default) ✅
+- `-l, --label` - Filter by labels (must have ALL specified labels) ✅
+- `--id` - Filter by specific issue IDs (comma-separated) ✅
+- `--title` - Filter by title substring (case-insensitive) ✅
 
 **❌ Missing Flags:**
 - `-a` short form for `--assignee`
-- `-l, --label` - Filter by labels (AND: must have ALL)
 - `--label-any` - Filter by labels (OR: must have AT LEAST ONE)
 - `-n` short form for `--limit`
-- `--id` - Filter by specific issue IDs (comma-separated)
-- `--title` - Filter by title text (case-insensitive substring)
 - `--format` - Output format (digraph, dot, Go template)
 
-**Status:** Basic filtering works, missing advanced filters (labels, title, id, custom formats)
+**Status:** All major filtering features implemented, missing only convenience short flags and custom output formats
 
 ---
 
 ### `bd show`
 
 **✅ Implemented Features:**
-- Shows single issue with full details
-- `--json` output
+- Shows single issue with full details ✅
+- Multiple issue IDs as arguments (e.g., `bd show bd-1 bd-2 bd-3`) ✅
+- `--json` output ✅
 
 **❌ Missing Features:**
-- Multiple issue IDs as arguments (e.g., `bd show bd-1 bd-2 bd-3`)
 - `--all-issues` - Show all issues
 - `-p, --priority` - Show issues with specified priority (can be used multiple times)
 
-**Status:** Basic single-issue show works, missing bulk show features
+**Status:** Bulk show operations fully supported, missing only convenience filters
 
 ---
 
 ### `bd update`
 
 **✅ Implemented Features:**
-- `--status` - New status
-- `--priority` - New priority
-- `--assignee` - New assignee
-- `--title` - New title
-- `--description` - New description
-- `--design` - New design notes
-- `--acceptance` - New acceptance criteria
-- `--notes` - Additional notes
-- `--external-ref` - New external reference
+- `-s, --status` - New status ✅
+- `-p, --priority` - New priority ✅
+- `-a, --assignee` - New assignee ✅
+- `--title` - New title ✅
+- `-d, --description` - New description ✅
+- `--design` - New design notes ✅
+- `--acceptance` - New acceptance criteria ✅
+- `--notes` - Additional notes ✅
+- `--external-ref` - New external reference ✅
+- Multiple issue IDs as arguments (bulk update) ✅
 
-**❌ Missing Flags:**
-- `-s` short form for `--status`
-- `-p` short form for `--priority`
-- `-a` short form for `--assignee`
-- `-d` short form for `--description`
-
-**⚠️ Feature Gaps:**
-- Upstream supports multiple issue IDs as arguments (bulk update)
-- We only support single issue update
-
-**Status:** Feature-complete for single issues, missing bulk operations and short flags
+**Status:** ✅ Feature-complete with all short flags and bulk operations
 
 ---
 
 ### `bd close`
 
 **✅ Implemented Features:**
-- Closes single issue
-- `--reason` - Reason for closing
+- `-r, --reason` - Reason for closing ✅
+- Multiple issue IDs as arguments (bulk close) ✅
 
-**❌ Missing Flags:**
-- `-r` short form for `--reason`
-
-**⚠️ Feature Gaps:**
-- Upstream supports multiple issue IDs as arguments (bulk close)
-- We only support single issue close
-
-**Status:** Works for single issues, missing bulk close and short flag
+**Status:** ✅ Feature-complete with short flags and bulk operations
 
 ---
 
 ### `bd reopen`
 
 **✅ Implemented Features:**
-- Supports multiple issue IDs
-- `--reason` - Reason for reopening
+- Supports multiple issue IDs ✅
+- `-r, --reason` - Reason for reopening ✅
 
-**❌ Missing Flags:**
-- `-r` short form for `--reason`
-
-**Status:** Feature-complete, missing only short flag
+**Status:** ✅ Feature-complete
 
 ---
 
@@ -401,6 +384,17 @@ This issue serves as the **central tracking issue for feature parity** with upst
 
 ---
 
-**Checked up-to-date as of 2025-10-31_#66(29b9753)**
+**Checked up-to-date as of 2025-10-31_#73(5b01eec)**
 
-All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state. All P0, P1, and P2 features are now complete. Many P3 features also completed (export, rename, rename-prefix, ready --sort).
+All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state.
+
+Validated CLI features at commit #73:
+- ✅ Short flags: `-p, -t, -d, -a, -l` (create); `-s, -p, -l` (list); `-s, -p, -a, -d` (update); `-r` (close/reopen); `-a, -p, -n, -s` (ready); `-t` (dep add); `-d` (dep tree)
+- ✅ Bulk operations: show, update, close all support multiple issue IDs
+- ✅ Advanced --deps syntax: both simple (`bd-1,bd-2`) and typed (`blocks:bd-1,related:bd-2`) formats
+- ✅ Advanced list filters: `--label`, `--id`, `--title` all implemented
+- ✅ No default limit on `bd list` (--limit optional)
+- ✅ Dependency management: dep add/remove/tree/cycles all feature-complete
+- ✅ Export, rename, rename-prefix, ready --sort all feature-complete
+
+All P0, P1, and P2 features are complete. Many P3 features also completed.
