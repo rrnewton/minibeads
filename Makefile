@@ -1,4 +1,4 @@
-.PHONY: all build test validate clean install help upstream
+.PHONY: all build test validate clean install help upstream bench
 
 # Default target
 all: build
@@ -31,6 +31,11 @@ validate: test
 fmt:
 	cargo fmt
 
+# Run benchmarks
+bench: release
+	@echo "Running benchmarks with release build..."
+	@./benches/benchmark.sh
+
 # Clean build artifacts
 clean:
 	cargo clean
@@ -50,6 +55,7 @@ help:
 	@echo "  make test      - Run unit tests"
 	@echo "  make validate  - Run all validation checks (test, fmt, clippy)"
 	@echo "  make fmt       - Format code with rustfmt"
+	@echo "  make bench     - Run performance benchmarks"
 	@echo "  make clean     - Clean build artifacts"
 	@echo "  make install   - Install release binary to ~/.local/bin"
 	@echo "  make help      - Show this help message"

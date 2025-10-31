@@ -231,12 +231,19 @@ impl Issue {
     }
 
     /// Get dependencies of a specific type
-    pub fn get_blocking_dependencies(&self) -> Vec<&String> {
+    /// Returns an iterator to avoid unnecessary allocations
+    pub fn get_blocking_dependencies(&self) -> impl Iterator<Item = &String> + '_ {
         self.depends_on
             .iter()
             .filter(|(_, dep_type)| **dep_type == DependencyType::Blocks)
             .map(|(id, _)| id)
-            .collect()
+    }
+
+    /// Check if there are any blocking dependencies (zero-cost check)
+    pub fn has_blocking_dependencies(&self) -> bool {
+        self.depends_on
+            .values()
+            .any(|dep_type| *dep_type == DependencyType::Blocks)
     }
 }
 

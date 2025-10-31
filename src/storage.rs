@@ -851,13 +851,13 @@ impl Storage {
         // Calculate blocked issues (those with blocking dependencies)
         let blocked = issues
             .iter()
-            .filter(|i| i.status != Status::Closed && !i.get_blocking_dependencies().is_empty())
+            .filter(|i| i.status != Status::Closed && i.has_blocking_dependencies())
             .count();
 
         // Calculate ready issues
         let ready = issues
             .iter()
-            .filter(|i| i.status == Status::Open && i.get_blocking_dependencies().is_empty())
+            .filter(|i| i.status == Status::Open && !i.has_blocking_dependencies())
             .count();
 
         // Calculate average lead time for closed issues
@@ -898,9 +898,10 @@ impl Storage {
                 continue;
             }
 
-            let blocking_deps = issue.get_blocking_dependencies();
-            if !blocking_deps.is_empty() {
-                let blocked_by: Vec<String> = blocking_deps.iter().map(|s| (*s).clone()).collect();
+            // Zero-copy: collect blocking dependencies directly without intermediate Vec
+            let blocked_by: Vec<String> = issue.get_blocking_dependencies().cloned().collect();
+
+            if !blocked_by.is_empty() {
                 let blocked_by_count = blocked_by.len();
                 blocked.push(BlockedIssue {
                     issue,
@@ -925,7 +926,7 @@ impl Storage {
 
         let mut ready: Vec<Issue> = issues
             .into_iter()
-            .filter(|i| i.get_blocking_dependencies().is_empty())
+            .filter(|i| !i.has_blocking_dependencies())
             .collect();
 
         // Apply sorting based on policy
