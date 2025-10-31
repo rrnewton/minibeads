@@ -960,7 +960,7 @@ fn parse_minibeads_issue(path: &PathBuf) -> Result<minibeads::beads_generator::R
         .get("status")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("status not found in {:?}", path))?;
-    let status = convert_status_from_str(status_str)?;
+    let status = status_str.parse()?;
 
     let priority = frontmatter
         .get("priority")
@@ -972,7 +972,7 @@ fn parse_minibeads_issue(path: &PathBuf) -> Result<minibeads::beads_generator::R
         .get("issue_type")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("issue_type not found in {:?}", path))?;
-    let issue_type = convert_issue_type_from_str(issue_type_str)?;
+    let issue_type = issue_type_str.parse()?;
 
     // Parse dependencies from frontmatter
     // In minibeads format, depends_on is a YAML map: { test-1: related, test-2: blocks }
@@ -981,7 +981,7 @@ fn parse_minibeads_issue(path: &PathBuf) -> Result<minibeads::beads_generator::R
         for (dep_id_val, dep_type_val) in deps {
             let dep_id = dep_id_val.as_str().unwrap_or("").to_string();
             let dep_type_str = dep_type_val.as_str().unwrap_or("blocks");
-            let dep_type = convert_dep_type_from_str(dep_type_str)?;
+            let dep_type = dep_type_str.parse()?;
             depends_on.insert(dep_id, dep_type);
         }
     }
@@ -1025,7 +1025,7 @@ fn parse_jsonl_to_reference_issue(
         .get("status")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("status not found for {}", id))?;
-    let status = convert_status_from_str(status_str)?;
+    let status = status_str.parse()?;
 
     let priority = issue
         .get("priority")
@@ -1036,7 +1036,7 @@ fn parse_jsonl_to_reference_issue(
         .get("issue_type")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("issue_type not found for {}", id))?;
-    let issue_type = convert_issue_type_from_str(issue_type_str)?;
+    let issue_type = issue_type_str.parse()?;
 
     // Parse dependencies
     let mut depends_on = std::collections::HashMap::new();
@@ -1048,7 +1048,7 @@ fn parse_jsonl_to_reference_issue(
                 .unwrap_or("")
                 .to_string();
             let dep_type_str = dep.get("type").and_then(|v| v.as_str()).unwrap_or("blocks");
-            let dep_type = convert_dep_type_from_str(dep_type_str)?;
+            let dep_type = dep_type_str.parse()?;
             depends_on.insert(dep_id, dep_type);
         }
     }
@@ -1062,42 +1062,6 @@ fn parse_jsonl_to_reference_issue(
         issue_type,
         depends_on,
     })
-}
-
-/// Convert status string to beads_generator::Status
-fn convert_status_from_str(s: &str) -> Result<minibeads::beads_generator::Status> {
-    use minibeads::beads_generator::Status;
-    match s {
-        "open" => Ok(Status::Open),
-        "in_progress" => Ok(Status::InProgress),
-        "blocked" => Ok(Status::Blocked),
-        "closed" => Ok(Status::Closed),
-        _ => Err(anyhow::anyhow!("Invalid status: {}", s)),
-    }
-}
-
-/// Convert issue type string to beads_generator::IssueType
-fn convert_issue_type_from_str(s: &str) -> Result<minibeads::beads_generator::IssueType> {
-    use minibeads::beads_generator::IssueType;
-    match s {
-        "bug" => Ok(IssueType::Bug),
-        "feature" => Ok(IssueType::Feature),
-        "task" => Ok(IssueType::Task),
-        "epic" => Ok(IssueType::Epic),
-        "chore" => Ok(IssueType::Chore),
-        _ => Err(anyhow::anyhow!("Invalid issue type: {}", s)),
-    }
-}
-
-/// Convert dependency type string to beads_generator::DependencyType
-fn convert_dep_type_from_str(s: &str) -> Result<minibeads::beads_generator::DependencyType> {
-    use minibeads::beads_generator::DependencyType;
-    match s {
-        "blocks" => Ok(DependencyType::Blocks),
-        "related" => Ok(DependencyType::Related),
-        "parent-child" => Ok(DependencyType::ParentChild),
-        _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
-    }
 }
 
 /// Compare actual issues with reference state

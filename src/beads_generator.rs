@@ -45,6 +45,9 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 use std::process::Command;
 
+// Re-export production types instead of defining duplicates
+pub use crate::types::{DependencyType, IssueType, Status};
+
 /// Represents a beads command/action
 #[derive(Debug, Clone, PartialEq)]
 pub enum BeadsAction {
@@ -154,63 +157,6 @@ impl std::fmt::Display for BeadsAction {
                 dep_type.as_str()
             ),
             BeadsAction::Export { output } => write!(f, "export to {}", output),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueType {
-    Bug,
-    Feature,
-    Task,
-    Epic,
-    Chore,
-}
-
-impl IssueType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            IssueType::Bug => "bug",
-            IssueType::Feature => "feature",
-            IssueType::Task => "task",
-            IssueType::Epic => "epic",
-            IssueType::Chore => "chore",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Open,
-    InProgress,
-    Blocked,
-    Closed,
-}
-
-impl Status {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Status::Open => "open",
-            Status::InProgress => "in_progress",
-            Status::Blocked => "blocked",
-            Status::Closed => "closed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyType {
-    Blocks,
-    Related,
-    ParentChild,
-}
-
-impl DependencyType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            DependencyType::Blocks => "blocks",
-            DependencyType::Related => "related",
-            DependencyType::ParentChild => "parent-child",
         }
     }
 }

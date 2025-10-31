@@ -12,15 +12,21 @@ pub enum Status {
     Closed,
 }
 
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl Status {
+    /// Get the string representation of this status
+    pub fn as_str(&self) -> &'static str {
+        match self {
             Status::Open => "open",
             Status::InProgress => "in_progress",
             Status::Blocked => "blocked",
             Status::Closed => "closed",
-        };
-        write!(f, "{}", s)
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -52,15 +58,22 @@ pub enum IssueType {
     Chore,
 }
 
+impl IssueType {
+    /// Get the string representation of this issue type
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IssueType::Bug => "bug",
+            IssueType::Feature => "feature",
+            IssueType::Task => "task",
+            IssueType::Epic => "epic",
+            IssueType::Chore => "chore",
+        }
+    }
+}
+
 impl std::fmt::Display for IssueType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IssueType::Bug => write!(f, "bug"),
-            IssueType::Feature => write!(f, "feature"),
-            IssueType::Task => write!(f, "task"),
-            IssueType::Epic => write!(f, "epic"),
-            IssueType::Chore => write!(f, "chore"),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -92,14 +105,21 @@ pub enum DependencyType {
     DiscoveredFrom,
 }
 
+impl DependencyType {
+    /// Get the string representation of this dependency type
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DependencyType::Blocks => "blocks",
+            DependencyType::Related => "related",
+            DependencyType::ParentChild => "parent-child",
+            DependencyType::DiscoveredFrom => "discovered-from",
+        }
+    }
+}
+
 impl std::fmt::Display for DependencyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DependencyType::Blocks => write!(f, "blocks"),
-            DependencyType::Related => write!(f, "related"),
-            DependencyType::ParentChild => write!(f, "parent-child"),
-            DependencyType::DiscoveredFrom => write!(f, "discovered-from"),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
