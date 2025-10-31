@@ -10,7 +10,72 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use minibeads::beads_generator::{ActionExecutor, ActionGenerator, ReferenceInterpreter};
 use rand::RngCore;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+/// Verbosity level for logging
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogLevel {
+    Normal,
+    Verbose,
+}
+
+/// Logger that buffers output and can dump on failure
+#[derive(Clone)]
+struct Logger {
+    buffer: Arc<Mutex<Vec<String>>>,
+    verbosity: LogLevel,
+    buffering: bool,
+}
+
+impl Logger {
+    fn new(verbosity: LogLevel, buffering: bool) -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            verbosity,
+            buffering,
+        }
+    }
+
+    /// Log a message at normal level
+    fn log(&self, msg: String) {
+        self.log_at_level(LogLevel::Normal, msg);
+    }
+
+    /// Log a message at verbose level (only shown if verbosity is Verbose)
+    fn verbose(&self, msg: String) {
+        self.log_at_level(LogLevel::Verbose, msg);
+    }
+
+    /// Log a message at the specified level
+    fn log_at_level(&self, level: LogLevel, msg: String) {
+        if self.buffering {
+            // Buffer all messages regardless of level
+            let mut buffer = self.buffer.lock().unwrap();
+            buffer.push(msg);
+        } else {
+            // Only print if the message level is within our verbosity
+            if level == LogLevel::Normal || self.verbosity == LogLevel::Verbose {
+                println!("{}", msg);
+            }
+        }
+    }
+
+    /// Dump all buffered output to stdout
+    fn dump(&self) {
+        let buffer = self.buffer.lock().unwrap();
+        for msg in buffer.iter() {
+            println!("{}", msg);
+        }
+    }
+
+    /// Clear the buffer without dumping
+    fn clear(&self) {
+        let mut buffer = self.buffer.lock().unwrap();
+        buffer.clear();
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "test_minibeads")]
@@ -59,6 +124,11 @@ enum Commands {
         /// Enable verbose output (print action sequence and detailed checks)
         #[arg(long, short)]
         verbose: bool,
+
+        /// Run stress tests in parallel on N cores (default: number of system cores)
+        /// Only works with --seconds mode
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0", require_equals = true)]
+        parallel: Option<usize>,
     },
 }
 
@@ -81,6 +151,7 @@ fn main() -> Result<()> {
             r#impl,
             binary,
             verbose,
+            parallel,
         } => run_random_actions(
             seed,
             seed_from_entropy,
@@ -90,6 +161,7 @@ fn main() -> Result<()> {
             r#impl,
             binary,
             verbose,
+            parallel,
         ),
     }
 }
@@ -104,6 +176,7 @@ fn run_random_actions(
     implementation: Implementation,
     binary: Option<String>,
     verbose: bool,
+    parallel: Option<usize>,
 ) -> Result<()> {
     // Determine the binary path
     let binary_path = if let Some(path) = binary {
@@ -167,6 +240,40 @@ fn run_random_actions(
     // Determine if we should use --no-db flag (for upstream)
     let use_no_db = matches!(implementation, Implementation::Upstream);
 
+    // Check for parallel execution
+    if let Some(num_workers) = parallel {
+        // Parallel execution only works with --seconds mode
+        if seconds.is_none() {
+            eprintln!("ERROR: --parallel requires --seconds mode");
+            std::process::exit(1);
+        }
+
+        // Determine number of workers (0 means use all cores)
+        let workers = if num_workers == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            num_workers
+        };
+
+        println!("\n🚀 Parallel stress test mode: {} workers", workers);
+        println!("Duration: {} seconds", seconds.unwrap());
+        println!("Will stop on first failure across all workers\n");
+
+        return run_parallel_stress_test(
+            seed,
+            seed_from_entropy,
+            seconds.unwrap(),
+            actions_per_iter,
+            &binary_path,
+            verbose,
+            use_no_db,
+            workers,
+            &implementation,
+        );
+    }
+
     // Choose between iteration-based or time-based testing
     if let Some(duration_secs) = seconds {
         // Time-based stress testing
@@ -205,11 +312,17 @@ fn run_random_actions(
             println!("{}\n", "=".repeat(60));
 
             // Run the test with this seed
+            let verbosity = if verbose {
+                LogLevel::Verbose
+            } else {
+                LogLevel::Normal
+            };
+            let logger = Logger::new(verbosity, false);
             if let Err(e) = run_test(
                 iter_seed,
                 actions_per_iter,
                 &binary_path,
-                verbose,
+                &logger,
                 use_no_db,
             ) {
                 eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
@@ -263,11 +376,17 @@ fn run_random_actions(
             println!("{}\n", "=".repeat(60));
 
             // Run the test with this seed
+            let verbosity = if verbose {
+                LogLevel::Verbose
+            } else {
+                LogLevel::Normal
+            };
+            let logger = Logger::new(verbosity, false);
             if let Err(e) = run_test(
                 iter_seed,
                 actions_per_iter,
                 &binary_path,
-                verbose,
+                &logger,
                 use_no_db,
             ) {
                 eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
@@ -295,34 +414,200 @@ fn run_random_actions(
     Ok(())
 }
 
+/// Run parallel stress tests with multiple worker threads
+#[allow(clippy::too_many_arguments)]
+fn run_parallel_stress_test(
+    seed: Option<u64>,
+    seed_from_entropy: bool,
+    duration_secs: u64,
+    actions_per_iter: usize,
+    binary_path: &str,
+    verbose: bool,
+    use_no_db: bool,
+    workers: usize,
+    implementation: &Implementation,
+) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let start_time = std::time::Instant::now();
+    let duration = std::time::Duration::from_secs(duration_secs);
+
+    // Shared state for coordinating workers
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let total_iterations = Arc::new(AtomicU64::new(0));
+
+    // Spawn progress reporter thread
+    let progress_should_stop = Arc::clone(&should_stop);
+    let progress_iterations = Arc::clone(&total_iterations);
+    let progress_handle = std::thread::spawn(move || {
+        while !progress_should_stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let count = progress_iterations.load(Ordering::Relaxed);
+            print!("\r⏱️  Progress: {} iterations completed", count);
+            std::io::stdout().flush().ok();
+        }
+        // Clear the progress line when done
+        print!("\r{}\r", " ".repeat(50));
+        std::io::stdout().flush().ok();
+    });
+
+    // Spawn worker threads
+    let mut handles = vec![];
+
+    for worker_id in 0..workers {
+        let should_stop = Arc::clone(&should_stop);
+        let total_iterations = Arc::clone(&total_iterations);
+        let binary_path = binary_path.to_string();
+
+        let handle = std::thread::spawn(move || {
+            let mut local_iterations = 0u64;
+
+            // Create buffering logger for parallel workers
+            let verbosity = if verbose {
+                LogLevel::Verbose
+            } else {
+                LogLevel::Normal
+            };
+            let logger = Logger::new(verbosity, true);
+
+            // Each worker gets its own seed offset
+            let base_seed = if seed_from_entropy {
+                let mut rng = rand::thread_rng();
+                rng.next_u64()
+            } else if let Some(s) = seed {
+                s.wrapping_add((worker_id as u64) * 1000000)
+            } else {
+                42u64.wrapping_add((worker_id as u64) * 1000000)
+            };
+
+            while start_time.elapsed() < duration && !should_stop.load(Ordering::Relaxed) {
+                local_iterations += 1;
+                let iter_seed = base_seed.wrapping_add(local_iterations);
+
+                // Run the test
+                if let Err(e) = run_test(
+                    iter_seed,
+                    actions_per_iter,
+                    &binary_path,
+                    &logger,
+                    use_no_db,
+                ) {
+                    // Signal all workers to stop
+                    should_stop.store(true, Ordering::Relaxed);
+
+                    // Dump buffered output on failure
+                    logger.dump();
+
+                    // Update total before returning
+                    total_iterations.fetch_add(local_iterations, Ordering::Relaxed);
+
+                    // Return error info
+                    return Err((worker_id, iter_seed, e, local_iterations));
+                }
+
+                // Clear buffer after successful iteration to avoid memory buildup
+                logger.clear();
+
+                // Update progress counter after each successful iteration
+                total_iterations.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok::<_, (usize, u64, anyhow::Error, u64)>(local_iterations)
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all workers to complete
+    let mut failure: Option<(usize, u64, anyhow::Error, u64)> = None;
+
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(_)) => {}
+            Ok(Err(err_info)) => {
+                if failure.is_none() {
+                    failure = Some(err_info);
+                }
+            }
+            Err(_) => {
+                eprintln!("Worker thread panicked");
+            }
+        }
+    }
+
+    // Signal progress reporter to stop
+    should_stop.store(true, Ordering::Relaxed);
+
+    let total_elapsed = start_time.elapsed();
+    let total_iters = total_iterations.load(Ordering::Relaxed);
+
+    // Wait for progress reporter to finish
+    progress_handle.join().ok();
+
+    // Report failure if any
+    if let Some((worker_id, iter_seed, error, worker_iters)) = failure {
+        eprintln!("\n❌ TEST FAILED in worker {}", worker_id);
+        eprintln!("SEED: {}", iter_seed);
+        eprintln!("Error: {:?}", error);
+        eprintln!(
+            "\nWorker {} completed {} iterations before failure",
+            worker_id, worker_iters
+        );
+        eprintln!("Total iterations across all workers: {}", total_iters);
+        eprintln!("\nTo reproduce this failure, run:");
+        let impl_flag = match implementation {
+            Implementation::Minibeads => "--impl minibeads",
+            Implementation::Upstream => "--impl upstream",
+        };
+        eprintln!(
+            "  test_minibeads random-actions --seed {} {}",
+            iter_seed, impl_flag
+        );
+        std::process::exit(1);
+    }
+
+    // Success!
+    println!("\n{}", "=".repeat(60));
+    println!(
+        "✅ Parallel stress test completed! {} iterations in {:.1}s",
+        total_iters,
+        total_elapsed.as_secs_f64()
+    );
+    println!(
+        "   Throughput: {:.1} iterations/second",
+        total_iters as f64 / total_elapsed.as_secs_f64()
+    );
+    println!("{}", "=".repeat(60));
+
+    Ok(())
+}
+
 fn run_test(
     seed: u64,
     num_actions: usize,
     binary_path: &str,
-    verbose: bool,
+    logger: &Logger,
     use_no_db: bool,
 ) -> Result<()> {
     // Create a temporary directory for this test
     let temp_dir = tempfile::tempdir()?;
     let work_dir = temp_dir.path().to_str().unwrap();
 
-    println!("Working directory: {}", work_dir);
+    logger.log(format!("Working directory: {}", work_dir));
 
     // Create action generator
     let mut generator = ActionGenerator::new(seed);
 
     // Generate action sequence
     let actions = generator.generate_sequence(num_actions);
-    println!("Generated {} actions", actions.len());
+    logger.log(format!("Generated {} actions", actions.len()));
 
     // Print action sequence if verbose
-    if verbose {
-        println!("\n📋 Generated Action Sequence:");
-        for (i, action) in actions.iter().enumerate() {
-            println!("  {}. {}", i + 1, action);
-        }
-        println!();
+    logger.verbose("\n📋 Generated Action Sequence:".to_string());
+    for (i, action) in actions.iter().enumerate() {
+        logger.verbose(format!("  {}. {}", i + 1, action));
     }
+    logger.verbose(String::new());
 
     // Create executor
     let executor = ActionExecutor::new(binary_path, work_dir, use_no_db);
@@ -331,18 +616,12 @@ fn run_test(
     let mut reference = ReferenceInterpreter::new("test".to_string());
 
     // Execute actions
-    if verbose {
-        println!("\nExecuting actions...");
-    } else {
-        println!("\nExecuting actions (use --verbose for details)...");
-    }
+    logger.log("\nExecuting actions (use --verbose for details)...".to_string());
     let mut success_count = 0;
     let mut failure_count = 0;
 
     for (i, action) in actions.iter().enumerate() {
-        if verbose {
-            println!("{:3}. {:?}", i + 1, action);
-        }
+        logger.verbose(format!("{:3}. {:?}", i + 1, action));
 
         match executor.execute(action) {
             Ok(result) => {
@@ -350,16 +629,28 @@ fn run_test(
                     success_count += 1;
                     // Update reference interpreter with successful actions
                     if let Err(e) = reference.execute(action) {
-                        eprintln!("     ❌ Reference interpreter failed: {:?}", e);
+                        let err_msg = format!("     ❌ Reference interpreter failed: {:?}", e);
+                        logger.log(err_msg.clone());
+                        logger.dump(); // Dump buffer on failure
+                        eprintln!("{}", err_msg);
                         return Err(e);
                     }
                 } else {
                     // Some failures are expected (e.g., dependency cycles, duplicate deps)
                     // Only fail the test for unexpected errors
                     if is_critical_failure(&result) {
-                        eprintln!("     ❌ CRITICAL FAILURE");
-                        eprintln!("     Exit code: {:?}", result.exit_code);
-                        eprintln!("     Stderr: {}", result.stderr);
+                        let err_msgs = vec![
+                            "     ❌ CRITICAL FAILURE".to_string(),
+                            format!("     Exit code: {:?}", result.exit_code),
+                            format!("     Stderr: {}", result.stderr),
+                        ];
+                        for msg in &err_msgs {
+                            logger.log(msg.clone());
+                        }
+                        logger.dump(); // Dump buffer on failure
+                        for msg in &err_msgs {
+                            eprintln!("{}", msg);
+                        }
                         return Err(anyhow::anyhow!(
                             "Critical failure on action {}: {:?}",
                             i + 1,
@@ -368,29 +659,30 @@ fn run_test(
                     } else {
                         // Expected failure (e.g., validation error)
                         failure_count += 1;
-                        if verbose {
-                            println!(
-                                "     ⚠️  Expected failure: {}",
-                                result.stderr.lines().next().unwrap_or("")
-                            );
-                        }
+                        logger.verbose(format!(
+                            "     ⚠️  Expected failure: {}",
+                            result.stderr.lines().next().unwrap_or("")
+                        ));
                     }
                 }
             }
             Err(e) => {
-                eprintln!("     ❌ Failed to execute action: {:?}", e);
+                let err_msg = format!("     ❌ Failed to execute action: {:?}", e);
+                logger.log(err_msg.clone());
+                logger.dump(); // Dump buffer on failure
+                eprintln!("{}", err_msg);
                 return Err(e);
             }
         }
     }
 
-    println!(
+    logger.log(format!(
         "\nResults: {} successful, {} expected failures",
         success_count, failure_count
-    );
+    ));
 
     // Verify final state consistency
-    verify_consistency(&executor, work_dir, verbose, use_no_db, &reference)?;
+    verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
 
     Ok(())
 }
@@ -422,13 +714,13 @@ fn is_critical_failure(result: &minibeads::beads_generator::ExecutionResult) -> 
 fn verify_consistency(
     _executor: &ActionExecutor,
     work_dir: &str,
-    verbose: bool,
+    logger: &Logger,
     use_no_db: bool,
     reference: &ReferenceInterpreter,
 ) -> Result<()> {
-    if verbose {
-        println!("\n🔍 Deep verification: comparing actual state with reference interpreter...");
-    }
+    logger.verbose(
+        "\n🔍 Deep verification: comparing actual state with reference interpreter...".to_string(),
+    );
 
     // Check that .beads directory exists
     let beads_dir = PathBuf::from(work_dir).join(".beads");
@@ -437,15 +729,13 @@ fn verify_consistency(
     }
 
     // Step 1: Recursively walk .beads directory and report files
-    let (files, total_size) = walk_beads_directory(&beads_dir, verbose)?;
+    let (files, total_size) = walk_beads_directory(&beads_dir, logger)?;
 
-    if verbose {
-        println!(
-            "   Found {} files, total size: {} bytes",
-            files.len(),
-            total_size
-        );
-    }
+    logger.verbose(format!(
+        "   Found {} files, total size: {} bytes",
+        files.len(),
+        total_size
+    ));
 
     // Step 2: For upstream with --no-db, verify that SQLite databases DO NOT exist
     if use_no_db {
@@ -464,9 +754,7 @@ fn verify_consistency(
             ));
         }
 
-        if verbose {
-            println!("   ✓ No SQLite database files (--no-db mode)");
-        }
+        logger.verbose("   ✓ No SQLite database files (--no-db mode)".to_string());
     }
 
     // Step 3: Verify config.yaml and compare prefix
@@ -475,22 +763,18 @@ fn verify_consistency(
         return Err(anyhow::anyhow!("config.yaml does not exist"));
     }
 
-    verify_config(&config_path, reference, verbose)?;
+    verify_config(&config_path, reference, logger)?;
 
     // Step 4: Compare actual issues with reference state
     if use_no_db {
         // Upstream: verify issues.jsonl
-        verify_upstream_state(&beads_dir, reference, verbose)?;
+        verify_upstream_state(&beads_dir, reference, logger)?;
     } else {
         // Minibeads: verify markdown files in issues/ directory
-        verify_minibeads_state(&beads_dir, reference, verbose)?;
+        verify_minibeads_state(&beads_dir, reference, logger)?;
     }
 
-    if verbose {
-        println!("✅ Deep verification passed: all states match reference interpreter");
-    } else {
-        println!("✅ Verification passed");
-    }
+    logger.log("✅ Verification passed".to_string());
 
     Ok(())
 }
@@ -505,7 +789,7 @@ struct FileInfo {
 /// Recursively walk .beads directory and collect file info
 fn walk_beads_directory(
     beads_dir: &std::path::Path,
-    verbose: bool,
+    logger: &Logger,
 ) -> Result<(Vec<FileInfo>, u64)> {
     let mut files = Vec::new();
     let mut total_size = 0u64;
@@ -514,7 +798,7 @@ fn walk_beads_directory(
         dir: &std::path::Path,
         files: &mut Vec<FileInfo>,
         total_size: &mut u64,
-        verbose: bool,
+        logger: &Logger,
     ) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -522,20 +806,18 @@ fn walk_beads_directory(
             let metadata = entry.metadata()?;
 
             if metadata.is_dir() {
-                walk_recursive(&path, files, total_size, verbose)?;
+                walk_recursive(&path, files, total_size, logger)?;
             } else {
                 let size = metadata.len();
                 *total_size += size;
-                if verbose {
-                    println!("      {:6} bytes  {}", size, path.display());
-                }
+                logger.verbose(format!("      {:6} bytes  {}", size, path.display()));
                 files.push(FileInfo { path, size });
             }
         }
         Ok(())
     }
 
-    walk_recursive(beads_dir, &mut files, &mut total_size, verbose)?;
+    walk_recursive(beads_dir, &mut files, &mut total_size, logger)?;
     Ok((files, total_size))
 }
 
@@ -543,7 +825,7 @@ fn walk_beads_directory(
 fn verify_config(
     config_path: &std::path::Path,
     reference: &ReferenceInterpreter,
-    verbose: bool,
+    logger: &Logger,
 ) -> Result<()> {
     let config_str = std::fs::read_to_string(config_path)?;
     let config: serde_yaml::Value = serde_yaml::from_str(&config_str)?;
@@ -564,9 +846,10 @@ fn verify_config(
         ));
     }
 
-    if verbose {
-        println!("   ✓ config.yaml: prefix matches ('{}')", actual_prefix);
-    }
+    logger.verbose(format!(
+        "   ✓ config.yaml: prefix matches ('{}')",
+        actual_prefix
+    ));
 
     Ok(())
 }
@@ -575,15 +858,13 @@ fn verify_config(
 fn verify_minibeads_state(
     beads_dir: &std::path::Path,
     reference: &ReferenceInterpreter,
-    verbose: bool,
+    logger: &Logger,
 ) -> Result<()> {
     let issues_dir = beads_dir.join("issues");
     if !issues_dir.exists() {
         // No issues created yet is valid
         if reference.get_final_state().is_empty() {
-            if verbose {
-                println!("   ✓ No issues directory (no issues created)");
-            }
+            logger.verbose("   ✓ No issues directory (no issues created)".to_string());
             return Ok(());
         } else {
             return Err(anyhow::anyhow!(
@@ -605,7 +886,7 @@ fn verify_minibeads_state(
     }
 
     // Compare with reference
-    compare_issue_states(&actual_issues, reference.get_final_state(), verbose)?;
+    compare_issue_states(&actual_issues, reference.get_final_state(), logger)?;
 
     Ok(())
 }
@@ -614,16 +895,14 @@ fn verify_minibeads_state(
 fn verify_upstream_state(
     beads_dir: &std::path::Path,
     reference: &ReferenceInterpreter,
-    verbose: bool,
+    logger: &Logger,
 ) -> Result<()> {
     let jsonl_path = beads_dir.join("issues.jsonl");
 
     if !jsonl_path.exists() {
         // No issues.jsonl is valid if no issues were created
         if reference.get_final_state().is_empty() {
-            if verbose {
-                println!("   ✓ No issues.jsonl (no issues created)");
-            }
+            logger.verbose("   ✓ No issues.jsonl (no issues created)".to_string());
             return Ok(());
         } else {
             return Err(anyhow::anyhow!(
@@ -646,7 +925,7 @@ fn verify_upstream_state(
     }
 
     // Compare with reference
-    compare_issue_states(&actual_issues, reference.get_final_state(), verbose)?;
+    compare_issue_states(&actual_issues, reference.get_final_state(), logger)?;
 
     Ok(())
 }
@@ -830,7 +1109,7 @@ fn convert_dep_type_from_str(s: &str) -> Result<minibeads::beads_generator::Depe
 fn compare_issue_states(
     actual: &std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>,
     expected: &std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>,
-    verbose: bool,
+    logger: &Logger,
 ) -> Result<()> {
     use similar_asserts::assert_eq;
 
@@ -867,8 +1146,8 @@ fn compare_issue_states(
         ));
     }
 
-    if verbose && !expected.is_empty() {
-        println!("   ✓ Issue count matches: {}", expected.len());
+    if !expected.is_empty() {
+        logger.verbose(format!("   ✓ Issue count matches: {}", expected.len()));
     }
 
     // Compare each issue
@@ -959,9 +1238,7 @@ fn compare_issue_states(
             }
         }
 
-        if verbose {
-            println!("   ✓ Issue {} matches reference", id);
-        }
+        logger.verbose(format!("   ✓ Issue {} matches reference", id));
     }
 
     Ok(())

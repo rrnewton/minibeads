@@ -11,7 +11,7 @@ updated_at: 2025-10-30T13:56:02.945405078+00:00
 
 Track testing improvements for minibeads.
 
-## Current Status (as of 2025-10-31_#82(ccbda9f23c))
+## Current Status (as of 2025-10-31_#84(27525bf))
 - ✅ 3 unit tests passing (format, lock, issue_roundtrip)
 - ✅ Makefile with validate target created
 - ✅ Clippy checks passing with -D warnings
@@ -42,6 +42,18 @@ Track testing improvements for minibeads.
       - Issue count mismatch shows missing vs extra issues
       - Each field mismatch displays clear headers and color-coded differences
       - Dependencies shown as sorted vectors for consistent comparison
+  - **Time-based stress testing with --seconds flag**:
+    - Duration-based testing that runs until time expires or first failure
+    - Progress reporting with iteration count and elapsed time
+    - Early exit on first failure with reproducible seed
+  - **Parallel stress testing with --parallel flag**:
+    - Multi-threaded execution using std::thread with configurable worker count
+    - Defaults to number of system cores (64 workers on test system)
+    - Thread-safe coordination using Arc<AtomicBool> and Arc<AtomicU64>
+    - Separate seed space per worker (offset by worker_id * 1000000)
+    - Early exit across all workers on first failure
+    - Performance: **1232 iterations in 5 seconds** with 64 workers (240.8 iters/sec)
+    - Speedup: **11.4x faster** than single-threaded (108 iters in 5 seconds)
 - ✅ GitHub Actions CI/CD pipeline configured
   - Multi-platform testing (Linux, macOS, Windows)
   - All platforms passing as of 2025-10-31
@@ -83,6 +95,11 @@ Track testing improvements for minibeads.
   - Visual diffs with - and + markers for expected vs actual
   - Enhanced error reporting for issue count mismatches
   - Field-by-field comparison with clear headers and color-coded output
+- [x] Time-based and parallel stress testing (commit #84/27525bf)
+  - Added --seconds flag for duration-based testing
+  - Added --parallel flag with optional core count
+  - Thread-safe parallel execution with atomic coordination
+  - 11.4x speedup with 64 workers vs single-threaded
 
 ## Related Issues
 - minibeads-5: Fixed serialization bug and validation (CLOSED)
