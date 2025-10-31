@@ -778,13 +778,9 @@ impl Storage {
             }
         }
 
-        // Populate dependents for each issue
+        // Populate dependents for each issue (zero-copy: take ownership from HashMap)
         for issue in issues.iter_mut() {
-            if let Some(dependents) = reverse_deps.get(&issue.id) {
-                issue.dependents = dependents.clone();
-            } else {
-                issue.dependents = Vec::new();
-            }
+            issue.dependents = reverse_deps.remove(&issue.id).unwrap_or_default();
         }
     }
 
