@@ -25,6 +25,8 @@ winapi = { version = "0.3", features = ["handleapi", "processthreadsapi", "winnt
 
 [dev-dependencies]
 dir-test = "0.4"
+rand = "0.8"
+tempfile = "3.13"
 
 [build-dependencies]
 built = { version = "0.7", features = ["git2"] }
