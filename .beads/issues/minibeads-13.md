@@ -1,11 +1,12 @@
 ---
 title: 'Critical: MCP integration bugs - dependencies not exposed correctly'
-status: open
+status: closed
 priority: 0
 issue_type: bug
 assignee: claude
 created_at: 2025-10-30T14:30:56.705927961+00:00
-updated_at: 2025-10-30T18:10:21.423692775+00:00
+updated_at: 2025-10-31T03:16:31.852955717+00:00
+closed_at: 2025-10-31T03:16:31.852955447+00:00
 ---
 
 # Description
@@ -30,15 +31,6 @@ During comprehensive MCP testing, discovered critical bugs that break agent work
    - Populated by reverse dependency lookup in storage layer
 3. Storage layer changes to compute and populate dependents
 
-**Verification**:
-```bash
-bd show test-1 --json
-## Now correctly shows: {"dependencies": [], "dependents": [{"id": "test-2", "type": "blocks"}]}
-
-bd show test-2 --json
-## Now correctly shows: {"dependencies": [{"id": "test-1", "type": "blocks"}], "dependents": []}
-```
-
 **Impact**: ✅ AI agents can now see dependencies correctly, unblocking workflow planning.
 
 ## Bug #2: Acceptance Criteria with Markdown List Causes Parse Error - ✅ FIXED
@@ -47,51 +39,40 @@ bd show test-2 --json
 
 **Symptom**: Creating issue via MCP with acceptance criteria starting with `- ` fails with clap parse error.
 
-**Error Message**:
-```
-error: unexpected argument '- ' found
-  tip: to pass '- ' as a value, use '-- - '
-```
-
-**Reproducer**:
-```python
-mcp.create(
-  title="Test",
-  acceptance="- Criteria 1\n- Criteria 2"
-)
-## Fails with parse error
-```
-
-**Root Cause**: MCP server passes acceptance text as CLI argument, clap interprets leading dash as flag without `allow_hyphen_values`.
-
 **Fix Applied**:
-Added `allow_hyphen_values = true` to all text field arguments that might contain markdown lists or leading hyphens:
-- Create command: description, design, acceptance
-- Update command: title, description, design, acceptance, notes
-- Close command: reason
-- Reopen command: reason
-
-**Verification**:
-```bash
-bd create "Test" --acceptance "- Criteria 1\n- Criteria 2"  # Now works!
-bd update test-1 --notes "- Note 1\n- Note 2"  # Now works!
-```
+Added `allow_hyphen_values = true` to all text field arguments that might contain markdown lists or leading hyphens.
 
 **Impact**: ✅ AI agents can now use markdown lists in all text fields without workarounds.
 
-## Bug #3: Nonexistent Dependencies Accepted Without Validation
+## Bug #3: Nonexistent Dependencies Accepted Without Validation - ✅ FIXED
 
-**Symptom**: Can create issues depending on nonexistent issues. They appear in blocked list.
+**Status**: ✅ RESOLVED
+
+**Symptom**: Can create issues depending on nonexistent issues without any warning.
 
 **Evidence**:
 ```bash
-bd create "Task" --deps mcp-999  # mcp-999 doesn't exist
+bd create "Task" --deps mcp-999  # mcp-999 doesn't exist, no warning
 bd blocked  # Shows task blocked by mcp-999
 ```
 
-**Impact**: Agents can create invalid dependency graphs. Might be intentional for forward references?
+**Root Cause**: No validation in create_issue() or add_dependency() methods.
 
-**Decision Needed**: Should we validate dependency targets exist, or allow forward references?
+**Fix Applied** (src/storage.rs:499-512):
+Added validate_dependency_exists() helper that emits warnings when dependencies don't exist:
+- Called in create_issue() when processing --deps
+- Called in add_dependency() when adding dependencies
+- Warns user but allows forward references (for planned work)
+
+**Impact**: ✅ Users now get clear warnings about nonexistent dependencies while still supporting forward references.
+
+**Verification**:
+```bash
+bd create "Task" --deps mcp-999 2>&1
+## Warning: Dependency target does not exist: mcp-999
+##   This issue will be blocked until mcp-999 is created.
+## Created issue: mcp-1
+```
 
 ## Testing Matrix
 
@@ -107,7 +88,7 @@ All MCP operations tested:
 | update | ✅ FIXED | Bug #2 resolved |
 | close | ✅ FIXED | Bug #2 resolved |
 | reopen | ✅ FIXED | Bug #2 resolved |
-| dep | ⚠️ Partial | Bug #3 - no validation |
+| dep | ✅ FIXED | Bug #3 resolved |
 | stats | ✅ Works | - |
 | blocked | ✅ Works | Shows all blockers including nonexistent |
 | ready | ✅ Works | Correctly excludes hard blockers only |
@@ -127,9 +108,8 @@ All MCP operations tested:
 ✅ External references
 ✅ Reopening multiple issues at once
 ✅ Filtering by status, priority, type, assignee
+✅ Nonexistent dependencies (now warns)
 
-## Recommended Fixes
+## Resolution
 
-1. **Bug #1 (Priority 0)**: ✅ DONE - Added transformation layer with dependencies/dependents arrays
-2. **Bug #2 (Priority 1)**: ✅ DONE - Added `allow_hyphen_values = true` to all text field arguments
-3. **Bug #3 (Priority 2)**: TODO - Add optional --validate-deps flag, default to warn on nonexistent deps
+All three critical bugs have been resolved. MCP integration is now fully functional with proper validation and user warnings.

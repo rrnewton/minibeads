@@ -195,8 +195,10 @@ impl Storage {
         issue.labels = labels;
         issue.external_ref = external_ref;
 
-        // Add dependencies
+        // Add dependencies (with validation)
         for (dep_id, dep_type) in deps {
+            // Validate dependency target exists (warn if not)
+            self.validate_dependency_exists(&dep_id);
             issue.depends_on.insert(dep_id, dep_type);
         }
 
@@ -496,6 +498,19 @@ impl Storage {
         Ok(changes)
     }
 
+    /// Validate that a dependency target exists (warns if not)
+    fn validate_dependency_exists(&self, dep_id: &str) -> bool {
+        let dep_path = self.issues_dir.join(format!("{}.md", dep_id));
+        let exists = dep_path.exists();
+
+        if !exists {
+            eprintln!("Warning: Dependency target does not exist: {}", dep_id);
+            eprintln!("  This issue will be blocked until {} is created.", dep_id);
+        }
+
+        exists
+    }
+
     /// Add a dependency between issues
     pub fn add_dependency(
         &self,
@@ -509,6 +524,9 @@ impl Storage {
         if !issue_path.exists() {
             anyhow::bail!("Issue not found: {}", from_id);
         }
+
+        // Validate dependency target exists (warn if not)
+        self.validate_dependency_exists(to_id);
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(from_id, &content)?;
