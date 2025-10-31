@@ -52,7 +52,7 @@ fn build_upstream() -> bool {
     true
 }
 
-/// Run test_minibeads with specified arguments
+/// Run test_minibeads random-actions with specified arguments
 fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
     println!(
         "\nRunning: {} random-actions {}",
@@ -65,6 +65,34 @@ fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
         .args(args)
         .output()
         .expect("Failed to execute test_minibeads");
+
+    // Print output for debugging
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    assert!(
+        output.status.success(),
+        "{} failed with exit code: {:?}",
+        test_name,
+        output.status.code()
+    );
+}
+
+/// Run test_minibeads sync-test with specified arguments
+fn run_sync_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
+    println!(
+        "\nRunning: {} sync-test {}",
+        binary_path.display(),
+        args.join(" ")
+    );
+
+    let output = Command::new(binary_path)
+        .arg("sync-test")
+        .args(args)
+        .output()
+        .expect("Failed to execute test_minibeads sync-test");
 
     // Print output for debugging
     println!("{}", String::from_utf8_lossy(&output.stdout));
@@ -190,5 +218,28 @@ fn test_stress_upstream_parallel() {
             "hash",
         ],
         "Parallel stress test against upstream bd with hash IDs and import",
+    );
+}
+
+#[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
+fn test_sync_stress() {
+    // Check if upstream is available
+    if !build_upstream() {
+        return;
+    }
+
+    let binary_path = build_minibeads();
+    run_sync_test(
+        &binary_path,
+        &[
+            "--seed",
+            "12345",
+            "--cycles",
+            "10",
+            "--actions-per-phase",
+            "15",
+        ],
+        "Bidirectional sync stress test (10 cycles, 15 actions/phase, ~3s)",
     );
 }
