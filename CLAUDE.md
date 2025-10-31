@@ -43,7 +43,7 @@ Do NOT read or modify files inside the `./.beads/` private database, except when
 
 Prefer the MCP client to the CLI tool. ALWAYS `bd update` existing issues, never introduce duplicates with spurious `bd create`.
 
-The issue prefix may be customized (`foobar-1`, `foobar-2`), but here we will refer `bd-1` as example issue names
+The issue prefix may be customized (`foobar-1`, `foobar-2`), but for this project we use the prefix "minibeads" (e.g., `minibeads-1`, `minibeads-2`)
 
 #### Tracking issues and Priorities
 
@@ -51,16 +51,16 @@ Warning: Be careful to EDIT tracking issues (`bd update`) and not just
 file a new duplicate issue with `bd create`.
 
 - Issues labeled "human" are created by me and will always have 0 priority.
-- Issue mtg-1, at priority 0, is the OVERALL tracking issue. It primarily references other tracking issues
-  and reiterate some of these conventions. We want to keep it pretty short.
+- Issue minibeads-1, at priority 0, is the OVERALL tracking issue. It primarily references other tracking issues
+  and reiterates some of these conventions. We want to keep it pretty short.
 
-- The next tracking issues, e.g. mtg-2 and on have priority 1 and are topic-specific trackers:
-  - Optimization tracking
-  - MTG feature completeness: supporting keywords/abilities/complex mana and effects.
-  - Gameplay feautures: like an actual TUI to play as a human.
-  - Cross-cutting codebase issues: APIs (player, controller, etc), testing coverage and methodology.
+- The next tracking issues, e.g. minibeads-2 and on have priority 1 and are topic-specific trackers:
+  - Documentation tracking (minibeads-2)
+  - Testing and validation tracking (minibeads-3)
+  - Performance optimization tracking (minibeads-4)
+  - Feature completeness tracking vs upstream bd (minibeads-15)
 
- - All tracking issues refer to granular issues by name in their text, e.g. "mtg-42"
+ - All tracking issues refer to granular issues by name in their text, e.g. "minibeads-42"
  - All other granular issues will have priority 3 to 4 unless they are seen as a critical bug, which will bump them to priority 2.
 
 #### Mark transient information
@@ -76,7 +76,7 @@ Sometimes this requires us to split our commits into (1) functionality and then 
 We don't want TODO items to be in floating code alone. For anything but the most trivial TODOs, we adopt the convention of referencing issues that tracks the TODO:
 
 ```
-// TODO(mtg-13): brief summary here
+// TODO(minibeads-13): brief summary here
 ```
 
 Then, the commit that fixes the issue both removes the comment and closes the issue in beads.
