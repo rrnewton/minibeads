@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2025-10-31T04:36:53.632130617+00:00
+updated_at: 2025-10-31T19:03:28.630490641+00:00
 ---
 
 # Description
@@ -19,7 +19,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 ### ✅ Implemented (Compatible)
 - `--actor` - Actor name for audit trail
-- `--db` - Database path
+- `--db` - Database path (syntactic sugar for upstream compatibility, see note below)
 - `--json` - JSON output format
 - `--no-auto-flush` - (ignored, for compatibility)
 - `--no-auto-import` - (ignored, for compatibility)
@@ -31,8 +31,16 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `--sandbox` - Sandbox mode (equivalent to --no-daemon --no-auto-flush --no-auto-import)
 
 ### 🔧 Minibeads-Specific Flags (prefixed with --mb)
+- `--mb-beads-dir` - ✅ **Preferred flag for specifying .beads directory** (added 2025-10-31_#98)
 - `--mb-validation` - Validation mode (silent, warn, error)
 - `--mb-no-cmd-logging` - Disable command history logging
+
+**Note on --db flag:** As of commit #98 (2025-10-31), `--db` is treated as **syntactic sugar** for upstream bd compatibility. When `--db` points to a `.db` file, minibeads automatically uses the parent directory. The configuration priority order is:
+1. `--mb-beads-dir` (minibeads-specific, preferred)
+2. `--db` (upstream compatibility)
+3. `MB_BEADS_DIR` environment variable
+4. `BEADS_DB` environment variable (upstream compat)
+5. Automatic .beads directory tree search
 
 ## Command Completeness
 
@@ -314,6 +322,12 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
    - ✅ `--id` - Filter by specific IDs (comma-separated)
    - ✅ `--title` - Filter by title text (case-insensitive substring)
 
+4. ✅ DONE - **Clarify --db semantics and add --mb-beads-dir** (commit #98, 2025-10-31)
+   - ✅ Add `--mb-beads-dir` as preferred minibeads-specific flag
+   - ✅ Treat `--db` as syntactic sugar for upstream compatibility
+   - ✅ Automatic parent directory extraction when --db points to .db file
+   - ✅ Documented configuration priority order in quickstart
+
 ### P2 - Medium Priority (Dependency Management)
 1. ✅ DONE - Implement `bd dep remove` - Remove dependencies
 2. ✅ DONE - Implement `bd dep tree` - Show dependency tree visualization
@@ -384,11 +398,13 @@ This issue serves as the **central tracking issue for feature parity** with upst
 
 ---
 
-**Checked up-to-date as of 2025-10-31_#73(5b01eec)**
+**Checked up-to-date as of 2025-10-31_#98(bea2bc8)**
 
-All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state.
+All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state including latest --mb-beads-dir addition.
 
-Validated CLI features at commit #73:
+Validated CLI features at commit #98:
+- ✅ Global flag improvements: --mb-beads-dir added, --db semantics clarified
+- ✅ Configuration priority order: documented and tested
 - ✅ Short flags: `-p, -t, -d, -a, -l` (create); `-s, -p, -l` (list); `-s, -p, -a, -d` (update); `-r` (close/reopen); `-a, -p, -n, -s` (ready); `-t` (dep add); `-d` (dep tree)
 - ✅ Bulk operations: show, update, close all support multiple issue IDs
 - ✅ Advanced --deps syntax: both simple (`bd-1,bd-2`) and typed (`blocks:bd-1,related:bd-2`) formats
