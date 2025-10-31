@@ -10,12 +10,20 @@ This project that you're planning then executing is to create MINIMAL Rust langu
 
 In this session you have the beads MCP loaded. You can try operations on it and see what `bd ...` commands it attempts to invoke. Don't let it install any other version of beads than the Rust one we will develop here.  Let me know if it is trynig to.
 ## Markdown backend differences
-We will not have multiple representations of the data (issues.jsonl + a DB), instead the markdown representation is the ONLY one. In fact the only thing we will require in the .beads directory is this:
+We will not have multiple representations of the data (issues.jsonl + a DB), instead the markdown representation is the ONLY one. The core .beads directory structure is:
 
 ```
-.beads/config.yaml
-.beads/issues/ # <- markdown storage here!! 
+.beads/
+├── config.yaml          # Required: contains issue-prefix
+├── issues/              # Required: markdown storage (source of truth)
+│   └── <prefix>-N.md   # Individual issue files
+├── .gitignore           # Auto-generated
+├── command_history.log  # Optional: command logging (can be disabled with --mb-no-cmd-logging)
+├── issues.jsonl         # Optional: created by `bd export --mb-output-default`
+└── minibeads.lock       # Temporary: coarse-grained lock file (PID-based)
 ```
+
+**Note**: The markdown files in `.beads/issues/` are the single source of truth. The `issues.jsonl` file is NOT part of the core storage - it's only created when explicitly exporting with `bd export`.
 
 We will use BEADS_DIR if it is available to find `.beads`, but we will attempt to respect the upstream beads `BEADS_DB` as well. If it points to `/dir/.beads/foo.db` we will just cut off the last part of the path and use that to find .beads.
 
@@ -29,7 +37,22 @@ Upgrades compared to the Go/markdown version:
 - On `bd create` proactively populate an empty `# Description` section in the .md file. Don't do this for the other sections.
 - Add extra validation/sanitizing. Our serialization scheme relies on us owning the top-level section headers like "Description" and "Notes. if someone attempts to set one of the string fields in an issue `bd update --description`, but provides markdown that has TOP LEVEL SECTIONS, then increase the section level of everything in their string, moving H1 `# ` to H2 `## ` and so on.  Error if you hit max section level for markdown.
 - Likewise if reading an issue from serialization, issue a warning if it has top level section headers that are NOT the built in sections we support.
-### Course grained locking
-The upstream markdown store has a complicated lock-ordering scheme to lock individual .md issues. Let's do something much simpler. Whenever we operate on our markdown "database" touch a file `.beads/minibeads.lock` and set its contents to our PID. We do exponential backoff with sleeping up to five seconds total while waiting for the course grained lock.  In our initial design readers will take the lock as well.
+### Coarse-grained locking
+The upstream markdown store has a complicated lock-ordering scheme to lock individual .md issues. Let's do something much simpler. Whenever we operate on our markdown "database" touch a file `.beads/minibeads.lock` and set its contents to our PID. We do exponential backoff with sleeping up to five seconds total while waiting for the coarse-grained lock. In our initial design readers will take the lock as well.
 
+**Implementation verified**: Lock file is `minibeads.lock`, uses PID-based locking with exponential backoff (10ms initial, up to 5000ms total) as specified. See `src/lock.rs`.
+
+---
+
+## Validation Status
+
+**Checked up-to-date as of 2025-10-31_#69(3314053)**
+
+All architectural claims verified against implementation:
+- ✅ Directory structure matches specification (.beads/config.yaml, .beads/issues/)
+- ✅ Markdown-only storage confirmed (issues.jsonl is export-only, not source of truth)
+- ✅ Lock file naming and implementation verified (minibeads.lock with PID)
+- ✅ Config.yaml contains only issue-prefix field as specified
+- ✅ Description section auto-creation confirmed on `bd create`
+- ✅ YAML frontmatter serialization implemented as described
 
