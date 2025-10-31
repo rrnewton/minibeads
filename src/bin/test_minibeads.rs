@@ -749,8 +749,34 @@ fn compare_issue_states(
     expected: &std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>,
     verbose: bool,
 ) -> Result<()> {
+    use similar_asserts::assert_eq;
+
     // Check counts match
     if actual.len() != expected.len() {
+        eprintln!("\n❌ Issue count mismatch!");
+        eprintln!(
+            "Expected {} issues, but got {} issues\n",
+            expected.len(),
+            actual.len()
+        );
+
+        // Show which issues are in expected but not actual, and vice versa
+        let expected_ids: std::collections::HashSet<_> = expected.keys().collect();
+        let actual_ids: std::collections::HashSet<_> = actual.keys().collect();
+
+        let missing: Vec<_> = expected_ids.difference(&actual_ids).collect();
+        let extra: Vec<_> = actual_ids.difference(&expected_ids).collect();
+
+        if !missing.is_empty() {
+            eprintln!(
+                "Missing issues (in reference but not in actual): {:?}",
+                missing
+            );
+        }
+        if !extra.is_empty() {
+            eprintln!("Extra issues (in actual but not in reference): {:?}", extra);
+        }
+
         return Err(anyhow::anyhow!(
             "Issue count mismatch: expected {}, got {}",
             expected.len(),
@@ -768,70 +794,85 @@ fn compare_issue_states(
             anyhow::anyhow!("Issue {} exists in reference but not in actual state", id)
         })?;
 
-        // Compare fields
-        if actual_issue.title != expected_issue.title {
-            return Err(anyhow::anyhow!(
-                "Title mismatch for {}: expected '{}', got '{}'",
-                id,
-                expected_issue.title,
-                actual_issue.title
-            ));
-        }
+        // Use similar_asserts for colorful diffs on mismatch
+        // Wrap in a catch_unwind to convert panic to Result
+        let comparison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Compare title
+            if actual_issue.title != expected_issue.title {
+                eprintln!("\n❌ Title mismatch for issue {}:", id);
+                assert_eq!(
+                    &expected_issue.title, &actual_issue.title,
+                    "Title mismatch for {}",
+                    id
+                );
+            }
 
-        if actual_issue.status != expected_issue.status {
-            return Err(anyhow::anyhow!(
-                "Status mismatch for {}: expected '{:?}', got '{:?}'",
-                id,
-                expected_issue.status,
-                actual_issue.status
-            ));
-        }
+            // Compare status
+            if actual_issue.status != expected_issue.status {
+                eprintln!("\n❌ Status mismatch for issue {}:", id);
+                assert_eq!(
+                    &expected_issue.status, &actual_issue.status,
+                    "Status mismatch for {}",
+                    id
+                );
+            }
 
-        if actual_issue.priority != expected_issue.priority {
-            return Err(anyhow::anyhow!(
-                "Priority mismatch for {}: expected {}, got {}",
-                id,
-                expected_issue.priority,
-                actual_issue.priority
-            ));
-        }
+            // Compare priority
+            if actual_issue.priority != expected_issue.priority {
+                eprintln!("\n❌ Priority mismatch for issue {}:", id);
+                assert_eq!(
+                    &expected_issue.priority, &actual_issue.priority,
+                    "Priority mismatch for {}",
+                    id
+                );
+            }
 
-        if actual_issue.issue_type != expected_issue.issue_type {
-            return Err(anyhow::anyhow!(
-                "IssueType mismatch for {}: expected '{:?}', got '{:?}'",
-                id,
-                expected_issue.issue_type,
-                actual_issue.issue_type
-            ));
-        }
+            // Compare issue_type
+            if actual_issue.issue_type != expected_issue.issue_type {
+                eprintln!("\n❌ IssueType mismatch for issue {}:", id);
+                assert_eq!(
+                    &expected_issue.issue_type, &actual_issue.issue_type,
+                    "IssueType mismatch for {}",
+                    id
+                );
+            }
 
-        // Compare dependencies
-        if actual_issue.depends_on.len() != expected_issue.depends_on.len() {
-            return Err(anyhow::anyhow!(
-                "Dependency count mismatch for {}: expected {}, got {}",
-                id,
-                expected_issue.depends_on.len(),
-                actual_issue.depends_on.len()
-            ));
-        }
+            // Compare dependencies
+            if actual_issue.depends_on != expected_issue.depends_on {
+                eprintln!("\n❌ Dependencies mismatch for issue {}:", id);
 
-        for (dep_id, expected_dep_type) in &expected_issue.depends_on {
-            let actual_dep_type = actual_issue.depends_on.get(dep_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Dependency {} -> {} exists in reference but not in actual state",
-                    id,
-                    dep_id
-                )
-            })?;
+                // Convert to sorted vectors for better diff display
+                let mut expected_deps: Vec<_> = expected_issue.depends_on.iter().collect();
+                let mut actual_deps: Vec<_> = actual_issue.depends_on.iter().collect();
+                expected_deps.sort_by_key(|(k, _)| *k);
+                actual_deps.sort_by_key(|(k, _)| *k);
 
-            if actual_dep_type != expected_dep_type {
+                assert_eq!(
+                    &expected_deps, &actual_deps,
+                    "Dependencies mismatch for {}",
+                    id
+                );
+            }
+        }));
+
+        // If comparison panicked (assertion failed), convert to error
+        if let Err(panic_info) = comparison_result {
+            // The panic from similar_asserts already printed colorful output
+            // Just return an error to stop the test
+            if let Some(s) = panic_info.downcast_ref::<String>() {
                 return Err(anyhow::anyhow!(
-                    "Dependency type mismatch for {} -> {}: expected '{:?}', got '{:?}'",
+                    "Verification failed for issue {}: {}",
                     id,
-                    dep_id,
-                    expected_dep_type,
-                    actual_dep_type
+                    s
                 ));
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                return Err(anyhow::anyhow!(
+                    "Verification failed for issue {}: {}",
+                    id,
+                    s
+                ));
+            } else {
+                return Err(anyhow::anyhow!("Verification failed for issue {}", id));
             }
         }
 

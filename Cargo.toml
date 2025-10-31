@@ -22,6 +22,7 @@ thiserror = "2.0"
 filetime = "0.2"
 rand = "0.8"
 tempfile = "3.13"
+similar-asserts = "1.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
