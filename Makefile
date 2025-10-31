@@ -1,4 +1,4 @@
-.PHONY: all build test validate clean install help upstream bench
+.PHONY: all build test validate validate-inner clean install help upstream bench
 
 # Default target
 all: build
@@ -19,8 +19,12 @@ upstream: beads/bd-upstream
 beads/bd-upstream:
 	cd beads && go build -o bd-upstream ./cmd/bd
 
-# Validation target - runs all checks before commit
-validate: test
+# Validation target - runs all checks before commit with timing
+validate:
+	@time $(MAKE) validate-inner
+
+# Internal validation target that does the actual work
+validate-inner: test
 	@echo "Running cargo fmt check..."
 	cargo fmt -- --check
 	@echo "Running clippy..."
