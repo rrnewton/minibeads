@@ -184,7 +184,7 @@ fn run_random_actions(
     binary: Option<String>,
     verbose: bool,
     parallel: Option<usize>,
-    _test_import: bool,
+    test_import: bool,
 ) -> Result<()> {
     // Determine the binary path
     let binary_path = if let Some(path) = binary {
@@ -279,6 +279,7 @@ fn run_random_actions(
             use_no_db,
             workers,
             &implementation,
+            test_import,
         );
     }
 
@@ -332,6 +333,7 @@ fn run_random_actions(
                 &binary_path,
                 &logger,
                 use_no_db,
+                test_import,
             ) {
                 eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
                 eprintln!("Error: {:?}", e);
@@ -396,6 +398,7 @@ fn run_random_actions(
                 &binary_path,
                 &logger,
                 use_no_db,
+                test_import,
             ) {
                 eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
                 eprintln!("Error: {:?}", e);
@@ -434,6 +437,7 @@ fn run_parallel_stress_test(
     use_no_db: bool,
     workers: usize,
     implementation: &Implementation,
+    test_import: bool,
 ) -> Result<()> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
@@ -500,6 +504,7 @@ fn run_parallel_stress_test(
                     &binary_path,
                     &logger,
                     use_no_db,
+                    test_import,
                 ) {
                     // Signal all workers to stop
                     should_stop.store(true, Ordering::Relaxed);
@@ -596,6 +601,7 @@ fn run_test(
     binary_path: &str,
     logger: &Logger,
     use_no_db: bool,
+    test_import: bool,
 ) -> Result<()> {
     // Create a temporary directory for this test
     let temp_dir = tempfile::tempdir()?;
@@ -691,6 +697,12 @@ fn run_test(
 
     // Verify final state consistency
     verify_consistency(&executor, work_dir, logger, use_no_db, &reference)?;
+
+    // If testing upstream and import test is enabled, verify JSONL import
+    if use_no_db && test_import {
+        logger.log("\n📦 Testing JSONL import capability...".to_string());
+        test_jsonl_import(work_dir, binary_path, logger, &reference)?;
+    }
 
     Ok(())
 }
@@ -1248,6 +1260,128 @@ fn compare_issue_states(
 
         logger.verbose(format!("   ✓ Issue {} matches reference", id));
     }
+
+    Ok(())
+}
+
+/// Test JSONL import from upstream to minibeads
+fn test_jsonl_import(
+    work_dir: &str,
+    upstream_binary: &str,
+    logger: &Logger,
+    reference: &ReferenceInterpreter,
+) -> Result<()> {
+    logger.verbose("   Exporting upstream database to JSONL...".to_string());
+
+    // Find the minibeads binary
+    let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+    let exe_dir = exe_path
+        .parent()
+        .expect("Failed to get executable directory");
+    let minibeads_binary = exe_dir.join("bd").to_str().unwrap().to_string();
+
+    if !PathBuf::from(&minibeads_binary).exists() {
+        return Err(anyhow::anyhow!(
+            "Minibeads binary not found at: {}. Build it first with: cargo build",
+            minibeads_binary
+        ));
+    }
+
+    // Export upstream database to JSONL
+    let export_path = PathBuf::from(work_dir).join("export.jsonl");
+    let export_output = std::process::Command::new(upstream_binary)
+        .current_dir(work_dir)
+        .args(["export", "-o", export_path.to_str().unwrap()])
+        .output()?;
+
+    if !export_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to export upstream database:\n{}",
+            String::from_utf8_lossy(&export_output.stderr)
+        ));
+    }
+
+    logger.verbose(format!("   ✓ Exported to {}", export_path.display()));
+
+    // Parse the exported JSONL
+    logger.verbose("   Parsing exported JSONL...".to_string());
+    let jsonl_content = std::fs::read_to_string(&export_path)?;
+    let mut exported_issues = std::collections::HashMap::new();
+
+    for (line_num, line) in jsonl_content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let issue: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSONL line {}: {}", line_num + 1, e))?;
+        let ref_issue = parse_jsonl_to_reference_issue(&issue)?;
+        exported_issues.insert(ref_issue.id.clone(), ref_issue);
+    }
+
+    logger.verbose(format!(
+        "   ✓ Parsed {} issues from JSONL",
+        exported_issues.len()
+    ));
+
+    // Verify exported JSONL matches reference
+    logger.verbose("   Verifying exported JSONL matches reference...".to_string());
+    compare_issue_states(&exported_issues, reference.get_final_state(), logger)?;
+    logger.verbose("   ✓ Exported JSONL matches reference".to_string());
+
+    // Create a fresh directory for import test
+    let import_dir = tempfile::tempdir()?;
+    let import_work_dir = import_dir.path().to_str().unwrap();
+
+    logger.verbose(format!(
+        "   Testing minibeads import in fresh directory: {}",
+        import_work_dir
+    ));
+
+    // Initialize minibeads in import directory with same prefix
+    let init_output = std::process::Command::new(&minibeads_binary)
+        .current_dir(import_work_dir)
+        .args(["init", "--prefix", reference.get_prefix()])
+        .output()?;
+
+    if !init_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to init minibeads in import directory:\n{}",
+            String::from_utf8_lossy(&init_output.stderr)
+        ));
+    }
+
+    // Copy JSONL to import directory
+    let import_jsonl_path = PathBuf::from(import_work_dir).join("export.jsonl");
+    std::fs::copy(&export_path, &import_jsonl_path)?;
+
+    // Import into minibeads
+    logger.verbose("   Importing JSONL into minibeads...".to_string());
+    let import_output = std::process::Command::new(&minibeads_binary)
+        .current_dir(import_work_dir)
+        .args(["import", "-i", import_jsonl_path.to_str().unwrap()])
+        .output()?;
+
+    if !import_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to import JSONL into minibeads:\n{}",
+            String::from_utf8_lossy(&import_output.stderr)
+        ));
+    }
+
+    logger.verbose(format!(
+        "   ✓ Import completed: {}",
+        String::from_utf8_lossy(&import_output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+    ));
+
+    // Verify minibeads imported correctly
+    logger.verbose("   Verifying minibeads imported state...".to_string());
+    let import_beads_dir = PathBuf::from(import_work_dir).join(".beads");
+    verify_minibeads_state(&import_beads_dir, reference, logger)?;
+
+    logger.log("✅ JSONL import test passed".to_string());
 
     Ok(())
 }

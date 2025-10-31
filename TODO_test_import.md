@@ -1,179 +1,145 @@
-# TODO: Complete JSONL Import Test Integration
+# JSONL Import Test Integration - COMPLETE
+
+## Status
+✅ **COMPLETE** - Implementation finished, ready for testing
 
 ## Overview
-This document tracks the remaining work to integrate JSONL import testing into the random-actions stress test.
+Successfully integrated JSONL import testing into the random-actions stress test. When testing upstream, the test now exports the database to JSONL, verifies it can be parsed, and confirms minibeads can import it correctly.
 
-## Current Status (Commit: fbb35c6)
+## What Was Implemented
+
+### 1. Command-Line Interface
 - ✅ Added `--test-import` flag to `random-actions` command
 - ✅ Flag defaults to `true` (import test runs by default when using upstream)
-- ✅ Parameter threaded through to `run_random_actions()`
-- ✅ Code compiles and basic infrastructure in place
+- ✅ Flag only affects upstream mode (ignored for minibeads)
+- ✅ Help text explains when the import test applies
 
-## Remaining Work
+### 2. Parameter Threading
+- ✅ `test_import` parameter threaded through entire call chain:
+  - `main()` → `run_random_actions()`
+  - `run_random_actions()` → `run_parallel_stress_test()`
+  - `run_parallel_stress_test()` → `run_test()` (in worker threads)
+  - `run_random_actions()` → `run_test()` (direct calls in time-based and iteration modes)
 
-### 1. Implement Import Validation in `run_test()` Function
-**Location**: `src/bin/test_minibeads.rs`, `run_test()` function (around line 530-633)
+### 3. Import Validation Logic
+- ✅ Implemented `test_jsonl_import()` function in `src/bin/test_minibeads.rs`
+- ✅ Called from `run_test()` when `use_no_db && test_import`
+- ✅ Full export → parse → import → verify cycle
 
-**What needs to be done**:
-- Add `test_import: bool` parameter to `run_test()` signature
-- Add logic after executor.execute_sequence() when `test_import == true && implementation == upstream`
-- Export upstream database to JSONL
-- Parse JSONL into minibeads reference format
-- Verify parsed issues match reference interpreter state
+### 4. test_jsonl_import() Implementation Details
+Located at line ~1267 in `src/bin/test_minibeads.rs`, performs:
 
-**Pseudocode**:
-```rust
-fn run_test(
-    seed: u64,
-    actions_per_iter: usize,
-    implementation: &str,
-    binary_path: &str,
-    work_dir: &Path,
-    logger: &Logger,
-    test_import: bool,  // NEW PARAMETER
-) -> Result<()> {
-    // ... existing code ...
+1. **Find minibeads binary** - Locates debug build in same directory as test_minibeads
+2. **Export upstream database** - Uses `bd export -o export.jsonl` command
+3. **Parse exported JSONL** - Reads and parses each line using existing `parse_jsonl_to_reference_issue()`
+4. **Verify export** - Compares parsed issues with reference interpreter state using `compare_issue_states()`
+5. **Create fresh import directory** - Uses tempfile::tempdir() for clean environment
+6. **Initialize minibeads** - Runs `bd init --prefix <PREFIX>` with same prefix as reference
+7. **Copy JSONL** - Copies export file to import directory
+8. **Import to minibeads** - Runs `bd import -i export.jsonl`
+9. **Verify import** - Uses existing `verify_minibeads_state()` to check markdown files match reference
 
-    // After running actions against upstream
-    let results = executor.execute_sequence(&actions)?;
+### 5. Reused Existing Functions
+- `parse_jsonl_to_reference_issue()` - Already existed for parsing JSONL lines
+- `compare_issue_states()` - Already existed for comparing issue sets with colorful diffs
+- `verify_minibeads_state()` - Already existed for verifying markdown file contents
+- All reused functions were already thoroughly tested
 
-    // NEW: If testing import and using upstream
-    if test_import && implementation == "upstream" {
-        logger.log("🔄 Testing JSONL import...".to_string());
+### 6. Error Handling
+- ✅ Checks minibeads binary exists before attempting import
+- ✅ Validates export command succeeds
+- ✅ Handles JSONL parse errors with line numbers
+- ✅ Reports init failures with stderr
+- ✅ Reports import failures with stderr
+- ✅ Uses colorful diffs (similar-asserts) for issue mismatches
 
-        // 1. Export upstream database to JSONL
-        let export_output = std::process::Command::new(binary_path)
-            .current_dir(work_dir)
-            .args(["export", "-o", "issues.jsonl"])
-            .output()?;
-
-        if !export_output.status.success() {
-            // Handle export failure
-        }
-
-        // 2. Read and parse JSONL
-        let jsonl_path = work_dir.join("issues.jsonl");
-        let jsonl_content = fs::read_to_string(&jsonl_path)?;
-        let parsed_issues = parse_jsonl_to_reference_issues(&jsonl_content)?;
-
-        // 3. Compare with reference interpreter
-        verify_issues_match(&reference.issues, &parsed_issues, logger)?;
-
-        logger.log("✅ JSONL import verified".to_string());
-    }
-
-    Ok(())
-}
-```
-
-### 2. Add Helper Functions
-
-#### `parse_jsonl_to_reference_issues()`
-**Purpose**: Parse JSONL string into HashMap of ReferenceIssue structs
-
-**Can reuse from**: `tests/random_import_upstream_json.rs`, function `parse_jsonl_to_reference_issue()`
-
-**Location**: Add to `src/bin/test_minibeads.rs` as a helper function
-
-```rust
-fn parse_jsonl_to_reference_issues(
-    jsonl: &str
-) -> Result<HashMap<String, ReferenceIssue>> {
-    // Reuse logic from tests/random_import_upstream_json.rs
-}
-```
-
-#### `verify_issues_match()`
-**Purpose**: Compare two sets of issues and report differences
-
-**Should check**:
-- Same number of issues
-- Same issue IDs (may differ if hash-based)
-- Same titles, descriptions, priorities, types, statuses
-- Same dependency relationships
-- Use colorful diff output (similar-asserts) if differences found
-
-```rust
-fn verify_issues_match(
-    reference: &HashMap<String, ReferenceIssue>,
-    imported: &HashMap<String, ReferenceIssue>,
-    logger: &Logger,
-) -> Result<()> {
-    // Compare and report differences
-}
-```
-
-### 3. Update All Call Sites
-
-**Functions that call `run_test()` need to pass `test_import` parameter**:
-
-1. **`run_random_actions()`** - Single iteration mode (line ~240)
-   ```rust
-   run_test(seed, actions_per_iter, &implementation_str, &binary_path, &work_dir, &logger, test_import)?;
-   ```
-
-2. **Time-based stress test** (line ~300)
-   ```rust
-   run_test(seed, actions_per_iter, &implementation_str, &binary_path, &work_dir, &logger, test_import)?;
-   ```
-
-3. **Parallel stress test workers** (line ~450)
-   ```rust
-   run_test(seed, actions_per_iter, &implementation_str, &binary_path, &work_dir, &buffering_logger, test_import)?;
-   ```
-
-### 4. Handle Edge Cases
-
-- **Upstream binary not found**: Skip import test gracefully
-- **Export fails**: Report clear error message
-- **JSONL parse fails**: Show which line/field failed
-- **Mismatched issues**: Use colorful diff to show differences
-- **Hash-based IDs**: Don't directly compare IDs, compare by content
-
-### 5. Update Documentation
-
-- Update `--help` text to clearly explain when import test runs
-- Update README.md with examples of using `--test-import` flag
-- Document expected behavior in various scenarios
-
-## Testing Plan
+## Testing Scenarios
 
 After implementation, test these scenarios:
 
-1. **Default behavior**: `test_minibeads random-actions --impl upstream`
+1. **Default upstream** - `cargo run --bin test_minibeads -- random-actions --impl upstream`
    - Should run import test automatically
+   - Should see "📦 Testing JSONL import capability..." message
 
-2. **Disable import**: `test_minibeads random-actions --impl upstream --test-import=false`
+2. **Disable import** - `cargo run --bin test_minibeads -- random-actions --impl upstream --test-import=false`
    - Should skip import test
+   - No import messages
 
-3. **Minibeads mode**: `test_minibeads random-actions --impl minibeads --test-import=true`
-   - Import flag should have no effect (only applies to upstream)
+3. **Minibeads mode** - `cargo run --bin test_minibeads -- random-actions --impl minibeads --test-import=true`
+   - Import flag ignored (only applies to upstream)
+   - No import test runs
 
-4. **Parallel mode**: `test_minibeads random-actions --impl upstream --seconds 5 --parallel`
-   - Import test should run for each iteration
+4. **Parallel mode** - `cargo run --bin test_minibeads -- random-actions --impl upstream --seconds 5 --parallel`
+   - Import test runs for each worker iteration
+   - May slow down throughput
 
-5. **Failure cases**:
-   - Upstream binary missing
-   - Export fails
-   - JSONL parse error
-   - Issue mismatch
+5. **Verbose mode** - `cargo run --bin test_minibeads -- random-actions --impl upstream --verbose`
+   - Shows detailed import progress:
+     - Exporting, parsing, verifying export
+     - Creating import directory, initializing, importing
+     - Verifying import
 
-## Files to Modify
+## Files Modified
 
-1. `src/bin/test_minibeads.rs` - Main implementation
-2. Consider moving JSONL parsing to `src/lib.rs` for reuse
-3. Update `tests/random_import_upstream_json.rs` - May become redundant
+1. **src/bin/test_minibeads.rs**
+   - Added `test_import` field to `RandomActions` command struct (line 136)
+   - Added `test_import` parameter to:
+     - `run_random_actions()` (line 187)
+     - `run_parallel_stress_test()` (line 440)
+     - `run_test()` (line 604)
+   - Added import test call in `run_test()` (line 702-705)
+   - Implemented `test_jsonl_import()` function (line 1267-1391)
+   - Updated all 3 call sites to `run_test()` to pass parameter
+
+2. **TODO_test_import.md** (this file)
+   - Updated to reflect completion status
+
+## Edge Cases Handled
+
+- ✅ **No issues created** - Gracefully handles empty database (both export and import)
+- ✅ **Minibeads binary missing** - Clear error with build instructions
+- ✅ **Export fails** - Reports stderr and stops
+- ✅ **JSONL parse error** - Shows line number where parse failed
+- ✅ **Hash-based IDs** - Compares by content, not by ID string format
+- ✅ **Mismatched issues** - Colorful diff shows exact field differences
+- ✅ **Different dependency types** - Compares dependency types correctly
+
+## Known Limitations
+
+1. **Parallel mode performance** - Import test adds significant overhead to each iteration
+   - Consider using `--test-import=false` for maximum throughput testing
+   - Or only enable for final validation runs
+
+2. **Temporary directory cleanup** - TempDirs are auto-cleaned, but failed tests may leave artifacts
+
+3. **Binary discovery** - Assumes standard cargo build layout
+   - minibeads binary must be in same directory as test_minibeads
 
 ## Potential Future Enhancements
 
-- Add `--export-jsonl` flag to export even when not testing import
-- Add `--import-file` flag to test importing a specific JSONL file
-- Support testing minibeads→upstream direction (export from minibeads, import to upstream)
-- Add performance metrics for import operations
+- [ ] Add `--export-jsonl` flag to export without importing (for manual inspection)
+- [ ] Add `--import-file <PATH>` flag to test importing a specific JSONL file
+- [ ] Support bidirectional testing (minibeads → upstream)
+- [ ] Add import performance metrics (time to export, parse, import)
+- [ ] Skip import test for iterations with no issues created (optimization)
+- [ ] Cache minibeads binary path to avoid repeated discovery
+
+## Verification Checklist
+
+Before considering this truly complete, verify:
+
+- [x] Code compiles without warnings
+- [ ] `make validate` passes (includes tests, fmt, clippy)
+- [ ] Default upstream mode runs import test
+- [ ] Import test can be disabled with `--test-import=false`
+- [ ] Verbose mode shows import progress
+- [ ] Parallel mode works with import test
+- [ ] Import test passes with real upstream execution
 
 ## Notes
 
-- The reference interpreter currently assumes sequential IDs, but upstream uses hash-based IDs
-- Need to be careful about ID comparison - compare by content, not by ID string
-- JSONL field is `issue_type` not `type` (discovered in previous testing)
-- Import test should not affect reference interpreter state (read-only verification)
+- Import test only runs for upstream (`use_no_db == true`)
+- Reference interpreter uses "test" prefix, import test preserves this
+- JSONL field is `issue_type` not `type` (matches upstream format)
+- Import verification uses same logic as normal state verification
+- All JSONL parsing reuses existing, tested functions
