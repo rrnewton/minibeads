@@ -48,7 +48,13 @@ fn long_version() -> &'static str {
     long_version = long_version(),
 )]
 struct Cli {
-    /// Path to database (supports BEADS_DB env var)
+    /// Path to .beads directory (minibeads-specific, preferred over --db)
+    #[arg(long = "mb-beads-dir", global = true)]
+    mb_beads_dir: Option<PathBuf>,
+
+    /// Path to database (for upstream compatibility - use --mb-beads-dir instead)
+    /// Treated as syntactic sugar for specifying the .beads directory.
+    /// When path ends with .db, the parent directory is used.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
@@ -466,17 +472,32 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Extract fields needed for get_storage before matching on cli.command
+    // This avoids borrowing issues when we try to call get_storage(mb_beads_dir, db) inside match arms
+    let mb_beads_dir = &cli.mb_beads_dir;
+    let db = &cli.db;
+    let json = cli.json;
+    let mb_no_cmd_logging = cli.mb_no_cmd_logging;
+
     match cli.command {
         Commands::Init { prefix } => {
+            // IMPORTANT: init always creates .beads in current directory
+            // It does NOT use find_beads_dir() or respect --db/--mb-beads-dir flags
+            // This ensures init always initializes in CWD, never in ancestor directories
+            if mb_beads_dir.is_some() || db.is_some() {
+                eprintln!("Note: 'bd init' always creates .beads/ in current directory");
+                eprintln!("      --db and --mb-beads-dir flags are ignored for 'init'");
+            }
+
             let beads_dir = PathBuf::from(".beads");
             let storage = Storage::init(beads_dir, prefix)?;
 
             // Log command after successful init
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            if !cli.json {
+            if !json {
                 println!(
                     "Initialized beads database with prefix: {}",
                     storage.get_prefix()?
@@ -498,10 +519,10 @@ fn run() -> Result<()> {
             id,
             deps,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -558,7 +579,7 @@ fn run() -> Result<()> {
                 parsed_deps,
             )?;
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&issue)?);
             } else {
                 println!("Created issue: {}", issue.id);
@@ -576,10 +597,10 @@ fn run() -> Result<()> {
             title,
             limit,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -609,7 +630,7 @@ fn run() -> Result<()> {
                 issues.truncate(limit_val);
             }
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
             } else {
                 for issue in issues {
@@ -623,10 +644,10 @@ fn run() -> Result<()> {
         }
 
         Commands::Show { issue_ids } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -651,7 +672,7 @@ fn run() -> Result<()> {
                 issues.push(issue);
             }
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
             } else {
                 for (idx, issue) in issues.iter().enumerate() {
@@ -694,10 +715,10 @@ fn run() -> Result<()> {
             notes,
             external_ref,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -737,7 +758,7 @@ fn run() -> Result<()> {
                 updated_issues.push(issue);
             }
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&updated_issues)?);
             } else {
                 for issue in &updated_issues {
@@ -748,10 +769,10 @@ fn run() -> Result<()> {
         }
 
         Commands::Close { issue_ids, reason } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -762,7 +783,7 @@ fn run() -> Result<()> {
                 closed_issues.push(issue);
             }
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&closed_issues)?);
             } else {
                 for issue in &closed_issues {
@@ -776,10 +797,10 @@ fn run() -> Result<()> {
             issue_ids,
             reason: _,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -790,7 +811,7 @@ fn run() -> Result<()> {
                 reopened.push(issue);
             }
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&reopened)?);
             } else {
                 for issue in reopened {
@@ -806,10 +827,10 @@ fn run() -> Result<()> {
             dry_run,
             repair,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -817,7 +838,7 @@ fn run() -> Result<()> {
                 // Repair mode: scan all issues and fix broken references
                 let changes = storage.repair_references(dry_run)?;
 
-                if cli.json {
+                if json {
                     println!("{}", serde_json::to_string_pretty(&changes)?);
                 } else if dry_run {
                     println!("Dry run - would make the following changes:");
@@ -836,7 +857,7 @@ fn run() -> Result<()> {
                 // Rename mode
                 let changes = storage.rename_issue(&old_id, &new_id, dry_run)?;
 
-                if cli.json {
+                if json {
                     println!("{}", serde_json::to_string_pretty(&changes)?);
                 } else if dry_run {
                     println!("Dry run - would make the following changes:");
@@ -858,16 +879,16 @@ fn run() -> Result<()> {
             dry_run,
             force,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
             let changes = storage.rename_prefix(&new_prefix, dry_run, force)?;
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&changes)?);
             } else if dry_run {
                 println!("Dry run - would make the following changes:");
@@ -882,10 +903,10 @@ fn run() -> Result<()> {
         }
 
         Commands::Dep { command } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -897,7 +918,7 @@ fn run() -> Result<()> {
                 } => {
                     storage.add_dependency(&issue_id, &depends_on_id, r#type)?;
 
-                    if !cli.json {
+                    if !json {
                         println!(
                             "Added dependency: {} depends on {} ({})",
                             issue_id, depends_on_id, r#type
@@ -910,7 +931,7 @@ fn run() -> Result<()> {
                 } => {
                     storage.remove_dependency(&issue_id, &depends_on_id)?;
 
-                    if !cli.json {
+                    if !json {
                         println!(
                             "Removed dependency: {} no longer depends on {}",
                             issue_id, depends_on_id
@@ -924,7 +945,7 @@ fn run() -> Result<()> {
                 } => {
                     let tree = storage.get_dependency_tree(&issue_id, max_depth, show_all_paths)?;
 
-                    if cli.json {
+                    if json {
                         println!("{}", serde_json::to_string_pretty(&tree)?);
                     } else {
                         print_dependency_tree(&tree, 0, "", true);
@@ -933,7 +954,7 @@ fn run() -> Result<()> {
                 DepCommands::Cycles => {
                     let cycles = storage.detect_dependency_cycles()?;
 
-                    if cli.json {
+                    if json {
                         println!("{}", serde_json::to_string_pretty(&cycles)?);
                     } else if cycles.is_empty() {
                         println!("No dependency cycles detected.");
@@ -957,16 +978,16 @@ fn run() -> Result<()> {
         }
 
         Commands::Stats => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
             let stats = storage.get_stats()?;
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
                 println!("Total issues: {}", stats.total_issues);
@@ -984,16 +1005,16 @@ fn run() -> Result<()> {
         }
 
         Commands::Blocked => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
             let blocked = storage.get_blocked()?;
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&blocked)?);
             } else {
                 for item in blocked {
@@ -1016,10 +1037,10 @@ fn run() -> Result<()> {
             r#type,
             assignee,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -1063,10 +1084,10 @@ fn run() -> Result<()> {
             limit,
             sort,
         } => {
-            let storage = get_storage(&cli.db)?;
+            let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
-            if !cli.mb_no_cmd_logging {
+            if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -1081,7 +1102,7 @@ fn run() -> Result<()> {
 
             let ready = storage.get_ready(assignee.as_deref(), priority, limit, sort_policy)?;
 
-            if cli.json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&ready)?);
             } else {
                 for issue in ready {
@@ -1106,16 +1127,30 @@ fn run() -> Result<()> {
     }
 }
 
-fn get_storage(db_arg: &Option<PathBuf>) -> Result<Storage> {
-    let beads_dir = if let Some(db) = db_arg {
-        // If --db points to a .db file, use its parent directory
-        if db.extension().is_some_and(|e| e == "db") {
-            db.parent()
+fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<Storage> {
+    // Priority order for determining .beads directory:
+    // 1. --mb-beads-dir flag (preferred, minibeads-specific)
+    // 2. --db flag (for upstream compatibility, treated as syntactic sugar for BEADS_DIR)
+    // 3. MB_BEADS_DIR environment variable (minibeads-specific)
+    // 4. BEADS_DB environment variable (for upstream compatibility)
+    // 5. Search for .beads in current directory and ancestors
+
+    let beads_dir = if let Some(dir) = mb_beads_dir {
+        // --mb-beads-dir: use directly
+        dir.clone()
+    } else if let Some(db_path) = db {
+        // --db: syntactic sugar for BEADS_DIR
+        // If it points to a .db file, use its parent directory
+        if db_path.extension().is_some_and(|e| e == "db") {
+            db_path
+                .parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid database path"))?
                 .to_path_buf()
         } else {
-            db.clone()
+            db_path.clone()
         }
+    } else if let Ok(beads_dir) = env::var("MB_BEADS_DIR") {
+        PathBuf::from(beads_dir)
     } else if let Ok(beads_db) = env::var("BEADS_DB") {
         let db_path = PathBuf::from(beads_db);
         if db_path.extension().is_some_and(|e| e == "db") {
@@ -1126,8 +1161,6 @@ fn get_storage(db_arg: &Option<PathBuf>) -> Result<Storage> {
         } else {
             db_path
         }
-    } else if let Ok(beads_dir) = env::var("MB_BEADS_DIR") {
-        PathBuf::from(beads_dir)
     } else {
         // Search for .beads directory
         find_beads_dir()?
@@ -1231,11 +1264,16 @@ CLOSING ISSUES
   bd close bd-1 --reason "Fixed in PR #42"
 
 DATABASE LOCATION
-  bd automatically discovers your database:
-    1. --db /path/to/.beads flag
-    2. $BEADS_DB environment variable
+  bd automatically discovers your database in this priority order:
+    1. --mb-beads-dir /path/to/.beads   (minibeads-specific, preferred)
+    2. --db /path/to/.beads             (upstream compatibility)
     3. $MB_BEADS_DIR environment variable
-    4. .beads/ in current directory or ancestors
+    4. $BEADS_DB environment variable   (upstream compatibility)
+    5. .beads/ in current directory or ancestors
+
+  Note: --db is treated as syntactic sugar for specifying BEADS_DIR.
+        When path ends with .db, the parent directory is used.
+        Use --mb-beads-dir for minibeads-specific workflows.
 
 Ready to start!
 Run bd create "My first issue" to create your first issue.
