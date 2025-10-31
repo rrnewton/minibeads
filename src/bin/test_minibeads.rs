@@ -212,7 +212,8 @@ fn run_random_actions(
                 let exe_dir = exe_path
                     .parent()
                     .expect("Failed to get executable directory");
-                exe_dir.join("bd").to_str().unwrap().to_string()
+                let binary_name = format!("bd{}", std::env::consts::EXE_SUFFIX);
+                exe_dir.join(&binary_name).to_str().unwrap().to_string()
             }
             Implementation::Upstream => {
                 // upstream bd is in beads/bd-upstream relative to project root
@@ -230,8 +231,10 @@ fn run_random_actions(
                         .unwrap_or_else(|| panic!("Could not find project root (Cargo.toml)"));
                 }
 
+                let binary_name = format!("bd-upstream{}", std::env::consts::EXE_SUFFIX);
                 current
-                    .join("beads/bd-upstream")
+                    .join("beads")
+                    .join(&binary_name)
                     .to_str()
                     .unwrap()
                     .to_string()
@@ -1243,7 +1246,8 @@ fn test_jsonl_import(
     let exe_dir = exe_path
         .parent()
         .expect("Failed to get executable directory");
-    let minibeads_binary = exe_dir.join("bd").to_str().unwrap().to_string();
+    let binary_name = format!("bd{}", std::env::consts::EXE_SUFFIX);
+    let minibeads_binary = exe_dir.join(&binary_name).to_str().unwrap().to_string();
 
     if !PathBuf::from(&minibeads_binary).exists() {
         return Err(anyhow::anyhow!(
