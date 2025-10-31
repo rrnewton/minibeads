@@ -157,37 +157,61 @@ enum IdMode {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::RandomActions {
-            seed,
-            seed_from_entropy,
-            iters,
-            seconds,
-            actions_per_iter,
-            r#impl,
-            binary,
-            verbose,
-            parallel,
-            test_import,
-            ids,
-        } => run_random_actions(
-            seed,
-            seed_from_entropy,
-            iters,
-            seconds,
-            actions_per_iter,
-            r#impl,
-            binary,
-            verbose,
-            parallel,
-            test_import,
-            ids,
-        ),
-    }
+    // Determine worker thread count based on parallel flag
+    // For parallel mode, we want worker threads = min(parallel_workers, num_cores)
+    // to avoid wasting resources when parallel < cores
+    let worker_threads = if let Commands::RandomActions { parallel: Some(n), .. } = &cli.command {
+        let num_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let requested = if *n == 0 { num_cores } else { *n };
+        std::cmp::min(requested, num_cores)
+    } else {
+        // Default: use all available cores for tokio runtime
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    };
+
+    // Build tokio runtime with configured worker threads
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async {
+        match cli.command {
+            Commands::RandomActions {
+                seed,
+                seed_from_entropy,
+                iters,
+                seconds,
+                actions_per_iter,
+                r#impl,
+                binary,
+                verbose,
+                parallel,
+                test_import,
+                ids,
+            } => run_random_actions(
+                seed,
+                seed_from_entropy,
+                iters,
+                seconds,
+                actions_per_iter,
+                r#impl,
+                binary,
+                verbose,
+                parallel,
+                test_import,
+                ids,
+            ).await,
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_random_actions(
+async fn run_random_actions(
     seed: Option<u64>,
     seed_from_entropy: bool,
     iters: usize,
@@ -320,7 +344,7 @@ fn run_random_actions(
             &implementation,
             test_import,
             ids,
-        );
+        ).await;
     }
 
     // Unified sequential testing loop (handles both time-based and iteration-based modes)
@@ -426,9 +450,9 @@ fn run_random_actions(
     Ok(())
 }
 
-/// Run parallel stress tests with multiple worker threads
+/// Run parallel stress tests with multiple async worker tasks
 #[allow(clippy::too_many_arguments)]
-fn run_parallel_stress_test(
+async fn run_parallel_stress_test(
     base_seed: u64,
     duration_secs: u64,
     actions_per_iter: usize,
@@ -445,18 +469,18 @@ fn run_parallel_stress_test(
     use std::sync::Arc;
 
     let start_time = std::time::Instant::now();
-    let duration = std::time::Duration::from_secs(duration_secs);
+    let duration = tokio::time::Duration::from_secs(duration_secs);
 
     // Shared state for coordinating workers
     let should_stop = Arc::new(AtomicBool::new(false));
     let total_iterations = Arc::new(AtomicU64::new(0));
 
-    // Spawn progress reporter thread
+    // Spawn progress reporter task
     let progress_should_stop = Arc::clone(&should_stop);
     let progress_iterations = Arc::clone(&total_iterations);
-    let progress_handle = std::thread::spawn(move || {
+    let progress_handle = tokio::spawn(async move {
         while !progress_should_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             let count = progress_iterations.load(Ordering::Relaxed);
             print!("\r⏱️  Progress: {} iterations completed", count);
             std::io::stdout().flush().ok();
@@ -466,7 +490,7 @@ fn run_parallel_stress_test(
         std::io::stdout().flush().ok();
     });
 
-    // Spawn worker threads
+    // Spawn async worker tasks
     let mut handles = vec![];
 
     for worker_id in 0..workers {
@@ -474,7 +498,7 @@ fn run_parallel_stress_test(
         let total_iterations = Arc::clone(&total_iterations);
         let binary_path = binary_path.to_string();
 
-        let handle = std::thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             let mut local_iterations = 0u64;
 
             // Create buffering logger for parallel workers
@@ -535,15 +559,15 @@ fn run_parallel_stress_test(
     let mut failure: Option<(usize, u64, anyhow::Error, u64)> = None;
 
     for handle in handles {
-        match handle.join() {
+        match handle.await {
             Ok(Ok(_)) => {}
             Ok(Err(err_info)) => {
                 if failure.is_none() {
                     failure = Some(err_info);
                 }
             }
-            Err(_) => {
-                eprintln!("Worker thread panicked");
+            Err(e) => {
+                eprintln!("Worker task panicked or was cancelled: {:?}", e);
             }
         }
     }
@@ -555,7 +579,7 @@ fn run_parallel_stress_test(
     let total_iters = total_iterations.load(Ordering::Relaxed);
 
     // Wait for progress reporter to finish
-    progress_handle.join().ok();
+    progress_handle.await.ok();
 
     // Report failure if any
     if let Some((worker_id, iter_seed, error, worker_iters)) = failure {
