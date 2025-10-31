@@ -91,7 +91,10 @@ After implementation, test these scenarios:
    - Implemented `test_jsonl_import()` function (line 1267-1391)
    - Updated all 3 call sites to `run_test()` to pass parameter
 
-2. **TODO_test_import.md** (this file)
+2. **tests/random_import_upstream_json.rs**
+   - **DELETED** - Standalone test now redundant, functionality integrated into stress test
+
+3. **TODO_test_import.md** (this file)
    - Updated to reflect completion status
 
 ## Edge Cases Handled
