@@ -11,7 +11,7 @@ updated_at: 2025-10-30T13:56:02.945405078+00:00
 
 Track testing improvements for minibeads.
 
-## Current Status (as of 2025-10-31_#80(570324f8fe))
+## Current Status (as of 2025-10-31_#82(ccbda9f23c))
 - ✅ 3 unit tests passing (format, lock, issue_roundtrip)
 - ✅ Makefile with validate target created
 - ✅ Clippy checks passing with -D warnings
@@ -37,7 +37,11 @@ Track testing improvements for minibeads.
     - Config.yaml validation (prefix matching)
     - Full state comparison for minibeads (markdown) and upstream (JSONL)
     - Field-by-field verification: title, status, priority, issue_type, dependencies
-    - Detailed error messages showing mismatches
+    - **Colorful diff output using similar-asserts**:
+      - Visual diffs showing expected vs actual with - and + markers
+      - Issue count mismatch shows missing vs extra issues
+      - Each field mismatch displays clear headers and color-coded differences
+      - Dependencies shown as sorted vectors for consistent comparison
 - ✅ GitHub Actions CI/CD pipeline configured
   - Multi-platform testing (Linux, macOS, Windows)
   - All platforms passing as of 2025-10-31
@@ -48,7 +52,6 @@ Track testing improvements for minibeads.
 ## TODO
 - [ ] Add more unit tests for storage operations
 - [ ] Add more e2e test scenarios (concurrent access, error handling, edge cases)
-- [ ] Add colorful diff reporting using similar-asserts for deep verification
 - [ ] Add code coverage reporting
 - [ ] Implement test porting plan from upstream beads (see minibeads-14)
 
@@ -75,6 +78,11 @@ Track testing improvements for minibeads.
   - Linting (fmt + clippy)
   - Security audit (cargo-audit)
   - Cross-platform testing (Ubuntu, macOS, Windows)
+- [x] Colorful diff reporting using similar-asserts for deep verification (commit #82/ccbda9f23c)
+  - Integrated similar-asserts into compare_issue_states()
+  - Visual diffs with - and + markers for expected vs actual
+  - Enhanced error reporting for issue count mismatches
+  - Field-by-field comparison with clear headers and color-coded output
 
 ## Related Issues
 - minibeads-5: Fixed serialization bug and validation (CLOSED)
