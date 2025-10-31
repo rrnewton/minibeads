@@ -3,42 +3,51 @@ title: Implement bidirectional sync (bd sync)
 status: open
 priority: 3
 issue_type: feature
+depends_on:
+  minibeads-19: related
 created_at: 2025-10-30T20:38:48.178328137+00:00
-updated_at: 2025-10-31T04:19:58.476725277+00:00
+updated_at: 2025-10-31T11:45:17.795154605+00:00
 ---
 
 # Description
 
-NOTE: This issue is a duplicate of minibeads-12 and conflicts with the minibeads architecture.
+## Status Update (2025-10-31)
 
-## Architectural Clarification (2025-10-31)
+**ARCHITECTURE DECISION CHANGED** - Duplicate of minibeads-12. Now implementing via minibeads-19.
 
-Per PROJECT_VISION.md, the **markdown files in `.beads/issues/` are the single source of truth**. The `issues.jsonl` file is NOT part of the core storage architecture - it's only created when explicitly exporting with `bd export`.
+## New Approach (Dual Source of Truth)
 
-This means:
-- ❌ **No bidirectional sync needed** - there's no dual representation to sync
-- ❌ Jsonl does NOT store issue state that needs to be synced back
+Minibeads will support **two independent sources of truth**:
+- **Markdown files** (.beads/issues/*.md) - human-friendly, git-mergeable
+- **JSONL file** (issues.jsonl) - machine-friendly, upstream bd compatible
+
+Either format can be modified independently, and `bd sync` merges changes bidirectionally.
+
+## Previous Status
+
+This issue was originally marked as duplicate of minibeads-12, which itself was marked "won't implement" due to architectural mismatch with the markdown-only design.
+
+The original architecture had:
+- ❌ Markdown as the ONLY source of truth
+- ❌ JSONL as export-only format
+- ❌ No bidirectional sync needed
 - ❌ No mb-auto-sync config option needed
-- ✅ Markdown is the only source of truth
-- ✅ Export to jsonl is one-way only (for interop/backup)
 
-## What This Issue Originally Described
+## New Architecture Decision
 
-Implement bidirectional sync as specified in minibeads-12.
+After user request, the architecture has been changed to support:
+- ✅ Markdown AND JSONL as dual sources of truth
+- ✅ Bidirectional synchronization via `bd sync`
+- ✅ Timestamp-based conflict detection
+- ✅ Non-conflicting updates handled automatically
 
-Requirements included:
-- bd sync command for markdown ↔ jsonl sync
-- Auto-sync configuration option
-- Conflict resolution
+## Implementation
 
-## Current Status
+**Primary tracking issue:** minibeads-12
+**Implementation tracking issue:** minibeads-19
 
-**This issue should be closed as duplicate of minibeads-12, which itself conflicts with the architecture.**
+See minibeads-19 for detailed implementation plan.
 
-See minibeads-12 for full discussion. If import functionality is needed, create a new issue for one-way import (jsonl → markdown) instead.
+## Recommendation
 
----
-
-**Checked up-to-date as of 2025-10-31_#70(fe445a9)**
-
-Marked as duplicate. Architectural mismatch identified. Markdown is the single source of truth per PROJECT_VISION.md.
+This issue should be closed as duplicate once minibeads-19 is implemented, since all functionality will be covered by the `bd sync` command.

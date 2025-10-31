@@ -9,21 +9,45 @@ This project that you're planning then executing is to create MINIMAL Rust langu
 * ./beads contains a version of the upstream project with a recently added MARKDOWN BACKEND
 
 In this session you have the beads MCP loaded. You can try operations on it and see what `bd ...` commands it attempts to invoke. Don't let it install any other version of beads than the Rust one we will develop here.  Let me know if it is trynig to.
-## Markdown backend differences
-We will not have multiple representations of the data (issues.jsonl + a DB), instead the markdown representation is the ONLY one. The core .beads directory structure is:
+## Storage Architecture: Dual Format Support
+
+**ARCHITECTURE UPDATE (2025-10-31)**: Minibeads now supports **dual sources of truth** with bidirectional synchronization.
+
+Unlike upstream beads (which uses SQLite + JSONL), minibeads supports TWO independent storage formats:
+
+1. **Markdown files** (`.beads/issues/*.md`) - Human-friendly, git-mergeable
+2. **JSONL file** (`issues.jsonl`) - Machine-friendly, upstream bd compatible
+
+Either format can be modified independently, and `bd sync` merges changes bidirectionally using timestamp-based conflict detection.
+
+### Directory Structure
 
 ```
 .beads/
 ├── config.yaml          # Required: contains issue-prefix
-├── issues/              # Required: markdown storage (source of truth)
+├── issues/              # Required: markdown storage (source of truth #1)
 │   └── <prefix>-N.md   # Individual issue files
+├── issues.jsonl         # Optional: JSONL storage (source of truth #2, when used)
 ├── .gitignore           # Auto-generated
 ├── command_history.log  # Optional: command logging (can be disabled with --mb-no-cmd-logging)
-├── issues.jsonl         # Optional: created by `bd export --mb-output-default`
 └── minibeads.lock       # Temporary: coarse-grained lock file (PID-based)
 ```
 
-**Note**: The markdown files in `.beads/issues/` are the single source of truth. The `issues.jsonl` file is NOT part of the core storage - it's only created when explicitly exporting with `bd export`.
+### Synchronization Strategy
+
+Use `bd sync` to synchronize between formats:
+- Compares `updated_at` timestamps to detect which format has newer changes
+- Merges non-conflicting updates bidirectionally (newer wins)
+- Creates issues that exist in only one format
+- Flags conflicts (same timestamp, different content) for manual resolution
+
+**Use cases:**
+- **Markdown-only workflow**: Don't create JSONL, work exclusively with markdown
+- **JSONL interop**: Use `bd export` to create JSONL for upstream bd compatibility
+- **Dual format**: Maintain both formats, sync as needed for collaboration
+- **Migration**: Import from upstream bd JSONL, then work in markdown
+
+**Implementation**: See minibeads-19 for detailed sync implementation plan.
 
 We will use BEADS_DIR if it is available to find `.beads`, but we will attempt to respect the upstream beads `BEADS_DB` as well. If it points to `/dir/.beads/foo.db` we will just cut off the last part of the path and use that to find .beads.
 
@@ -46,11 +70,15 @@ The upstream markdown store has a complicated lock-ordering scheme to lock indiv
 
 ## Validation Status
 
-**Checked up-to-date as of 2025-10-31_#69(3314053)**
+**Checked up-to-date as of 2025-10-31_#74(TBD - pending commit)**
+
+**ARCHITECTURE CHANGED (2025-10-31)**: Dual format support added.
 
 All architectural claims verified against implementation:
 - ✅ Directory structure matches specification (.beads/config.yaml, .beads/issues/)
-- ✅ Markdown-only storage confirmed (issues.jsonl is export-only, not source of truth)
+- ⚠️ **ARCHITECTURE UPDATE**: Now supports dual formats (markdown + JSONL)
+  - Previous: Markdown-only storage (JSONL was export-only)
+  - Current: Bidirectional sync support (minibeads-19 in progress)
 - ✅ Lock file naming and implementation verified (minibeads.lock with PID)
 - ✅ Config.yaml contains only issue-prefix field as specified
 - ✅ Description section auto-creation confirmed on `bd create`

@@ -1005,6 +1005,94 @@ impl Storage {
         Ok(issues.len())
     }
 
+    /// Import issues from JSONL format
+    ///
+    /// Returns: (imported_count, skipped_count, errors)
+    #[allow(dead_code)] // Used by sync command (not yet implemented)
+    pub fn import_from_jsonl(
+        &self,
+        input_path: &Path,
+        overwrite: bool,
+    ) -> Result<(usize, usize, Vec<String>)> {
+        use std::io::{BufRead, BufReader};
+
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        // Open input file
+        let file = fs::File::open(input_path)
+            .with_context(|| format!("Failed to open input file: {}", input_path.display()))?;
+        let reader = BufReader::new(file);
+
+        let mut imported = 0;
+        let mut skipped = 0;
+        let mut errors = Vec::new();
+
+        // Read and parse each line
+        for (line_num, line_result) in reader.lines().enumerate() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    errors.push(format!("Line {}: Failed to read line: {}", line_num + 1, e));
+                    continue;
+                }
+            };
+
+            // Skip empty lines
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Parse JSON
+            let issue: Issue = match serde_json::from_str(&line) {
+                Ok(i) => i,
+                Err(e) => {
+                    errors.push(format!(
+                        "Line {}: Failed to parse JSON: {}",
+                        line_num + 1,
+                        e
+                    ));
+                    continue;
+                }
+            };
+
+            // Check if markdown file already exists
+            let issue_path = self.issues_dir.join(format!("{}.md", issue.id));
+            if issue_path.exists() && !overwrite {
+                skipped += 1;
+                continue;
+            }
+
+            // Convert to markdown and write
+            match issue_to_markdown(&issue) {
+                Ok(markdown) => {
+                    if let Err(e) = fs::write(&issue_path, &markdown) {
+                        errors.push(format!(
+                            "Issue {}: Failed to write markdown file: {}",
+                            issue.id, e
+                        ));
+                        continue;
+                    }
+
+                    // Set file mtime to match issue's updated_at timestamp (preserve timestamp)
+                    if let Err(e) = set_file_mtime_from_issue(&issue_path, &issue) {
+                        // Non-fatal: log warning but don't fail the import
+                        eprintln!("Warning: Failed to set mtime for {}: {}", issue.id, e);
+                    }
+
+                    imported += 1;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Issue {}: Failed to convert to markdown: {}",
+                        issue.id, e
+                    ));
+                }
+            }
+        }
+
+        Ok((imported, skipped, errors))
+    }
+
     /// Rename the issue prefix for all issues
     ///
     /// This operation:
@@ -1201,4 +1289,44 @@ fn ensure_gitignore(beads_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Set file mtime to match issue's updated_at timestamp
+/// This preserves timestamps when importing from JSONL
+#[allow(dead_code)] // Used by import and sync (not yet fully wired up)
+fn set_file_mtime_from_issue(file_path: &Path, issue: &Issue) -> Result<()> {
+    use filetime::{set_file_mtime, FileTime};
+    use std::time::SystemTime;
+
+    // Convert DateTime<Utc> to SystemTime
+    let system_time: SystemTime = issue.updated_at.into();
+
+    // Convert to FileTime
+    let file_time = FileTime::from_system_time(system_time);
+
+    // Set the file's modification time
+    set_file_mtime(file_path, file_time)
+        .with_context(|| format!("Failed to set mtime for {}", file_path.display()))?;
+
+    Ok(())
+}
+
+/// Get file mtime as DateTime<Utc>
+/// This is used for comparison during sync
+#[allow(dead_code)] // Used by sync command (not yet implemented)
+pub fn get_file_mtime(file_path: &Path) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, Utc};
+    use std::time::SystemTime;
+
+    let metadata = fs::metadata(file_path)
+        .with_context(|| format!("Failed to get metadata for {}", file_path.display()))?;
+
+    let mtime: SystemTime = metadata
+        .modified()
+        .with_context(|| format!("Failed to get modified time for {}", file_path.display()))?;
+
+    // Convert SystemTime to DateTime<Utc>
+    let datetime: DateTime<Utc> = mtime.into();
+
+    Ok(datetime)
 }

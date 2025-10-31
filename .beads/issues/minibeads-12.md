@@ -5,54 +5,64 @@ priority: 3
 issue_type: feature
 depends_on:
   minibeads-11: blocks
+  minibeads-19: related
 created_at: 2025-10-30T14:11:16.056738532+00:00
-updated_at: 2025-10-31T04:19:46.729880907+00:00
+updated_at: 2025-10-31T11:45:17.791631043+00:00
 ---
 
 # Description
 
-NOTE: This issue describes a feature that conflicts with the minibeads architecture.
+## Status Update (2025-10-31)
 
-## Architectural Clarification (2025-10-31)
+**ARCHITECTURE DECISION CHANGED** - Now implementing bidirectional sync via minibeads-19.
 
-Per PROJECT_VISION.md, the **markdown files in `.beads/issues/` are the single source of truth**. The `issues.jsonl` file is NOT part of the core storage architecture - it's only created when explicitly exporting with `bd export`.
+## New Approach (Dual Source of Truth)
 
-This means:
-- ❌ **No bidirectional sync needed** - there's no dual representation to sync
-- ❌ Jsonl does NOT store issue state that needs to be synced back
-- ✅ Markdown is the only source of truth
-- ✅ Export to jsonl is one-way only (for interop/backup)
+Minibeads will support **two independent sources of truth**:
+- **Markdown files** (.beads/issues/*.md) - human-friendly, git-mergeable
+- **JSONL file** (issues.jsonl) - machine-friendly, upstream bd compatible
 
-## What This Issue Originally Described
+Either format can be modified independently, and `bd sync` merges changes bidirectionally.
 
-Intelligent bidirectional synchronization between issues.jsonl and markdown storage formats.
+## Previous Status
 
-### Background
-Once we have `bd export` working, we need a sync mechanism to work with upstream bd commits that modify issues.jsonl. This enables collaboration where some developers use upstream bd (jsonl) and others use minibeads (markdown).
+This issue was originally marked as "won't implement" due to architectural mismatch with the markdown-only design documented in PROJECT_VISION.md (as of 2025-10-31_#70).
 
-## Current Status
+The original architecture had:
+- ❌ Markdown as the ONLY source of truth
+- ❌ JSONL as export-only format
+- ❌ No bidirectional sync needed
 
-**This feature is not aligned with minibeads architecture.**
+## New Architecture Decision
 
-If collaboration with upstream bd users is needed, the correct approach would be:
-1. Upstream bd users export to jsonl
-2. Convert jsonl to markdown (import)
-3. Work in markdown (minibeads)
-4. Export back to jsonl if needed
+After user request, the architecture has been changed to support:
+- ✅ Markdown AND JSONL as dual sources of truth
+- ✅ Bidirectional synchronization via `bd sync`
+- ✅ Timestamp-based conflict detection
+- ✅ Non-conflicting updates handled automatically
 
-This would be a **one-way import** feature (jsonl → markdown), not bidirectional sync.
+## Implementation
 
-## Recommendation
+**Tracking issue:** minibeads-19 (Implement bidirectional sync)
 
-- Close this issue as "won't implement" due to architectural mismatch
-- OR repurpose as "bd import" feature (one-way: jsonl → markdown)
-- See minibeads-16 (duplicate issue)
+**Algorithm:**
+1. Parse all markdown issues into memory
+2. Parse all JSONL issues into memory
+3. Compare using updated_at timestamps
+4. Apply non-conflicting changes (newer wins)
+5. Flag conflicts for manual resolution (Phase 2)
 
-Dependencies:
-  minibeads-11 (blocks)
+**Phase 1 scope:**
+- Handle new issues in either format
+- Handle updates where one format is newer
+- Detect and log conflicts (skip for now)
+- Defer interactive conflict resolution
 
----
+## Related Issues
 
-**Checked up-to-date as of 2025-10-31_#70(fe445a9)**
+- minibeads-16: Duplicate of this issue
+- minibeads-19: Implementation tracking issue
 
-Architectural mismatch identified. Markdown is the single source of truth per PROJECT_VISION.md.
+## Next Steps
+
+See minibeads-19 for detailed implementation plan.
