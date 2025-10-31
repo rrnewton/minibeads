@@ -1,10 +1,11 @@
 ---
 title: Separate minibeads config into config-minibeads.yaml
-status: open
+status: closed
 priority: 2
 issue_type: task
 created_at: 2025-10-31T19:40:41.280959314+00:00
-updated_at: 2025-10-31T19:40:41.280959314+00:00
+updated_at: 2025-10-31T19:47:43.106968812+00:00
+closed_at: 2025-10-31T19:47:43.106968371+00:00
 ---
 
 # Description
