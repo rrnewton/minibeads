@@ -458,15 +458,29 @@ impl ActionGenerator {
 pub struct ActionExecutor {
     binary_path: String,
     work_dir: String,
+    use_no_db: bool,
 }
 
 impl ActionExecutor {
     /// Create a new executor for the given binary
-    pub fn new(binary_path: &str, work_dir: &str) -> Self {
+    ///
+    /// `use_no_db`: If true, prepends --no-db to all commands (for upstream bd)
+    pub fn new(binary_path: &str, work_dir: &str, use_no_db: bool) -> Self {
         Self {
             binary_path: binary_path.to_string(),
             work_dir: work_dir.to_string(),
+            use_no_db,
         }
+    }
+
+    /// Build a command with the binary path, working directory, and --no-db flag if needed
+    fn build_command(&self) -> Command {
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.current_dir(&self.work_dir);
+        if self.use_no_db {
+            cmd.arg("--no-db");
+        }
+        cmd
     }
 
     /// Execute a single action
@@ -475,8 +489,8 @@ impl ActionExecutor {
     pub fn execute(&self, action: &BeadsAction) -> Result<ExecutionResult> {
         let output = match action {
             BeadsAction::Init { prefix } => {
-                let mut cmd = Command::new(&self.binary_path);
-                cmd.current_dir(&self.work_dir).arg("init");
+                let mut cmd = self.build_command();
+                cmd.arg("init");
                 if let Some(p) = prefix {
                     cmd.arg("--prefix").arg(p);
                 }
@@ -490,9 +504,8 @@ impl ActionExecutor {
                 issue_type,
                 description,
             } => {
-                let mut cmd = Command::new(&self.binary_path);
-                cmd.current_dir(&self.work_dir)
-                    .arg("create")
+                let mut cmd = self.build_command();
+                cmd.arg("create")
                     .arg(title)
                     .arg("-p")
                     .arg(priority.to_string())
@@ -526,8 +539,8 @@ impl ActionExecutor {
             }
 
             BeadsAction::List { status, priority } => {
-                let mut cmd = Command::new(&self.binary_path);
-                cmd.current_dir(&self.work_dir).arg("list");
+                let mut cmd = self.build_command();
+                cmd.arg("list");
 
                 if let Some(s) = status {
                     cmd.arg("--status").arg(s.as_str());
@@ -539,20 +552,19 @@ impl ActionExecutor {
                 cmd.output().context("Failed to execute list command")?
             }
 
-            BeadsAction::Show { issue_id } => Command::new(&self.binary_path)
-                .current_dir(&self.work_dir)
-                .arg("show")
-                .arg(issue_id)
-                .output()
-                .context("Failed to execute show command")?,
+            BeadsAction::Show { issue_id } => {
+                let mut cmd = self.build_command();
+                cmd.arg("show").arg(issue_id);
+                cmd.output().context("Failed to execute show command")?
+            }
 
             BeadsAction::Update {
                 issue_id,
                 status,
                 priority,
             } => {
-                let mut cmd = Command::new(&self.binary_path);
-                cmd.current_dir(&self.work_dir).arg("update").arg(issue_id);
+                let mut cmd = self.build_command();
+                cmd.arg("update").arg(issue_id);
 
                 if let Some(s) = status {
                     cmd.arg("--status").arg(s.as_str());
@@ -564,44 +576,38 @@ impl ActionExecutor {
                 cmd.output().context("Failed to execute update command")?
             }
 
-            BeadsAction::Close { issue_id, reason } => Command::new(&self.binary_path)
-                .current_dir(&self.work_dir)
-                .arg("close")
-                .arg(issue_id)
-                .arg("--reason")
-                .arg(reason)
-                .output()
-                .context("Failed to execute close command")?,
+            BeadsAction::Close { issue_id, reason } => {
+                let mut cmd = self.build_command();
+                cmd.arg("close").arg(issue_id).arg("--reason").arg(reason);
+                cmd.output().context("Failed to execute close command")?
+            }
 
-            BeadsAction::Reopen { issue_id } => Command::new(&self.binary_path)
-                .current_dir(&self.work_dir)
-                .arg("reopen")
-                .arg(issue_id)
-                .output()
-                .context("Failed to execute reopen command")?,
+            BeadsAction::Reopen { issue_id } => {
+                let mut cmd = self.build_command();
+                cmd.arg("reopen").arg(issue_id);
+                cmd.output().context("Failed to execute reopen command")?
+            }
 
             BeadsAction::AddDependency {
                 issue_id,
                 depends_on,
                 dep_type,
-            } => Command::new(&self.binary_path)
-                .current_dir(&self.work_dir)
-                .arg("dep")
-                .arg("add")
-                .arg(issue_id)
-                .arg(depends_on)
-                .arg("-t")
-                .arg(dep_type.as_str())
-                .output()
-                .context("Failed to execute dep add command")?,
+            } => {
+                let mut cmd = self.build_command();
+                cmd.arg("dep")
+                    .arg("add")
+                    .arg(issue_id)
+                    .arg(depends_on)
+                    .arg("-t")
+                    .arg(dep_type.as_str());
+                cmd.output().context("Failed to execute dep add command")?
+            }
 
-            BeadsAction::Export { output } => Command::new(&self.binary_path)
-                .current_dir(&self.work_dir)
-                .arg("export")
-                .arg("--output")
-                .arg(output)
-                .output()
-                .context("Failed to execute export command")?,
+            BeadsAction::Export { output } => {
+                let mut cmd = self.build_command();
+                cmd.arg("export").arg("--output").arg(output);
+                cmd.output().context("Failed to execute export command")?
+            }
         };
 
         Ok(ExecutionResult {

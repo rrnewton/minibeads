@@ -3,7 +3,7 @@
 //! This binary provides various testing utilities for minibeads.
 //!
 //! Usage:
-//!   test_minibeads random-mb [OPTIONS]
+//!   test_minibeads random-actions [OPTIONS]
 //!   test_minibeads --help
 
 use anyhow::Result;
@@ -23,9 +23,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Random property-based testing for minibeads
-    #[command(name = "random-mb")]
-    RandomMb {
+    /// Random property-based testing for beads implementations
+    #[command(name = "random-actions")]
+    RandomActions {
         /// Seed for deterministic RNG
         #[arg(long)]
         seed: Option<u64>,
@@ -42,7 +42,11 @@ enum Commands {
         #[arg(long, default_value = "20")]
         actions_per_iter: usize,
 
-        /// Path to minibeads binary (default: target/debug/bd)
+        /// Implementation to test: minibeads or upstream
+        #[arg(long, default_value = "minibeads")]
+        r#impl: Implementation,
+
+        /// Path to binary (overrides --impl default)
         #[arg(long)]
         binary: Option<String>,
 
@@ -52,54 +56,103 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum Implementation {
+    Minibeads,
+    Upstream,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::RandomMb {
+        Commands::RandomActions {
             seed,
             seed_from_entropy,
             iters,
             actions_per_iter,
+            r#impl,
             binary,
             verbose,
-        } => run_random_mb(
+        } => run_random_actions(
             seed,
             seed_from_entropy,
             iters,
             actions_per_iter,
+            r#impl,
             binary,
             verbose,
         ),
     }
 }
 
-fn run_random_mb(
+fn run_random_actions(
     seed: Option<u64>,
     seed_from_entropy: bool,
     iters: usize,
     actions_per_iter: usize,
+    implementation: Implementation,
     binary: Option<String>,
     verbose: bool,
 ) -> Result<()> {
-    // Determine the binary path - resolve relative to current directory
+    // Determine the binary path
     let binary_path = if let Some(path) = binary {
+        // Explicit path provided
         path
     } else {
-        // Default: look for bd in same directory as test_minibeads binary
-        let exe_path = std::env::current_exe().expect("Failed to get current executable path");
-        let exe_dir = exe_path
-            .parent()
-            .expect("Failed to get executable directory");
-        exe_dir.join("bd").to_str().unwrap().to_string()
+        // Default based on implementation
+        match implementation {
+            Implementation::Minibeads => {
+                // minibeads bd is in same directory as test_minibeads
+                let exe_path =
+                    std::env::current_exe().expect("Failed to get current executable path");
+                let exe_dir = exe_path
+                    .parent()
+                    .expect("Failed to get executable directory");
+                exe_dir.join("bd").to_str().unwrap().to_string()
+            }
+            Implementation::Upstream => {
+                // upstream bd is in beads/bd-upstream relative to project root
+                // Find project root by going up from current_exe until we find Cargo.toml
+                let exe_path =
+                    std::env::current_exe().expect("Failed to get current executable path");
+                let mut current = exe_path
+                    .parent()
+                    .expect("Failed to get executable directory");
+
+                // Go up directories to find project root (has Cargo.toml)
+                while !current.join("Cargo.toml").exists() {
+                    current = current
+                        .parent()
+                        .unwrap_or_else(|| panic!("Could not find project root (Cargo.toml)"));
+                }
+
+                current
+                    .join("beads/bd-upstream")
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        }
+    };
+
+    let impl_name = match implementation {
+        Implementation::Minibeads => "minibeads",
+        Implementation::Upstream => "upstream bd",
     };
 
     // Check if binary exists
     if !PathBuf::from(&binary_path).exists() {
         eprintln!("ERROR: Binary not found at: {}", binary_path);
-        eprintln!("Build it first with: cargo build");
+        match implementation {
+            Implementation::Minibeads => eprintln!("Build it first with: cargo build"),
+            Implementation::Upstream => eprintln!("Build it first with: make upstream"),
+        }
         std::process::exit(1);
     }
+
+    println!("Testing implementation: {}", impl_name);
+    println!("Binary: {}", binary_path);
 
     // Run iterations
     for iter in 0..iters {
@@ -124,12 +177,28 @@ fn run_random_mb(
         println!("SEED: {}", iter_seed);
         println!("{}\n", "=".repeat(60));
 
+        // Determine if we should use --no-db flag (for upstream)
+        let use_no_db = matches!(implementation, Implementation::Upstream);
+
         // Run the test with this seed
-        if let Err(e) = run_test(iter_seed, actions_per_iter, &binary_path, verbose) {
+        if let Err(e) = run_test(
+            iter_seed,
+            actions_per_iter,
+            &binary_path,
+            verbose,
+            use_no_db,
+        ) {
             eprintln!("\n❌ TEST FAILED with SEED: {}", iter_seed);
             eprintln!("Error: {:?}", e);
             eprintln!("\nTo reproduce this failure, run:");
-            eprintln!("  test_minibeads random-mb --seed {}", iter_seed);
+            let impl_flag = match implementation {
+                Implementation::Minibeads => "--impl minibeads",
+                Implementation::Upstream => "--impl upstream",
+            };
+            eprintln!(
+                "  test_minibeads random-actions --seed {} {}",
+                iter_seed, impl_flag
+            );
             std::process::exit(1);
         }
 
@@ -143,7 +212,13 @@ fn run_random_mb(
     Ok(())
 }
 
-fn run_test(seed: u64, num_actions: usize, binary_path: &str, verbose: bool) -> Result<()> {
+fn run_test(
+    seed: u64,
+    num_actions: usize,
+    binary_path: &str,
+    verbose: bool,
+    use_no_db: bool,
+) -> Result<()> {
     // Create a temporary directory for this test
     let temp_dir = tempfile::tempdir()?;
     let work_dir = temp_dir.path().to_str().unwrap();
@@ -167,7 +242,7 @@ fn run_test(seed: u64, num_actions: usize, binary_path: &str, verbose: bool) -> 
     }
 
     // Create executor
-    let executor = ActionExecutor::new(binary_path, work_dir);
+    let executor = ActionExecutor::new(binary_path, work_dir, use_no_db);
 
     // Execute actions
     if verbose {
@@ -224,7 +299,7 @@ fn run_test(seed: u64, num_actions: usize, binary_path: &str, verbose: bool) -> 
     );
 
     // Verify final state consistency
-    verify_consistency(&executor, work_dir, verbose)?;
+    verify_consistency(&executor, work_dir, verbose, use_no_db)?;
 
     Ok(())
 }
@@ -253,7 +328,12 @@ fn is_critical_failure(result: &minibeads::beads_generator::ExecutionResult) -> 
 }
 
 /// Verify the final state is consistent
-fn verify_consistency(executor: &ActionExecutor, work_dir: &str, verbose: bool) -> Result<()> {
+fn verify_consistency(
+    executor: &ActionExecutor,
+    work_dir: &str,
+    verbose: bool,
+    use_no_db: bool,
+) -> Result<()> {
     if verbose {
         println!("\nVerifying final state consistency...");
     }
@@ -262,6 +342,25 @@ fn verify_consistency(executor: &ActionExecutor, work_dir: &str, verbose: bool) 
     let beads_dir = PathBuf::from(work_dir).join(".beads");
     if !beads_dir.exists() {
         return Err(anyhow::anyhow!(".beads directory does not exist"));
+    }
+
+    // For upstream with --no-db, verify that SQLite databases DO NOT exist
+    if use_no_db {
+        let db_files: Vec<_> = std::fs::read_dir(&beads_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "db").unwrap_or(false))
+            .collect();
+
+        if !db_files.is_empty() {
+            return Err(anyhow::anyhow!(
+                "SQLite database files found in .beads/ directory when using --no-db: {:?}",
+                db_files.iter().map(|f| f.file_name()).collect::<Vec<_>>()
+            ));
+        }
+
+        if verbose {
+            println!("✓ Verified no SQLite database files exist (--no-db mode)");
+        }
     }
 
     // Check that config.yaml exists
