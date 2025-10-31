@@ -81,6 +81,7 @@ fn run_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
 }
 
 #[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
 fn test_random_actions_minibeads() {
     let binary_path = build_minibeads();
     run_test(
@@ -91,6 +92,7 @@ fn test_random_actions_minibeads() {
 }
 
 #[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
 fn test_stress_minibeads_parallel() {
     let binary_path = build_minibeads();
     run_test(

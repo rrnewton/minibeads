@@ -37,3 +37,6 @@ dir-test = "0.4"
 [build-dependencies]
 built = { version = "0.7", features = ["git2"] }
 chrono = "0.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
