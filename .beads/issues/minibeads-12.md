@@ -6,67 +6,53 @@ issue_type: feature
 depends_on:
   minibeads-11: blocks
 created_at: 2025-10-30T14:11:16.056738532+00:00
-updated_at: 2025-10-30T14:11:26.346835477+00:00
+updated_at: 2025-10-31T04:19:46.729880907+00:00
 ---
 
 # Description
 
+NOTE: This issue describes a feature that conflicts with the minibeads architecture.
+
+## Architectural Clarification (2025-10-31)
+
+Per PROJECT_VISION.md, the **markdown files in `.beads/issues/` are the single source of truth**. The `issues.jsonl` file is NOT part of the core storage architecture - it's only created when explicitly exporting with `bd export`.
+
+This means:
+- ❌ **No bidirectional sync needed** - there's no dual representation to sync
+- ❌ Jsonl does NOT store issue state that needs to be synced back
+- ✅ Markdown is the only source of truth
+- ✅ Export to jsonl is one-way only (for interop/backup)
+
+## What This Issue Originally Described
+
 Intelligent bidirectional synchronization between issues.jsonl and markdown storage formats.
 
-## Background
+### Background
 Once we have `bd export` working, we need a sync mechanism to work with upstream bd commits that modify issues.jsonl. This enables collaboration where some developers use upstream bd (jsonl) and others use minibeads (markdown).
 
-## Proposed Design
+## Current Status
 
-### Sync Strategy
-The sync command should:
-1. Detect which format has newer changes (compare timestamps)
-2. Prefer newer changes automatically where possible
-3. Detect conflicts (both modified since last sync)
-4. Error on conflicts with clear resolution options
+**This feature is not aligned with minibeads architecture.**
 
-### CLI Command
-```bash
-bd sync                         # Sync jsonl <-> markdown
-bd sync --dry-run              # Preview changes
-bd sync --prefer-jsonl         # Resolve conflicts by preferring jsonl
-bd sync --prefer-markdown      # Resolve conflicts by preferring markdown
-bd sync --interactive          # Prompt for conflict resolution
-```
+If collaboration with upstream bd users is needed, the correct approach would be:
+1. Upstream bd users export to jsonl
+2. Convert jsonl to markdown (import)
+3. Work in markdown (minibeads)
+4. Export back to jsonl if needed
 
-### Sync Metadata
-Store sync state in `.beads/sync_state.yaml`:
-```yaml
-last_sync: 2025-10-30T14:00:00Z
-jsonl_hash: abc123def456
-markdown_hashes:
-  minibeads-1: def789abc012
-  minibeads-2: 012abc345def
-```
+This would be a **one-way import** feature (jsonl → markdown), not bidirectional sync.
 
-### Conflict Detection
-For each issue:
-- If only jsonl changed: update markdown
-- If only markdown changed: update jsonl
-- If both changed: detect conflict
-  - Compare timestamps (updated_at field)
-  - Compare content hashes
-  - Require user resolution
+## Recommendation
 
-### Implementation Steps
-1. Load sync state from previous sync
-2. Read both jsonl and markdown
-3. Compare timestamps and hashes
-4. Build change list
-5. Apply changes with validation
-6. Update sync state
-7. Report summary
+- Close this issue as "won't implement" due to architectural mismatch
+- OR repurpose as "bd import" feature (one-way: jsonl → markdown)
+- See minibeads-16 (duplicate issue)
 
-### Use Cases
-- Pull changes from upstream bd users: `bd sync`
-- Push minibeads changes to issues.jsonl: `bd sync`
-- Preview what would change: `bd sync --dry-run`
-- Resolve conflicts: `bd sync --interactive`
+Dependencies:
+  minibeads-11 (blocks)
 
-## Dependencies
-This feature depends on having `bd export` working first to handle the jsonl format.
+---
+
+**Checked up-to-date as of 2025-10-31_#70(fe445a9)**
+
+Architectural mismatch identified. Markdown is the single source of truth per PROJECT_VISION.md.
