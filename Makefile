@@ -20,11 +20,11 @@ beads/bd-upstream:
 	cd beads && go build -o bd-upstream ./cmd/bd
 
 # Validation target - runs all checks before commit with timing
-validate:
+validate: purge
 	@time $(MAKE) validate-inner
 
 # Internal validation target that does the actual work
-validate-inner: purge test
+validate-inner: test
 	@echo "Running cargo fmt check..."
 	cargo fmt -- --check
 	@echo "Running clippy..."
