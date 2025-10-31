@@ -284,6 +284,20 @@ enum Commands {
         repair: bool,
     },
 
+    /// Rename the issue prefix for all issues
+    RenamePrefix {
+        /// New prefix to use
+        new_prefix: String,
+
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Force rename even if issues would conflict
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Manage dependencies
     Dep {
         #[command(subcommand)]
@@ -834,6 +848,34 @@ fn run() -> Result<()> {
                         println!("Updated {} file(s) with references", changes.len() - 2);
                     }
                 }
+            }
+            Ok(())
+        }
+
+        Commands::RenamePrefix {
+            new_prefix,
+            dry_run,
+            force,
+        } => {
+            let storage = get_storage(&cli.db)?;
+
+            // Log command after storage is validated
+            if !cli.mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            let changes = storage.rename_prefix(&new_prefix, dry_run, force)?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&changes)?);
+            } else if dry_run {
+                println!("Dry run - would make the following changes:");
+                for change in &changes {
+                    println!("  {}", change);
+                }
+            } else {
+                println!("Successfully renamed prefix to '{}'", new_prefix);
+                println!("Renamed {} issue(s)", changes.len() / 2); // Each issue has 2 changes: file rename + content update
             }
             Ok(())
         }

@@ -1004,6 +1004,146 @@ impl Storage {
 
         Ok(issues.len())
     }
+
+    /// Rename the issue prefix for all issues
+    ///
+    /// This operation:
+    /// - Renames all issue files from old-prefix-N to new-prefix-N
+    /// - Updates the ID in all issue frontmatter
+    /// - Updates all dependency references
+    /// - Updates the prefix in config.yaml
+    /// - Is atomic (all updates succeed or none)
+    pub fn rename_prefix(
+        &self,
+        new_prefix: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        // Get current prefix
+        let old_prefix = self.get_prefix()?;
+
+        // Validate new prefix is different
+        if old_prefix == new_prefix {
+            anyhow::bail!("New prefix '{}' is the same as current prefix", new_prefix);
+        }
+
+        // Validate new prefix format (alphanumeric and hyphens only)
+        if !new_prefix.chars().all(|c| c.is_alphanumeric() || c == '-') {
+            anyhow::bail!(
+                "Invalid prefix format: '{}'. Use only alphanumeric characters and hyphens.",
+                new_prefix
+            );
+        }
+
+        // Load all issues
+        let all_issues = self.list_all_issues_no_dependents()?;
+
+        // Build mapping from old ID to new ID
+        let mut id_mapping = HashMap::new();
+        for issue in &all_issues {
+            // Check if this issue uses the current prefix
+            if let Some(pos) = issue.id.rfind('-') {
+                let issue_prefix = &issue.id[..pos];
+                let issue_number = &issue.id[pos + 1..];
+
+                if issue_prefix == old_prefix {
+                    let new_id = format!("{}-{}", new_prefix, issue_number);
+
+                    // Check if new ID would conflict with existing issue
+                    if !force {
+                        let new_path = self.issues_dir.join(format!("{}.md", new_id));
+                        if new_path.exists() {
+                            anyhow::bail!(
+                                "Cannot rename: new ID '{}' already exists. Use --force to override.",
+                                new_id
+                            );
+                        }
+                    }
+
+                    id_mapping.insert(issue.id.clone(), new_id);
+                }
+            }
+        }
+
+        if id_mapping.is_empty() {
+            anyhow::bail!("No issues found with prefix '{}'", old_prefix);
+        }
+
+        // Track all changes for dry-run mode
+        let mut changes = Vec::new();
+        changes.push(format!(
+            "Update config.yaml: issue-prefix: {} -> {}",
+            old_prefix, new_prefix
+        ));
+
+        // Plan all file renames and content updates
+        for issue in &all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                changes.push(format!("Rename file: {}.md -> {}.md", issue.id, new_id));
+                changes.push(format!(
+                    "Update ID in frontmatter: {} -> {}",
+                    issue.id, new_id
+                ));
+
+                // Check if this issue has dependencies that will be renamed
+                for dep_id in issue.depends_on.keys() {
+                    if id_mapping.contains_key(dep_id) {
+                        changes.push(format!(
+                            "Update dependency in {}: {} -> {}",
+                            new_id,
+                            dep_id,
+                            id_mapping.get(dep_id).unwrap()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If dry-run, return changes without applying
+        if dry_run {
+            return Ok(changes);
+        }
+
+        // Apply changes atomically
+        // Step 1: Update all issue files (content + dependencies)
+        for issue in all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                let mut updated_issue = issue.clone();
+                updated_issue.id = new_id.clone();
+
+                // Update dependency references
+                let mut new_depends_on = HashMap::new();
+                for (dep_id, dep_type) in &updated_issue.depends_on {
+                    let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                    new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+                }
+                updated_issue.depends_on = new_depends_on;
+                updated_issue.updated_at = chrono::Utc::now();
+
+                // Write to new file
+                let new_path = self.issues_dir.join(format!("{}.md", new_id));
+                let markdown = issue_to_markdown(&updated_issue)?;
+                fs::write(&new_path, markdown)
+                    .context(format!("Failed to write renamed issue: {}", new_id))?;
+
+                // Remove old file
+                let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                fs::remove_file(&old_path)
+                    .context(format!("Failed to remove old issue file: {}", issue.id))?;
+            }
+        }
+
+        // Step 2: Update config.yaml with new prefix
+        let config_path = self.beads_dir.join("config.yaml");
+        let mut config = HashMap::new();
+        config.insert("issue-prefix".to_string(), new_prefix.to_string());
+        let config_yaml = serde_yaml::to_string(&config)?;
+        fs::write(&config_path, config_yaml).context("Failed to update config.yaml")?;
+
+        Ok(changes)
+    }
 }
 
 /// Infer prefix from the parent directory name
