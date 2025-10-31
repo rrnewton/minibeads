@@ -194,10 +194,8 @@ fn run_random_actions(
         println!("🎲 Sampled entropy seed: {}", entropy_seed);
         println!("   (Use --seed {} to reproduce this run)\n", entropy_seed);
         entropy_seed
-    } else if let Some(s) = seed {
-        s
     } else {
-        42u64 // Default seed
+        seed.unwrap_or(42u64) // Default seed
     };
 
     // Determine the binary path

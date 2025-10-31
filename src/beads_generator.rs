@@ -534,7 +534,7 @@ impl ActionExecutor {
                             let expected_parts: Vec<&str> = expected_id.split('-').collect();
                             let actual_parts: Vec<&str> = actual_id.split('-').collect();
 
-                            let prefix_mismatch = expected_parts.get(0) != actual_parts.get(0);
+                            let prefix_mismatch = expected_parts.first() != actual_parts.first();
                             let number_mismatch = expected_parts.get(1) != actual_parts.get(1);
 
                             let mut error_msg = String::from("ISSUE ID MISMATCH!\n");
@@ -544,12 +544,14 @@ impl ActionExecutor {
                             if prefix_mismatch {
                                 error_msg.push_str(&format!(
                                     "PREFIX MISMATCH: Expected '{}', got '{}'\n",
-                                    expected_parts.get(0).unwrap_or(&"?"),
-                                    actual_parts.get(0).unwrap_or(&"?")
+                                    expected_parts.first().unwrap_or(&"?"),
+                                    actual_parts.first().unwrap_or(&"?")
                                 ));
                                 error_msg.push_str("Possible causes:\n");
                                 error_msg.push_str("  - Init command failed to set prefix\n");
-                                error_msg.push_str("  - Found existing .beads directory with different prefix\n");
+                                error_msg.push_str(
+                                    "  - Found existing .beads directory with different prefix\n",
+                                );
                                 error_msg.push_str("  - Working in wrong directory\n");
                             }
 
@@ -561,7 +563,8 @@ impl ActionExecutor {
                                 ));
                                 error_msg.push_str("Possible causes:\n");
                                 error_msg.push_str("  - Existing issues in database\n");
-                                error_msg.push_str("  - Sequential numbering assumption violated\n");
+                                error_msg
+                                    .push_str("  - Sequential numbering assumption violated\n");
                                 error_msg.push_str("  - Test directory not isolated\n");
                             }
 
