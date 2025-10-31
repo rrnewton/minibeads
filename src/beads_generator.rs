@@ -478,6 +478,12 @@ impl ActionExecutor {
     fn build_command(&self) -> Command {
         let mut cmd = Command::new(&self.binary_path);
         cmd.current_dir(&self.work_dir);
+
+        // Set MB_BEADS_DIR to force using .beads in working directory
+        // This prevents minibeads from walking up and finding ancestor .beads directories
+        let beads_dir = std::path::PathBuf::from(&self.work_dir).join(".beads");
+        cmd.env("MB_BEADS_DIR", beads_dir);
+
         if self.use_no_db {
             cmd.arg("--no-db");
         }
@@ -524,14 +530,42 @@ impl ActionExecutor {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if let Some(actual_id) = extract_issue_id(&stdout) {
                         if actual_id != *expected_id {
-                            anyhow::bail!(
-                                "SEQUENTIAL NUMBERING ASSUMPTION VIOLATED!\n\
-                                 Expected created issue ID: {}\n\
-                                 Actual created issue ID: {}\n\
-                                 This means the beads implementation does not follow sequential numbering.",
-                                expected_id,
-                                actual_id
-                            );
+                            // Parse both IDs to understand the mismatch
+                            let expected_parts: Vec<&str> = expected_id.split('-').collect();
+                            let actual_parts: Vec<&str> = actual_id.split('-').collect();
+
+                            let prefix_mismatch = expected_parts.get(0) != actual_parts.get(0);
+                            let number_mismatch = expected_parts.get(1) != actual_parts.get(1);
+
+                            let mut error_msg = String::from("ISSUE ID MISMATCH!\n");
+                            error_msg.push_str(&format!("Expected: {}\n", expected_id));
+                            error_msg.push_str(&format!("Actual:   {}\n\n", actual_id));
+
+                            if prefix_mismatch {
+                                error_msg.push_str(&format!(
+                                    "PREFIX MISMATCH: Expected '{}', got '{}'\n",
+                                    expected_parts.get(0).unwrap_or(&"?"),
+                                    actual_parts.get(0).unwrap_or(&"?")
+                                ));
+                                error_msg.push_str("Possible causes:\n");
+                                error_msg.push_str("  - Init command failed to set prefix\n");
+                                error_msg.push_str("  - Found existing .beads directory with different prefix\n");
+                                error_msg.push_str("  - Working in wrong directory\n");
+                            }
+
+                            if number_mismatch && !prefix_mismatch {
+                                error_msg.push_str(&format!(
+                                    "NUMBER MISMATCH: Expected '{}', got '{}'\n",
+                                    expected_parts.get(1).unwrap_or(&"?"),
+                                    actual_parts.get(1).unwrap_or(&"?")
+                                ));
+                                error_msg.push_str("Possible causes:\n");
+                                error_msg.push_str("  - Existing issues in database\n");
+                                error_msg.push_str("  - Sequential numbering assumption violated\n");
+                                error_msg.push_str("  - Test directory not isolated\n");
+                            }
+
+                            anyhow::bail!(error_msg);
                         }
                     }
                 }
