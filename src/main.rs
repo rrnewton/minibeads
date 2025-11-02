@@ -44,7 +44,7 @@ fn long_version() -> &'static str {
 
 #[derive(Parser)]
 #[command(
-    name = "bd",
+    name = "mb",
     about = "Minibeads - A minimal issue tracker",
     long_version = long_version(),
 )]
@@ -515,7 +515,7 @@ fn run() -> Result<()> {
             // It does NOT use find_beads_dir() or respect --db/--mb-beads-dir flags
             // This ensures init always initializes in CWD, never in ancestor directories
             if mb_beads_dir.is_some() || db.is_some() {
-                eprintln!("Note: 'bd init' always creates .beads/ in current directory");
+                eprintln!("Note: 'mb init' always creates .beads/ in current directory");
                 eprintln!("      --db and --mb-beads-dir flags are ignored for 'init'");
             }
 
@@ -682,7 +682,7 @@ fn run() -> Result<()> {
             }
 
             if issue_ids.is_empty() {
-                anyhow::bail!("No issue IDs provided. Usage: bd show <issue-id> [issue-ids...]");
+                anyhow::bail!("No issue IDs provided. Usage: mb show <issue-id> [issue-ids...]");
             }
 
             let prefix = storage.get_prefix()?;
@@ -1286,7 +1286,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("bd version 0.9.0");
+            println!("mb version 0.9.0");
             Ok(())
         }
 
@@ -1371,7 +1371,7 @@ fn find_beads_dir() -> Result<PathBuf> {
         }
 
         if !current.pop() {
-            anyhow::bail!("No .beads directory found. Run 'bd init' to initialize a new database.");
+            anyhow::bail!("No .beads directory found. Run 'mb init' to initialize a new database.");
         }
     }
 }
@@ -1409,31 +1409,31 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
 
 fn print_quickstart() {
     println!(
-        r#"bd - Dependency-Aware Issue Tracker
+        r#"mb - Dependency-Aware Issue Tracker
 
-Issues chained together like beads.
+Issues chained together like beads (minibeads).
 
 GETTING STARTED
-  bd init   Initialize bd in your project
+  mb init   Initialize mb in your project
             Creates .beads/ directory with project-specific database
             Auto-detects prefix from directory name (e.g., myapp-1, myapp-2)
 
-  bd init --prefix api   Initialize with custom prefix
+  mb init --prefix api   Initialize with custom prefix
             Issues will be named: api-1, api-2, ...
 
 CREATING ISSUES
-  bd create "Fix login bug"
-  bd create "Add auth" -p 0 -t feature
-  bd create "Write tests" -d "Unit tests for auth" --assignee alice
+  mb create "Fix login bug"
+  mb create "Add auth" -p 0 -t feature
+  mb create "Write tests" -d "Unit tests for auth" --assignee alice
 
 VIEWING ISSUES
-  bd list       List all issues
-  bd list --status open  List by status
-  bd list --priority 0  List by priority (0-4, 0=highest)
-  bd show bd-1       Show issue details
+  mb list       List all issues
+  mb list --status open  List by status
+  mb list --priority 0  List by priority (0-4, 0=highest)
+  mb show myapp-1       Show issue details
 
 MANAGING DEPENDENCIES
-  bd dep add bd-1 bd-2     Add dependency (bd-2 blocks bd-1)
+  mb dep add myapp-1 myapp-2     Add dependency (myapp-2 blocks myapp-1)
 
 DEPENDENCY TYPES
   blocks  Task B must complete before task A
@@ -1442,21 +1442,21 @@ DEPENDENCY TYPES
   discovered-from  Auto-created when AI discovers related work
 
 READY WORK
-  bd ready       Show issues ready to work on
+  mb ready       Show issues ready to work on
             Ready = status is 'open' AND no blocking dependencies
             Perfect for agents to claim next work!
 
 UPDATING ISSUES
-  bd update bd-1 --status in_progress
-  bd update bd-1 --priority 0
-  bd update bd-1 --assignee bob
+  mb update myapp-1 --status in_progress
+  mb update myapp-1 --priority 0
+  mb update myapp-1 --assignee bob
 
 CLOSING ISSUES
-  bd close bd-1
-  bd close bd-1 --reason "Fixed in PR #42"
+  mb close myapp-1
+  mb close myapp-1 --reason "Fixed in PR #42"
 
 DATABASE LOCATION
-  bd automatically discovers your database in this priority order:
+  mb automatically discovers your database in this priority order:
     1. --mb-beads-dir /path/to/.beads   (minibeads-specific, preferred)
     2. --db /path/to/.beads             (upstream compatibility)
     3. $MB_BEADS_DIR environment variable
@@ -1467,8 +1467,12 @@ DATABASE LOCATION
         When path ends with .db, the parent directory is used.
         Use --mb-beads-dir for minibeads-specific workflows.
 
+COMPATIBILITY NOTE
+  The binary is named 'mb' (minibeads) to distinguish it from upstream 'bd'.
+  You can symlink 'mb' to 'bd' if needed for compatibility with existing tools.
+
 Ready to start!
-Run bd create "My first issue" to create your first issue.
+Run mb create "My first issue" to create your first issue.
 "#
     );
 }

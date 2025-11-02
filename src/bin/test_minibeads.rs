@@ -303,7 +303,7 @@ async fn run_migration_test(
     let exe_dir = exe_path
         .parent()
         .expect("Failed to get executable directory");
-    let minibeads_binary = exe_dir.join(format!("bd{}", std::env::consts::EXE_SUFFIX));
+    let minibeads_binary = exe_dir.join(format!("mb{}", std::env::consts::EXE_SUFFIX));
 
     // Validate binary exists
     if !minibeads_binary.exists() {
@@ -361,7 +361,7 @@ async fn run_migration_test(
     println!("Phase 2: Migrate to hash IDs");
     println!("{}", "=".repeat(70));
 
-    logger.log("Running bd mb-migrate...".to_string());
+    logger.log("Running mb mb-migrate...".to_string());
 
     let migrate_output = std::process::Command::new(&minibeads_binary)
         .current_dir(work_dir)
@@ -524,7 +524,7 @@ async fn run_sync_test(
     let exe_dir = exe_path
         .parent()
         .expect("Failed to get executable directory");
-    let minibeads_binary = exe_dir.join(format!("bd{}", std::env::consts::EXE_SUFFIX));
+    let minibeads_binary = exe_dir.join(format!("mb{}", std::env::consts::EXE_SUFFIX));
 
     // Find project root for upstream binary
     let mut current = exe_dir;
@@ -711,7 +711,7 @@ async fn run_random_actions(
                 let exe_dir = exe_path
                     .parent()
                     .expect("Failed to get executable directory");
-                let binary_name = format!("bd{}", std::env::consts::EXE_SUFFIX);
+                let binary_name = format!("mb{}", std::env::consts::EXE_SUFFIX);
                 exe_dir.join(&binary_name).to_str().unwrap().to_string()
             }
             Implementation::Upstream => {
@@ -1803,7 +1803,7 @@ fn test_jsonl_import(
     let exe_dir = exe_path
         .parent()
         .expect("Failed to get executable directory");
-    let binary_name = format!("bd{}", std::env::consts::EXE_SUFFIX);
+    let binary_name = format!("mb{}", std::env::consts::EXE_SUFFIX);
     let minibeads_binary = exe_dir.join(&binary_name).to_str().unwrap().to_string();
 
     if !PathBuf::from(&minibeads_binary).exists() {

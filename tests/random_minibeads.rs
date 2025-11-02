@@ -13,12 +13,12 @@ use std::process::Command;
 
 /// Build minibeads binaries in release mode
 fn build_minibeads() -> PathBuf {
-    // Build the bd binary
-    let bd_build = Command::new("cargo")
-        .args(["build", "--release", "--bin", "bd"])
+    // Build the mb binary
+    let mb_build = Command::new("cargo")
+        .args(["build", "--release", "--bin", "mb"])
         .status()
-        .expect("Failed to build bd binary");
-    assert!(bd_build.success(), "Failed to build bd binary");
+        .expect("Failed to build mb binary");
+    assert!(mb_build.success(), "Failed to build mb binary");
 
     // Build the test_minibeads binary
     let test_build = Command::new("cargo")
