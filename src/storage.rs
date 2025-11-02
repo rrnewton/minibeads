@@ -1291,6 +1291,134 @@ impl Storage {
 
         Ok(changes)
     }
+
+    /// Migrate from numeric to hash-based IDs
+    ///
+    /// This operation:
+    /// - Generates hash-based IDs for all issues with numeric IDs
+    /// - Renames all issue files from prefix-N to prefix-hash
+    /// - Updates all dependency references
+    /// - Updates config-minibeads.yaml to set mb-hash-ids: true
+    /// - Is atomic (all updates succeed or none)
+    pub fn migrate_to_hash_ids(&self, dry_run: bool) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        // Check if already using hash IDs
+        if self.use_hash_ids()? {
+            anyhow::bail!("Database is already using hash-based IDs (mb-hash-ids: true in config-minibeads.yaml)");
+        }
+
+        // Get current prefix
+        let prefix = self.get_prefix()?;
+
+        // Load all issues
+        let all_issues = self.list_all_issues_no_dependents()?;
+
+        // Build mapping from old numeric ID to new hash ID
+        let mut id_mapping = HashMap::new();
+        for issue in &all_issues {
+            // Check if this issue has a numeric ID (prefix-N pattern)
+            if let Some(pos) = issue.id.rfind('-') {
+                let issue_prefix = &issue.id[..pos];
+                let issue_suffix = &issue.id[pos + 1..];
+
+                // Only migrate if it's a numeric ID
+                if issue_prefix == prefix && issue_suffix.parse::<u32>().is_ok() {
+                    // Generate hash-based ID
+                    let hash_id =
+                        self.generate_hash_id(&prefix, &issue.title, &issue.description)?;
+
+                    // Check if new ID would conflict with existing issue
+                    let new_path = self.issues_dir.join(format!("{}.md", hash_id));
+                    if new_path.exists() {
+                        anyhow::bail!(
+                            "Cannot migrate: generated hash ID '{}' already exists. This is a collision - please report this bug.",
+                            hash_id
+                        );
+                    }
+
+                    id_mapping.insert(issue.id.clone(), hash_id);
+                }
+            }
+        }
+
+        if id_mapping.is_empty() {
+            anyhow::bail!(
+                "No numeric IDs found to migrate. All issues already use hash-based or custom IDs."
+            );
+        }
+
+        // Track all changes for dry-run mode
+        let mut changes = Vec::new();
+        changes.push("Update config-minibeads.yaml: mb-hash-ids: false -> true".to_string());
+
+        // Plan all file renames and content updates
+        for issue in &all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                changes.push(format!("Rename file: {}.md -> {}.md", issue.id, new_id));
+                changes.push(format!(
+                    "Update ID in frontmatter: {} -> {}",
+                    issue.id, new_id
+                ));
+
+                // Check if this issue has dependencies that will be renamed
+                for dep_id in issue.depends_on.keys() {
+                    if id_mapping.contains_key(dep_id) {
+                        changes.push(format!(
+                            "Update dependency in {}: {} -> {}",
+                            new_id,
+                            dep_id,
+                            id_mapping.get(dep_id).unwrap()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If dry-run, return changes without applying
+        if dry_run {
+            return Ok(changes);
+        }
+
+        // Apply changes atomically
+        // Step 1: Update all issue files (content + dependencies)
+        for issue in all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                let mut updated_issue = issue.clone();
+                updated_issue.id = new_id.clone();
+
+                // Update dependency references
+                let mut new_depends_on = HashMap::new();
+                for (dep_id, dep_type) in &updated_issue.depends_on {
+                    let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                    new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+                }
+                updated_issue.depends_on = new_depends_on;
+                updated_issue.updated_at = chrono::Utc::now();
+
+                // Write to new file
+                let new_path = self.issues_dir.join(format!("{}.md", new_id));
+                let markdown = issue_to_markdown(&updated_issue)?;
+                fs::write(&new_path, markdown)
+                    .context(format!("Failed to write renamed issue: {}", new_id))?;
+
+                // Remove old file
+                let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                fs::remove_file(&old_path)
+                    .context(format!("Failed to remove old issue file: {}", issue.id))?;
+            }
+        }
+
+        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: true
+        let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
+        let mut config = HashMap::new();
+        config.insert("mb-hash-ids".to_string(), "true".to_string());
+        let config_yaml = serde_yaml::to_string(&config)?;
+        fs::write(&minibeads_config_path, config_yaml)
+            .context("Failed to update config-minibeads.yaml")?;
+
+        Ok(changes)
+    }
 }
 
 /// Infer prefix from the parent directory name

@@ -388,6 +388,13 @@ enum Commands {
 
     /// Show version information
     Version,
+
+    /// Migrate from numeric to hash-based IDs (minibeads-specific)
+    MbMigrate {
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1280,6 +1287,33 @@ fn run() -> Result<()> {
 
         Commands::Version => {
             println!("bd version 0.9.0");
+            Ok(())
+        }
+
+        Commands::MbMigrate { dry_run } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            // Log command after storage is validated
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            let changes = storage.migrate_to_hash_ids(dry_run)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&changes)?);
+            } else if dry_run {
+                println!("Dry run - would make the following changes:");
+                for change in &changes {
+                    println!("  {}", change);
+                }
+            } else {
+                println!(
+                    "Successfully migrated {} issue(s) to hash-based IDs",
+                    changes.len() / 3
+                );
+                println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+            }
             Ok(())
         }
     }
