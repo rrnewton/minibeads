@@ -243,3 +243,42 @@ fn test_sync_stress() {
         "Bidirectional sync stress test (10 cycles, 15 actions/phase, ~3s)",
     );
 }
+
+#[test]
+#[cfg(not(tarpaulin))] // Skip under coverage - this test invokes external binaries
+fn test_migration_stress() {
+    let binary_path = build_minibeads();
+    run_migration_test(
+        &binary_path,
+        &["--seed", "54321", "--actions", "50"],
+        "Hash ID migration stress test (50 actions, then migrate)",
+    );
+}
+
+/// Run migration test: generate numeric state, migrate to hash, verify
+fn run_migration_test(binary_path: &PathBuf, args: &[&str], test_name: &str) {
+    println!(
+        "\nRunning: {} migration-test {}",
+        binary_path.display(),
+        args.join(" ")
+    );
+
+    let output = Command::new(binary_path)
+        .arg("migration-test")
+        .args(args)
+        .output()
+        .expect("Failed to execute test_minibeads migration-test");
+
+    // Print output for debugging
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    assert!(
+        output.status.success(),
+        "{} failed with exit code: {:?}",
+        test_name,
+        output.status.code()
+    );
+}

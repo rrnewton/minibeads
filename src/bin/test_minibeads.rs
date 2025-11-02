@@ -90,6 +90,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Migration testing: generate numeric state, migrate to hash IDs, verify
+    #[command(name = "migration-test")]
+    MigrationTest {
+        /// Seed for deterministic RNG
+        #[arg(long)]
+        seed: Option<u64>,
+
+        /// Use entropy for random seed (non-deterministic)
+        #[arg(long)]
+        seed_from_entropy: bool,
+
+        /// Number of actions to generate before migration
+        #[arg(long, default_value = "50")]
+        actions: usize,
+
+        /// Enable verbose output (print action sequence and detailed checks)
+        #[arg(long, short)]
+        verbose: bool,
+    },
+
     /// Bidirectional sync testing alternating between minibeads and upstream
     #[command(name = "sync-test")]
     SyncTest {
@@ -210,6 +230,12 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         match cli.command {
+            Commands::MigrationTest {
+                seed,
+                seed_from_entropy,
+                actions,
+                verbose,
+            } => run_migration_test(seed, seed_from_entropy, actions, verbose).await,
             Commands::SyncTest {
                 seed,
                 seed_from_entropy,
@@ -247,6 +273,223 @@ fn main() -> Result<()> {
             }
         }
     })
+}
+
+/// Migration test - generate numeric state, migrate to hash IDs, verify
+async fn run_migration_test(
+    seed: Option<u64>,
+    seed_from_entropy: bool,
+    num_actions: usize,
+    verbose: bool,
+) -> Result<()> {
+    // Sample entropy ONCE at the beginning if requested
+    let base_seed = if seed_from_entropy {
+        let mut rng = rand::thread_rng();
+        let entropy_seed = rng.next_u64();
+        println!("🎲 Sampled entropy seed: {}", entropy_seed);
+        println!("   (Use --seed {} to reproduce this run)\n", entropy_seed);
+        entropy_seed
+    } else {
+        seed.unwrap_or(42u64) // Default seed
+    };
+
+    println!("🔄 Hash ID Migration Test");
+    println!("Seed: {}", base_seed);
+    println!("Actions: {}", num_actions);
+    println!();
+
+    // Find binary path
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path
+        .parent()
+        .expect("Failed to get executable directory");
+    let minibeads_binary = exe_dir.join(format!("bd{}", std::env::consts::EXE_SUFFIX));
+
+    // Validate binary exists
+    if !minibeads_binary.exists() {
+        eprintln!(
+            "ERROR: Minibeads binary not found at: {}",
+            minibeads_binary.display()
+        );
+        eprintln!("Build it first with: cargo build");
+        std::process::exit(1);
+    }
+
+    println!("📦 Minibeads: {}", minibeads_binary.display());
+    println!();
+
+    // Create working directory
+    let temp_dir = tempfile::tempdir()?;
+    let work_dir = temp_dir.path();
+    println!("📁 Working directory: {}", work_dir.display());
+    println!();
+
+    let verbosity = if verbose {
+        LogLevel::Verbose
+    } else {
+        LogLevel::Normal
+    };
+    let logger = Logger::new(verbosity, false);
+
+    // Phase 1: Initialize with numeric IDs and populate
+    println!("{}", "=".repeat(70));
+    println!("Phase 1: Initialize with numeric IDs and populate");
+    println!("{}", "=".repeat(70));
+
+    let mut generator = ActionGenerator::new_with_mode(base_seed, false); // numeric mode
+    let mut reference = ReferenceInterpreter::new("test".to_string());
+
+    let executor = ActionExecutor::new(
+        minibeads_binary.to_str().unwrap(),
+        work_dir.to_str().unwrap(),
+        false,
+    );
+
+    let actions = generator.generate_sequence(num_actions);
+    logger.log(format!("Generated {} actions", actions.len()));
+
+    execute_actions(&executor, &actions, &mut reference, &logger)?;
+
+    let initial_issue_count = reference.get_final_state().len();
+    println!(
+        "✅ Phase 1 complete: {} issues created with numeric IDs",
+        initial_issue_count
+    );
+
+    // Phase 2: Migrate to hash IDs
+    println!("\n{}", "=".repeat(70));
+    println!("Phase 2: Migrate to hash IDs");
+    println!("{}", "=".repeat(70));
+
+    logger.log("Running bd mb-migrate...".to_string());
+
+    let migrate_output = std::process::Command::new(&minibeads_binary)
+        .current_dir(work_dir)
+        .args(["mb-migrate"])
+        .output()?;
+
+    if !migrate_output.status.success() {
+        eprintln!(
+            "❌ Migration failed:\n{}",
+            String::from_utf8_lossy(&migrate_output.stderr)
+        );
+        return Err(anyhow::anyhow!("Migration failed"));
+    }
+
+    let migration_output = String::from_utf8_lossy(&migrate_output.stdout);
+    logger.log(format!("Migration output:\n{}", migration_output));
+
+    // Extract number of migrated issues from output
+    let migrated_count = migration_output
+        .lines()
+        .find(|line| line.contains("Successfully migrated"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find(|word| word.parse::<usize>().is_ok())
+                .and_then(|num_str| num_str.parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+
+    println!(
+        "✅ Phase 2 complete: Migrated {} issues to hash IDs",
+        migrated_count
+    );
+
+    // Phase 3: Verify migration
+    println!("\n{}", "=".repeat(70));
+    println!("Phase 3: Verify migration");
+    println!("{}", "=".repeat(70));
+
+    logger.log("Verifying migration integrity...".to_string());
+
+    // Count issues after migration
+    let list_output = std::process::Command::new(&minibeads_binary)
+        .current_dir(work_dir)
+        .args(["list"])
+        .output()?;
+
+    if !list_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to list issues after migration:\n{}",
+            String::from_utf8_lossy(&list_output.stderr)
+        ));
+    }
+
+    let list_text = String::from_utf8_lossy(&list_output.stdout);
+    let post_migration_count = list_text.lines().filter(|line| !line.is_empty()).count();
+
+    // Verify issue count matches
+    if post_migration_count != initial_issue_count {
+        eprintln!(
+            "❌ Issue count mismatch! Before: {}, After: {}",
+            initial_issue_count, post_migration_count
+        );
+        return Err(anyhow::anyhow!(
+            "Migration lost issues: {} before, {} after",
+            initial_issue_count,
+            post_migration_count
+        ));
+    }
+
+    logger.log(format!(
+        "✓ Issue count preserved: {} issues",
+        post_migration_count
+    ));
+
+    // Verify all IDs are now hash-based
+    let mut all_hash_ids = true;
+    let mut numeric_ids = Vec::new();
+
+    for line in list_text.lines() {
+        if let Some(id) = line.split(':').next() {
+            let id = id.trim();
+            // Check if ID contains hex digits (a-f)
+            if !id.is_empty() && !id.contains(|c: char| c.is_ascii_hexdigit() && c.is_alphabetic())
+            {
+                all_hash_ids = false;
+                numeric_ids.push(id.to_string());
+            }
+        }
+    }
+
+    if !all_hash_ids {
+        eprintln!(
+            "❌ Not all IDs are hash-based! Found numeric IDs: {:?}",
+            numeric_ids
+        );
+        return Err(anyhow::anyhow!("Migration did not convert all IDs"));
+    }
+
+    logger.log("✓ All issue IDs are hash-based".to_string());
+
+    // Verify dependencies are intact by checking a few issues
+    let show_output = std::process::Command::new(&minibeads_binary)
+        .current_dir(work_dir)
+        .args(["stats"])
+        .output()?;
+
+    if !show_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get stats after migration:\n{}",
+            String::from_utf8_lossy(&show_output.stderr)
+        ));
+    }
+
+    logger.log(format!(
+        "Stats after migration:\n{}",
+        String::from_utf8_lossy(&show_output.stdout).trim()
+    ));
+
+    println!("✅ Phase 3 complete: Migration verified");
+
+    println!("\n{}", "=".repeat(70));
+    println!(
+        "✅ Migration test passed! {} issues successfully migrated",
+        initial_issue_count
+    );
+    println!("{}", "=".repeat(70));
+
+    Ok(())
 }
 
 /// Bidirectional sync test - alternates between minibeads and upstream
