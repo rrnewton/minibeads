@@ -1,8 +1,10 @@
 [submodule "claude_template"]
 	path = .claude_template
-        url = https://github.com/rrnewton/claude_template
+        url = ../claude_template
+#       url = https://github.com/rrnewton/claude_template
 # 	url = git@github.com:rrnewton/claude_template.git
 [submodule "beads"]
 	path = beads
-        url = https://github.com/rrnewton/beads
+        url = ../beads
+#       url = https://github.com/rrnewton/beads
 #	url = git@github.com:rrnewton/beads
