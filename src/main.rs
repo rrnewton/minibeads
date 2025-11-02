@@ -49,6 +49,16 @@ fn long_version() -> &'static str {
     long_version = long_version(),
 )]
 struct Cli {
+    #[command(flatten)]
+    global_opts: GlobalOpts,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Args)]
+#[command(next_help_heading = "Global Options")]
+struct GlobalOpts {
     /// Path to .beads directory (minibeads-specific, preferred over --db)
     #[arg(long = "mb-beads-dir", global = true)]
     mb_beads_dir: Option<PathBuf>,
@@ -87,9 +97,6 @@ struct Cli {
     /// Disable auto-import (ignored for compatibility)
     #[arg(long, global = true)]
     no_auto_import: bool,
-
-    #[command(subcommand)]
-    command: Commands,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,10 +508,10 @@ fn run() -> Result<()> {
 
     // Extract fields needed for get_storage before matching on cli.command
     // This avoids borrowing issues when we try to call get_storage(mb_beads_dir, db) inside match arms
-    let mb_beads_dir = &cli.mb_beads_dir;
-    let db = &cli.db;
-    let json = cli.json;
-    let mb_no_cmd_logging = cli.mb_no_cmd_logging;
+    let mb_beads_dir = &cli.global_opts.mb_beads_dir;
+    let db = &cli.global_opts.db;
+    let json = cli.global_opts.json;
+    let mb_no_cmd_logging = cli.global_opts.mb_no_cmd_logging;
 
     match cli.command {
         Commands::Init {
