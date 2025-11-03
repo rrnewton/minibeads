@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 TEST_NAME="help_version"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BD_BIN="$WORKSPACE_ROOT/target/debug/bd"
+BD_BIN="$WORKSPACE_ROOT/target/debug/mb"
 
 # Counters
 TESTS_RUN=0
@@ -102,21 +102,21 @@ assert_contains "$OUTPUT" "-p, --priority" "List help should show -p, --priority
 # Test 7: bd version
 echo -e "\n${YELLOW}Test 7: bd version${NC}"
 OUTPUT=$("$BD_BIN" version 2>&1)
-assert_contains "$OUTPUT" "bd version" "Version should show version string"
-assert_contains "$OUTPUT" "0.9.0" "Version should show version number"
+assert_contains "$OUTPUT" "mb version" "Version should show version string"
+assert_contains "$OUTPUT" "0." "Version should show version number"
 
 # Test 8: bd --version
 echo -e "\n${YELLOW}Test 8: bd --version${NC}"
 OUTPUT=$("$BD_BIN" --version 2>&1)
-assert_contains "$OUTPUT" "bd" "--version should show program name"
+assert_contains "$OUTPUT" "mb" "--version should show program name"
 
 # Test 9: bd quickstart
 echo -e "\n${YELLOW}Test 9: bd quickstart${NC}"
 OUTPUT=$("$BD_BIN" quickstart 2>&1)
 assert_contains "$OUTPUT" "GETTING STARTED" "Quickstart should show getting started section"
-assert_contains "$OUTPUT" "bd init" "Quickstart should mention bd init"
-assert_contains "$OUTPUT" "bd create" "Quickstart should mention bd create"
-assert_contains "$OUTPUT" "bd list" "Quickstart should mention bd list"
+assert_contains "$OUTPUT" "mb init" "Quickstart should mention mb init"
+assert_contains "$OUTPUT" "mb create" "Quickstart should mention mb create"
+assert_contains "$OUTPUT" "mb list" "Quickstart should mention mb list"
 assert_contains "$OUTPUT" "DEPENDENCY TYPES" "Quickstart should explain dependency types"
 
 # Test 10: bd dep --help

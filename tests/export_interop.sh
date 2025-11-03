@@ -30,7 +30,7 @@ NC='\033[0m' # No Color
 TEST_NAME="export_interop"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BD_BIN="$WORKSPACE_ROOT/target/debug/bd"
+BD_BIN="$WORKSPACE_ROOT/target/debug/mb"
 TEST_DIR="$WORKSPACE_ROOT/scratch/e2e_${TEST_NAME}_$$"
 
 # Counters
