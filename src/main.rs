@@ -1,3 +1,4 @@
+mod code_patch;
 mod format;
 mod hash;
 mod lock;
@@ -286,8 +287,8 @@ enum Commands {
         reason: Option<String>,
     },
 
-    /// Rename an issue ID
-    Rename {
+    /// Rename an issue ID (minibeads-specific)
+    MbRename {
         /// Current issue ID
         old_id: String,
 
@@ -301,6 +302,10 @@ enum Commands {
         /// Repair broken references (scan all issues and fix stale references)
         #[arg(long)]
         repair: bool,
+
+        /// Also patch code references (requires interactive TTY) (minibeads-specific)
+        #[arg(long = "mb-patch-code")]
+        mb_patch_code: bool,
     },
 
     /// Rename the issue prefix for all issues
@@ -405,6 +410,10 @@ enum Commands {
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
+
+        /// Also patch code references (requires interactive TTY) (minibeads-specific)
+        #[arg(long = "mb-patch-code")]
+        mb_patch_code: bool,
     },
 }
 
@@ -862,11 +871,12 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::Rename {
+        Commands::MbRename {
             old_id,
             new_id,
             dry_run,
             repair,
+            mb_patch_code,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -909,6 +919,13 @@ fn run() -> Result<()> {
                     println!("Successfully renamed {} to {}", old_id, new_id);
                     if changes.len() > 2 {
                         println!("Updated {} file(s) with references", changes.len() - 2);
+                    }
+
+                    // Patch code references if requested
+                    if mb_patch_code {
+                        if let Err(e) = code_patch::patch_code_for_rename(&old_id, &new_id) {
+                            eprintln!("Warning: Code patching failed: {}", e);
+                        }
                     }
                 }
             }
@@ -1301,7 +1318,11 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::MbMigrate { to, dry_run } => {
+        Commands::MbMigrate {
+            to,
+            dry_run,
+            mb_patch_code,
+        } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
@@ -1311,7 +1332,7 @@ fn run() -> Result<()> {
 
             match to.as_str() {
                 "hash" => {
-                    let changes = storage.migrate_to_hash_ids(dry_run)?;
+                    let (changes, id_mapping) = storage.migrate_to_hash_ids(dry_run)?;
 
                     if json {
                         println!("{}", serde_json::to_string_pretty(&changes)?);
@@ -1326,10 +1347,17 @@ fn run() -> Result<()> {
                             changes.len() / 3
                         );
                         println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+
+                        // Patch code references if requested
+                        if mb_patch_code {
+                            if let Err(e) = code_patch::patch_code_for_migration(&id_mapping) {
+                                eprintln!("Warning: Code patching failed: {}", e);
+                            }
+                        }
                     }
                 }
                 "numeric" => {
-                    let changes = storage.migrate_to_numeric_ids(dry_run)?;
+                    let (changes, id_mapping) = storage.migrate_to_numeric_ids(dry_run)?;
 
                     if json {
                         println!("{}", serde_json::to_string_pretty(&changes)?);
@@ -1348,6 +1376,13 @@ fn run() -> Result<()> {
                             issue_count
                         );
                         println!("Updated config-minibeads.yaml: mb-hash-ids: false");
+
+                        // Patch code references if requested
+                        if mb_patch_code {
+                            if let Err(e) = code_patch::patch_code_for_migration(&id_mapping) {
+                                eprintln!("Warning: Code patching failed: {}", e);
+                            }
+                        }
                     }
                 }
                 _ => {

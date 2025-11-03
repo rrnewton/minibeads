@@ -1426,7 +1426,10 @@ impl Storage {
     /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
     /// - Updates config-minibeads.yaml to set mb-hash-ids: true
     /// - Is atomic (all updates succeed or none)
-    pub fn migrate_to_hash_ids(&self, dry_run: bool) -> Result<Vec<String>> {
+    pub fn migrate_to_hash_ids(
+        &self,
+        dry_run: bool,
+    ) -> Result<(Vec<String>, HashMap<String, String>)> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
         // Check if already using hash IDs
@@ -1501,9 +1504,9 @@ impl Storage {
             }
         }
 
-        // If dry-run, return changes without applying
+        // If dry-run, return changes without applying (return empty mapping for dry-run)
         if dry_run {
-            return Ok(changes);
+            return Ok((changes, HashMap::new()));
         }
 
         // Apply changes atomically
@@ -1577,7 +1580,7 @@ impl Storage {
         fs::write(&minibeads_config_path, config_yaml)
             .context("Failed to update config-minibeads.yaml")?;
 
-        Ok(changes)
+        Ok((changes, id_mapping))
     }
 
     /// Migrate from hash-based or mixed IDs to pure numeric IDs
@@ -1590,7 +1593,10 @@ impl Storage {
     /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
     /// - Updates config-minibeads.yaml to set mb-hash-ids: false
     /// - Is atomic (all updates succeed or none)
-    pub fn migrate_to_numeric_ids(&self, dry_run: bool) -> Result<Vec<String>> {
+    pub fn migrate_to_numeric_ids(
+        &self,
+        dry_run: bool,
+    ) -> Result<(Vec<String>, HashMap<String, String>)> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
         // Get current prefix
@@ -1699,9 +1705,9 @@ impl Storage {
             }
         }
 
-        // If dry-run, return changes without applying
+        // If dry-run, return changes without applying (return empty mapping for dry-run)
         if dry_run {
-            return Ok(changes);
+            return Ok((changes, HashMap::new()));
         }
 
         // Apply changes atomically
@@ -1775,7 +1781,7 @@ impl Storage {
         fs::write(&minibeads_config_path, config_yaml)
             .context("Failed to update config-minibeads.yaml")?;
 
-        Ok(changes)
+        Ok((changes, id_mapping))
     }
 }
 
