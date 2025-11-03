@@ -34,7 +34,7 @@ fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -
     }
 
     // Sort by length (longest first) to avoid partial matches
-    patterns.sort_by(|a, b| b.len().cmp(&a.len()));
+    patterns.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     let pattern = format!(r"\b({})\b", patterns.join("|"));
 
