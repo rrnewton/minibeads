@@ -3,6 +3,7 @@ use crate::hash;
 use crate::lock::Lock;
 use crate::types::{BlockedIssue, DependencyType, Issue, IssueType, Stats, Status};
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,56 @@ use std::path::{Path, PathBuf};
 pub struct Storage {
     beads_dir: PathBuf,
     issues_dir: PathBuf,
+}
+
+/// Replace issue ID references in text fields using word boundaries
+///
+/// This function replaces all occurrences of issue IDs in text, but only when they appear
+/// as standalone tokens (delimited by non-alphanumeric characters or word boundaries).
+/// This prevents matching IDs that are embedded in longer strings.
+///
+/// Uses a HashMap for O(1) lookup of replacement mappings.
+fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -> String {
+    if text.is_empty() || id_mapping.is_empty() {
+        return text.to_string();
+    }
+
+    // Build a regex pattern that matches any issue ID with word boundaries
+    // Pattern: \b(prefix1-suffix1|prefix2-suffix2|...)\b
+    let mut patterns: Vec<String> = id_mapping
+        .keys()
+        .map(|id| regex::escape(id))
+        .collect();
+
+    if patterns.is_empty() {
+        return text.to_string();
+    }
+
+    // Sort by length (longest first) to avoid partial matches
+    patterns.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    let pattern = format!(r"\b({})\b", patterns.join("|"));
+
+    // Compile regex (note: in production code, this could be cached)
+    let re = match Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return text.to_string(), // Fallback: return original text
+    };
+
+    // Replace all matches using the mapping
+    re.replace_all(text, |caps: &regex::Captures| {
+        let matched_id = &caps[1];
+        id_mapping.get(matched_id).cloned().unwrap_or_else(|| matched_id.to_string())
+    }).to_string()
+}
+
+/// Apply ID replacements to all text fields of an issue
+fn replace_ids_in_issue_text(issue: &mut Issue, id_mapping: &HashMap<String, String>) {
+    issue.title = replace_issue_ids_in_text(&issue.title, id_mapping);
+    issue.description = replace_issue_ids_in_text(&issue.description, id_mapping);
+    issue.design = replace_issue_ids_in_text(&issue.design, id_mapping);
+    issue.acceptance_criteria = replace_issue_ids_in_text(&issue.acceptance_criteria, id_mapping);
+    issue.notes = replace_issue_ids_in_text(&issue.notes, id_mapping);
 }
 
 impl Storage {
@@ -420,6 +471,7 @@ impl Storage {
     /// - Renames the markdown file
     /// - Updates the ID in the issue frontmatter
     /// - Updates all references in other issues' dependencies
+    /// - Updates all text mentions of the old ID in all issues (title, description, design, notes, acceptance_criteria)
     /// - Is atomic (all updates succeed or none)
     pub fn rename_issue(&self, old_id: &str, new_id: &str, dry_run: bool) -> Result<Vec<String>> {
         let _lock = Lock::acquire(&self.beads_dir)?;
@@ -453,7 +505,14 @@ impl Storage {
             old_id, new_id
         ));
 
-        // Find all issues that reference the old ID
+        // Build ID mapping for text replacement
+        let mut id_mapping = HashMap::new();
+        id_mapping.insert(old_id.to_string(), new_id.to_string());
+
+        // Apply text replacements to the renamed issue itself
+        replace_ids_in_issue_text(&mut issue, &id_mapping);
+
+        // Find all issues that reference the old ID (either in dependencies or text)
         let all_issues = self.list_all_issues_no_dependents()?;
         let mut issues_to_update = Vec::new();
 
@@ -462,12 +521,42 @@ impl Storage {
                 continue; // Skip the renamed issue itself
             }
 
-            // Check if this issue depends on the renamed issue
+            let mut other_issue = other_issue;
+            let mut has_changes = false;
+
+            // Check if this issue has explicit dependency on the renamed issue
             if other_issue.depends_on.contains_key(old_id) {
                 changes.push(format!(
                     "Update dependency in {}: {} -> {}",
                     other_issue.id, old_id, new_id
                 ));
+                has_changes = true;
+            }
+
+            // Apply text replacements to all text fields
+            let old_title = other_issue.title.clone();
+            let old_description = other_issue.description.clone();
+            let old_design = other_issue.design.clone();
+            let old_notes = other_issue.notes.clone();
+            let old_acceptance = other_issue.acceptance_criteria.clone();
+
+            replace_ids_in_issue_text(&mut other_issue, &id_mapping);
+
+            // Check if any text fields changed
+            if other_issue.title != old_title
+                || other_issue.description != old_description
+                || other_issue.design != old_design
+                || other_issue.notes != old_notes
+                || other_issue.acceptance_criteria != old_acceptance
+            {
+                changes.push(format!(
+                    "Update text references in {}: {} -> {}",
+                    other_issue.id, old_id, new_id
+                ));
+                has_changes = true;
+            }
+
+            if has_changes {
                 issues_to_update.push(other_issue);
             }
         }
@@ -480,17 +569,17 @@ impl Storage {
         // Apply changes atomically
         // First, write all updated issues
         for mut other_issue in issues_to_update {
-            // Update the dependency reference
+            // Update the explicit dependency reference
             if let Some(dep_type) = other_issue.depends_on.remove(old_id) {
                 other_issue.depends_on.insert(new_id.to_string(), dep_type);
-                other_issue.updated_at = chrono::Utc::now();
-
-                // Write the updated issue
-                let other_path = self.issues_dir.join(format!("{}.md", other_issue.id));
-                let markdown = issue_to_markdown(&other_issue)?;
-                fs::write(&other_path, markdown)
-                    .context(format!("Failed to update issue: {}", other_issue.id))?;
             }
+            other_issue.updated_at = chrono::Utc::now();
+
+            // Write the updated issue
+            let other_path = self.issues_dir.join(format!("{}.md", other_issue.id));
+            let markdown = issue_to_markdown(&other_issue)?;
+            fs::write(&other_path, markdown)
+                .context(format!("Failed to update issue: {}", other_issue.id))?;
         }
 
         // Write the renamed issue with new ID
@@ -1158,6 +1247,7 @@ impl Storage {
     /// - Renames all issue files from old-prefix-N to new-prefix-N
     /// - Updates the ID in all issue frontmatter
     /// - Updates all dependency references
+    /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
     /// - Updates the prefix in config.yaml
     /// - Is atomic (all updates succeed or none)
     pub fn rename_prefix(
@@ -1254,31 +1344,63 @@ impl Storage {
         }
 
         // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies)
+        // Step 1: Update all issue files (content + dependencies + text replacements)
         for issue in all_issues {
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                let mut updated_issue = issue.clone();
-                updated_issue.id = new_id.clone();
+            let mut updated_issue = issue.clone();
+            let mut issue_modified = false;
 
-                // Update dependency references
-                let mut new_depends_on = HashMap::new();
-                for (dep_id, dep_type) in &updated_issue.depends_on {
-                    let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                    new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            // Check if this issue's ID needs to be renamed
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                updated_issue.id = new_id.clone();
+                issue_modified = true;
+            }
+
+            // Update dependency references
+            let mut new_depends_on = HashMap::new();
+            for (dep_id, dep_type) in &updated_issue.depends_on {
+                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                if mapped_dep_id != dep_id {
+                    issue_modified = true;
                 }
-                updated_issue.depends_on = new_depends_on;
+                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            }
+            updated_issue.depends_on = new_depends_on;
+
+            // Apply text replacements to all text fields
+            let old_title = updated_issue.title.clone();
+            let old_description = updated_issue.description.clone();
+            let old_design = updated_issue.design.clone();
+            let old_notes = updated_issue.notes.clone();
+            let old_acceptance = updated_issue.acceptance_criteria.clone();
+
+            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
+
+            // Check if any text fields changed
+            if updated_issue.title != old_title
+                || updated_issue.description != old_description
+                || updated_issue.design != old_design
+                || updated_issue.notes != old_notes
+                || updated_issue.acceptance_criteria != old_acceptance
+            {
+                issue_modified = true;
+            }
+
+            // Only write if the issue was modified
+            if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file
-                let new_path = self.issues_dir.join(format!("{}.md", new_id));
+                // Write to new file (or overwrite if ID didn't change)
+                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
                 let markdown = issue_to_markdown(&updated_issue)?;
                 fs::write(&new_path, markdown)
-                    .context(format!("Failed to write renamed issue: {}", new_id))?;
+                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
 
-                // Remove old file
-                let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                fs::remove_file(&old_path)
-                    .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                // Remove old file if ID changed
+                if updated_issue.id != issue.id {
+                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                    fs::remove_file(&old_path)
+                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                }
             }
         }
 
@@ -1298,6 +1420,7 @@ impl Storage {
     /// - Generates hash-based IDs for all issues with numeric IDs
     /// - Renames all issue files from prefix-N to prefix-hash
     /// - Updates all dependency references
+    /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
     /// - Updates config-minibeads.yaml to set mb-hash-ids: true
     /// - Is atomic (all updates succeed or none)
     pub fn migrate_to_hash_ids(&self, dry_run: bool) -> Result<Vec<String>> {
@@ -1381,31 +1504,63 @@ impl Storage {
         }
 
         // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies)
+        // Step 1: Update all issue files (content + dependencies + text replacements)
         for issue in all_issues {
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                let mut updated_issue = issue.clone();
-                updated_issue.id = new_id.clone();
+            let mut updated_issue = issue.clone();
+            let mut issue_modified = false;
 
-                // Update dependency references
-                let mut new_depends_on = HashMap::new();
-                for (dep_id, dep_type) in &updated_issue.depends_on {
-                    let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                    new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            // Check if this issue's ID needs to be migrated
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                updated_issue.id = new_id.clone();
+                issue_modified = true;
+            }
+
+            // Update dependency references
+            let mut new_depends_on = HashMap::new();
+            for (dep_id, dep_type) in &updated_issue.depends_on {
+                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                if mapped_dep_id != dep_id {
+                    issue_modified = true;
                 }
-                updated_issue.depends_on = new_depends_on;
+                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            }
+            updated_issue.depends_on = new_depends_on;
+
+            // Apply text replacements to all text fields
+            let old_title = updated_issue.title.clone();
+            let old_description = updated_issue.description.clone();
+            let old_design = updated_issue.design.clone();
+            let old_notes = updated_issue.notes.clone();
+            let old_acceptance = updated_issue.acceptance_criteria.clone();
+
+            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
+
+            // Check if any text fields changed
+            if updated_issue.title != old_title
+                || updated_issue.description != old_description
+                || updated_issue.design != old_design
+                || updated_issue.notes != old_notes
+                || updated_issue.acceptance_criteria != old_acceptance
+            {
+                issue_modified = true;
+            }
+
+            // Only write if the issue was modified
+            if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file
-                let new_path = self.issues_dir.join(format!("{}.md", new_id));
+                // Write to new file (or overwrite if ID didn't change)
+                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
                 let markdown = issue_to_markdown(&updated_issue)?;
                 fs::write(&new_path, markdown)
-                    .context(format!("Failed to write renamed issue: {}", new_id))?;
+                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
 
-                // Remove old file
-                let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                fs::remove_file(&old_path)
-                    .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                // Remove old file if ID changed
+                if updated_issue.id != issue.id {
+                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                    fs::remove_file(&old_path)
+                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                }
             }
         }
 
@@ -1413,6 +1568,202 @@ impl Storage {
         let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
         let mut config = HashMap::new();
         config.insert("mb-hash-ids".to_string(), "true".to_string());
+        let config_yaml = serde_yaml::to_string(&config)?;
+        fs::write(&minibeads_config_path, config_yaml)
+            .context("Failed to update config-minibeads.yaml")?;
+
+        Ok(changes)
+    }
+
+    /// Migrate from hash-based or mixed IDs to pure numeric IDs
+    ///
+    /// This operation:
+    /// - Identifies hash-based IDs (non-numeric chars OR length >= 4)
+    /// - Sorts them by created timestamp
+    /// - Assigns sequential numbers starting from MAX_ID+1
+    /// - Updates all dependency references
+    /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
+    /// - Updates config-minibeads.yaml to set mb-hash-ids: false
+    /// - Is atomic (all updates succeed or none)
+    pub fn migrate_to_numeric_ids(&self, dry_run: bool) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        // Get current prefix
+        let prefix = self.get_prefix()?;
+
+        // Load all issues
+        let all_issues = self.list_all_issues_no_dependents()?;
+
+        // Identify hash-based IDs and collect for migration
+        let mut hash_issues = Vec::new();
+        let mut max_numeric_id = 0u32;
+
+        for issue in &all_issues {
+            if let Some(pos) = issue.id.rfind('-') {
+                let issue_prefix = &issue.id[..pos];
+                let issue_suffix = &issue.id[pos + 1..];
+
+                if issue_prefix == prefix {
+                    // Check if it's numeric (and track max)
+                    if let Ok(num) = issue_suffix.parse::<u32>() {
+                        max_numeric_id = max_numeric_id.max(num);
+                    } else {
+                        // Non-numeric suffix = hash-based ID
+                        hash_issues.push(issue.clone());
+                    }
+                } else {
+                    // Different prefix, check suffix length >= 4
+                    if issue_suffix.len() >= 4 {
+                        hash_issues.push(issue.clone());
+                    }
+                }
+            }
+        }
+
+        // Also check for pure numeric IDs with suffix length >= 4 (these are likely hash IDs with numeric-only hashes)
+        for issue in &all_issues {
+            if let Some(pos) = issue.id.rfind('-') {
+                let issue_prefix = &issue.id[..pos];
+                let issue_suffix = &issue.id[pos + 1..];
+
+                if issue_prefix == prefix && issue_suffix.len() >= 4 {
+                    if let Ok(_num) = issue_suffix.parse::<u32>() {
+                        // Numeric but length >= 4, could be a hash ID
+                        // Only add if not already in hash_issues
+                        if !hash_issues.iter().any(|i| i.id == issue.id) {
+                            hash_issues.push(issue.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if hash_issues.is_empty() {
+            anyhow::bail!(
+                "No hash-based IDs found to migrate. All issues already use numeric IDs."
+            );
+        }
+
+        // Sort hash issues by created timestamp
+        hash_issues.sort_by_key(|issue| issue.created_at);
+
+        // Build mapping from old hash ID to new numeric ID
+        let mut id_mapping = HashMap::new();
+        let mut next_id = max_numeric_id + 1;
+
+        for issue in &hash_issues {
+            let new_id = format!("{}-{}", prefix, next_id);
+
+            // Check if new ID would conflict with existing issue
+            let new_path = self.issues_dir.join(format!("{}.md", new_id));
+            if new_path.exists() {
+                anyhow::bail!(
+                    "Cannot migrate: numeric ID '{}' already exists. This should not happen - please report this bug.",
+                    new_id
+                );
+            }
+
+            id_mapping.insert(issue.id.clone(), new_id);
+            next_id += 1;
+        }
+
+        // Track all changes for dry-run mode
+        let mut changes = Vec::new();
+        changes.push("Update config-minibeads.yaml: mb-hash-ids: true -> false".to_string());
+
+        // Plan all file renames and content updates
+        for issue in &all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                changes.push(format!("Rename file: {}.md -> {}.md", issue.id, new_id));
+                changes.push(format!(
+                    "Update ID in frontmatter: {} -> {}",
+                    issue.id, new_id
+                ));
+
+                // Check if this issue has dependencies that will be renamed
+                for dep_id in issue.depends_on.keys() {
+                    if id_mapping.contains_key(dep_id) {
+                        changes.push(format!(
+                            "Update dependency in {}: {} -> {}",
+                            new_id,
+                            dep_id,
+                            id_mapping.get(dep_id).unwrap()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If dry-run, return changes without applying
+        if dry_run {
+            return Ok(changes);
+        }
+
+        // Apply changes atomically
+        // Step 1: Update all issue files (content + dependencies + text replacements)
+        for issue in all_issues {
+            let mut updated_issue = issue.clone();
+            let mut issue_modified = false;
+
+            // Check if this issue's ID needs to be migrated
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                updated_issue.id = new_id.clone();
+                issue_modified = true;
+            }
+
+            // Update dependency references
+            let mut new_depends_on = HashMap::new();
+            for (dep_id, dep_type) in &updated_issue.depends_on {
+                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                if mapped_dep_id != dep_id {
+                    issue_modified = true;
+                }
+                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            }
+            updated_issue.depends_on = new_depends_on;
+
+            // Apply text replacements to all text fields
+            let old_title = updated_issue.title.clone();
+            let old_description = updated_issue.description.clone();
+            let old_design = updated_issue.design.clone();
+            let old_notes = updated_issue.notes.clone();
+            let old_acceptance = updated_issue.acceptance_criteria.clone();
+
+            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
+
+            // Check if any text fields changed
+            if updated_issue.title != old_title
+                || updated_issue.description != old_description
+                || updated_issue.design != old_design
+                || updated_issue.notes != old_notes
+                || updated_issue.acceptance_criteria != old_acceptance
+            {
+                issue_modified = true;
+            }
+
+            // Only write if the issue was modified
+            if issue_modified {
+                updated_issue.updated_at = chrono::Utc::now();
+
+                // Write to new file (or overwrite if ID didn't change)
+                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
+                let markdown = issue_to_markdown(&updated_issue)?;
+                fs::write(&new_path, markdown)
+                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
+
+                // Remove old file if ID changed
+                if updated_issue.id != issue.id {
+                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                    fs::remove_file(&old_path)
+                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                }
+            }
+        }
+
+        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: false
+        let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
+        let mut config = HashMap::new();
+        config.insert("mb-hash-ids".to_string(), "false".to_string());
         let config_yaml = serde_yaml::to_string(&config)?;
         fs::write(&minibeads_config_path, config_yaml)
             .context("Failed to update config-minibeads.yaml")?;

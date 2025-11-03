@@ -396,8 +396,12 @@ enum Commands {
     /// Show version information
     Version,
 
-    /// Migrate from numeric to hash-based IDs (minibeads-specific)
+    /// Migrate between numeric and hash-based IDs (minibeads-specific)
     MbMigrate {
+        /// Migration direction: 'hash' (numeric -> hash) or 'numeric' (hash/mixed -> numeric)
+        #[arg(long, default_value = "hash")]
+        to: String,
+
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
@@ -1297,7 +1301,7 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::MbMigrate { dry_run } => {
+        Commands::MbMigrate { to, dry_run } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
@@ -1305,21 +1309,50 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            let changes = storage.migrate_to_hash_ids(dry_run)?;
+            match to.as_str() {
+                "hash" => {
+                    let changes = storage.migrate_to_hash_ids(dry_run)?;
 
-            if json {
-                println!("{}", serde_json::to_string_pretty(&changes)?);
-            } else if dry_run {
-                println!("Dry run - would make the following changes:");
-                for change in &changes {
-                    println!("  {}", change);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&changes)?);
+                    } else if dry_run {
+                        println!("Dry run - would make the following changes:");
+                        for change in &changes {
+                            println!("  {}", change);
+                        }
+                    } else {
+                        println!(
+                            "Successfully migrated {} issue(s) to hash-based IDs",
+                            changes.len() / 3
+                        );
+                        println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+                    }
                 }
-            } else {
-                println!(
-                    "Successfully migrated {} issue(s) to hash-based IDs",
-                    changes.len() / 3
-                );
-                println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+                "numeric" => {
+                    let changes = storage.migrate_to_numeric_ids(dry_run)?;
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&changes)?);
+                    } else if dry_run {
+                        println!("Dry run - would make the following changes:");
+                        for change in &changes {
+                            println!("  {}", change);
+                        }
+                    } else {
+                        let issue_count = changes.iter().filter(|c| c.starts_with("Rename file:")).count();
+                        println!(
+                            "Successfully migrated {} issue(s) to numeric IDs",
+                            issue_count
+                        );
+                        println!("Updated config-minibeads.yaml: mb-hash-ids: false");
+                    }
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Invalid migration target '{}'. Use '--to=hash' or '--to=numeric'",
+                        to
+                    );
+                }
             }
             Ok(())
         }
