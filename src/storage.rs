@@ -27,10 +27,7 @@ fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -
 
     // Build a regex pattern that matches any issue ID with word boundaries
     // Pattern: \b(prefix1-suffix1|prefix2-suffix2|...)\b
-    let mut patterns: Vec<String> = id_mapping
-        .keys()
-        .map(|id| regex::escape(id))
-        .collect();
+    let mut patterns: Vec<String> = id_mapping.keys().map(|id| regex::escape(id)).collect();
 
     if patterns.is_empty() {
         return text.to_string();
@@ -50,8 +47,12 @@ fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -
     // Replace all matches using the mapping
     re.replace_all(text, |caps: &regex::Captures| {
         let matched_id = &caps[1];
-        id_mapping.get(matched_id).cloned().unwrap_or_else(|| matched_id.to_string())
-    }).to_string()
+        id_mapping
+            .get(matched_id)
+            .cloned()
+            .unwrap_or_else(|| matched_id.to_string())
+    })
+    .to_string()
 }
 
 /// Apply ID replacements to all text fields of an issue
@@ -1392,8 +1393,10 @@ impl Storage {
                 // Write to new file (or overwrite if ID didn't change)
                 let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
                 let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown)
-                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
+                fs::write(&new_path, markdown).context(format!(
+                    "Failed to write renamed issue: {}",
+                    updated_issue.id
+                ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
@@ -1552,8 +1555,10 @@ impl Storage {
                 // Write to new file (or overwrite if ID didn't change)
                 let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
                 let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown)
-                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
+                fs::write(&new_path, markdown).context(format!(
+                    "Failed to write renamed issue: {}",
+                    updated_issue.id
+                ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
@@ -1748,8 +1753,10 @@ impl Storage {
                 // Write to new file (or overwrite if ID didn't change)
                 let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
                 let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown)
-                    .context(format!("Failed to write renamed issue: {}", updated_issue.id))?;
+                fs::write(&new_path, markdown).context(format!(
+                    "Failed to write renamed issue: {}",
+                    updated_issue.id
+                ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {

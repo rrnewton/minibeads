@@ -1339,7 +1339,10 @@ fn run() -> Result<()> {
                             println!("  {}", change);
                         }
                     } else {
-                        let issue_count = changes.iter().filter(|c| c.starts_with("Rename file:")).count();
+                        let issue_count = changes
+                            .iter()
+                            .filter(|c| c.starts_with("Rename file:"))
+                            .count();
                         println!(
                             "Successfully migrated {} issue(s) to numeric IDs",
                             issue_count
