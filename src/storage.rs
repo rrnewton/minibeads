@@ -937,7 +937,7 @@ impl Storage {
     pub fn list_issues(
         &self,
         status: Option<Status>,
-        priority: Option<i32>,
+        priority: Option<Vec<i32>>,
         issue_type: Option<IssueType>,
         assignee: Option<&str>,
         limit: Option<usize>,
@@ -966,8 +966,8 @@ impl Storage {
                     continue;
                 }
             }
-            if let Some(p) = priority {
-                if issue.priority != p {
+            if let Some(ref priorities) = priority {
+                if !priorities.contains(&issue.priority) {
                     continue;
                 }
             }
@@ -985,8 +985,8 @@ impl Storage {
             issues.push(issue);
         }
 
-        // Sort by ID
-        issues.sort_by(|a, b| a.id.cmp(&b.id));
+        // Sort by creation date (oldest first)
+        issues.sort_by_key(|i| i.created_at);
 
         // Apply limit
         if let Some(limit) = limit {
@@ -1085,7 +1085,9 @@ impl Storage {
         limit: usize,
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
-        let issues = self.list_issues(Some(Status::Open), priority, None, assignee, None)?;
+        // Convert single priority to vector for list_issues
+        let priority_list = priority.map(|p| vec![p]);
+        let issues = self.list_issues(Some(Status::Open), priority_list, None, assignee, None)?;
 
         let mut ready: Vec<Issue> = issues
             .into_iter()
@@ -1137,8 +1139,11 @@ impl Storage {
     ) -> Result<usize> {
         use std::io::Write;
 
+        // Convert single priority to vector for list_issues
+        let priority_list = priority.map(|p| vec![p]);
+
         // Get issues with filters (list_issues acquires its own lock)
-        let issues = self.list_issues(status, priority, issue_type, assignee, None)?;
+        let issues = self.list_issues(status, priority_list, issue_type, assignee, None)?;
 
         // Open output file
         let mut file = fs::File::create(output_path)
@@ -1424,11 +1429,12 @@ impl Storage {
     /// - Renames all issue files from prefix-N to prefix-hash
     /// - Updates all dependency references
     /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
-    /// - Updates config-minibeads.yaml to set mb-hash-ids: true
+    /// - Updates config-minibeads.yaml to set mb-hash-ids: true (unless update_config is false)
     /// - Is atomic (all updates succeed or none)
     pub fn migrate_to_hash_ids(
         &self,
         dry_run: bool,
+        update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
@@ -1479,7 +1485,9 @@ impl Storage {
 
         // Track all changes for dry-run mode
         let mut changes = Vec::new();
-        changes.push("Update config-minibeads.yaml: mb-hash-ids: false -> true".to_string());
+        if update_config {
+            changes.push("Update config-minibeads.yaml: mb-hash-ids: false -> true".to_string());
+        }
 
         // Plan all file renames and content updates
         for issue in &all_issues {
@@ -1572,13 +1580,11 @@ impl Storage {
             }
         }
 
-        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: true
-        let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
-        let mut config = HashMap::new();
-        config.insert("mb-hash-ids".to_string(), "true".to_string());
-        let config_yaml = serde_yaml::to_string(&config)?;
-        fs::write(&minibeads_config_path, config_yaml)
-            .context("Failed to update config-minibeads.yaml")?;
+        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: true (if requested)
+        if update_config {
+            let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
+            update_yaml_key_value(&minibeads_config_path, "mb-hash-ids", "true")?;
+        }
 
         Ok((changes, id_mapping))
     }
@@ -1591,11 +1597,12 @@ impl Storage {
     /// - Assigns sequential numbers starting from MAX_ID+1
     /// - Updates all dependency references
     /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
-    /// - Updates config-minibeads.yaml to set mb-hash-ids: false
+    /// - Updates config-minibeads.yaml to set mb-hash-ids: false (unless update_config is false)
     /// - Is atomic (all updates succeed or none)
     pub fn migrate_to_numeric_ids(
         &self,
         dry_run: bool,
+        update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
@@ -1680,7 +1687,9 @@ impl Storage {
 
         // Track all changes for dry-run mode
         let mut changes = Vec::new();
-        changes.push("Update config-minibeads.yaml: mb-hash-ids: true -> false".to_string());
+        if update_config {
+            changes.push("Update config-minibeads.yaml: mb-hash-ids: true -> false".to_string());
+        }
 
         // Plan all file renames and content updates
         for issue in &all_issues {
@@ -1773,13 +1782,11 @@ impl Storage {
             }
         }
 
-        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: false
-        let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
-        let mut config = HashMap::new();
-        config.insert("mb-hash-ids".to_string(), "false".to_string());
-        let config_yaml = serde_yaml::to_string(&config)?;
-        fs::write(&minibeads_config_path, config_yaml)
-            .context("Failed to update config-minibeads.yaml")?;
+        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: false (if requested)
+        if update_config {
+            let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
+            update_yaml_key_value(&minibeads_config_path, "mb-hash-ids", "false")?;
+        }
 
         Ok((changes, id_mapping))
     }
@@ -1925,4 +1932,58 @@ pub fn get_file_mtime(file_path: &Path) -> Result<chrono::DateTime<chrono::Utc>>
     let datetime: DateTime<Utc> = mtime.into();
 
     Ok(datetime)
+}
+
+/// Update a single key-value pair in a YAML file while preserving comments and formatting
+///
+/// This function safely updates a YAML config file by:
+/// - Reading the file line by line
+/// - Finding the line with the specified key (format: "key: value")
+/// - Replacing only that line with the new value
+/// - Preserving all comments, blank lines, and other formatting
+///
+/// This approach is more reliable than parsing/serializing YAML for simple config files
+/// because it doesn't require a comment-preserving YAML library.
+fn update_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+
+    // Read all lines
+    let file = fs::File::open(file_path)
+        .with_context(|| format!("Failed to open config file: {}", file_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("Failed to read config file: {}", file_path.display()))?;
+
+    // Find and update the line with the key
+    let key_prefix = format!("{}:", key);
+    let mut found = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim();
+        // Check if this line starts with "key:" (ignoring leading whitespace)
+        if trimmed.starts_with(&key_prefix) {
+            // Preserve indentation by finding where non-whitespace starts
+            let indent = line.len() - line.trim_start().len();
+            *line = format!("{}{}: {}", " ".repeat(indent), key, new_value);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        anyhow::bail!(
+            "Key '{}' not found in config file: {}",
+            key,
+            file_path.display()
+        );
+    }
+
+    // Write back all lines
+    let content = lines.join("\n") + "\n"; // Ensure file ends with newline
+    fs::write(file_path, content)
+        .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
+
+    Ok(())
 }

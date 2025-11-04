@@ -190,9 +190,9 @@ enum Commands {
         #[arg(short = 's', long)]
         status: Option<Status>,
 
-        /// Filter by priority
+        /// Filter by priority (comma-separated list, e.g., "1,2,3")
         #[arg(short = 'p', long)]
-        priority: Option<i32>,
+        priority: Option<String>,
 
         /// Filter by type
         #[arg(long)]
@@ -217,6 +217,10 @@ enum Commands {
         /// Maximum number of issues to return
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Group issues by priority with headers
+        #[arg(long)]
+        group_priority: bool,
     },
 
     /// Show issue details
@@ -414,6 +418,10 @@ enum Commands {
         /// Also patch code references (requires interactive TTY) (minibeads-specific)
         #[arg(long = "mb-patch-code")]
         mb_patch_code: bool,
+
+        /// Don't update config-minibeads.yaml (minibeads-specific)
+        #[arg(long = "no-change-config")]
+        no_change_config: bool,
     },
 }
 
@@ -646,6 +654,7 @@ fn run() -> Result<()> {
             id,
             title,
             limit,
+            group_priority,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -654,8 +663,19 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
+            // Parse comma-separated priorities
+            let priority_list = if let Some(priority_str) = priority {
+                let priorities: Result<Vec<i32>, _> = priority_str
+                    .split(',')
+                    .map(|s| s.trim().parse::<i32>())
+                    .collect();
+                Some(priorities.context("Invalid priority value")?)
+            } else {
+                None
+            };
+
             let mut issues =
-                storage.list_issues(status, priority, r#type, assignee.as_deref(), None)?;
+                storage.list_issues(status, priority_list, r#type, assignee.as_deref(), None)?;
 
             // Apply label filter (must have ALL specified labels)
             if !labels.is_empty() {
@@ -682,7 +702,39 @@ fn run() -> Result<()> {
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
+            } else if group_priority {
+                // Group by priority and display with headers
+                use std::collections::BTreeMap;
+
+                // Group issues by priority using BTreeMap for sorted keys
+                let mut groups: BTreeMap<i32, Vec<&types::Issue>> = BTreeMap::new();
+                for issue in &issues {
+                    groups.entry(issue.priority).or_default().push(issue);
+                }
+
+                // Display each priority group with header
+                for (priority, group_issues) in groups {
+                    // Print priority header
+                    let header_text = format!("Priority {}", priority);
+                    let header_width = 60;
+                    let padding = (header_width - header_text.len() - 2) / 2;
+                    println!("{}", "=".repeat(header_width));
+                    println!(
+                        "|{}{}{}|",
+                        " ".repeat(padding),
+                        header_text,
+                        " ".repeat(header_width - padding - header_text.len() - 2)
+                    );
+                    println!("{}", "=".repeat(header_width));
+
+                    // Print issues in this group (without priority tag)
+                    for issue in group_issues {
+                        println!("{}: {} [{}]", issue.id, issue.title, issue.status);
+                    }
+                    println!();
+                }
             } else {
+                // Standard output
                 for issue in issues {
                     println!(
                         "{}: {} [{}] (priority: {})",
@@ -1126,8 +1178,15 @@ fn run() -> Result<()> {
                 eprintln!("Exported {} issues to {}", count, path.display());
             } else {
                 // Default: write to stdout (matching upstream bd)
-                let issues =
-                    storage.list_issues(status, priority, r#type, assignee.as_deref(), None)?;
+                // Convert single priority to vector for list_issues
+                let priority_list = priority.map(|p| vec![p]);
+                let issues = storage.list_issues(
+                    status,
+                    priority_list,
+                    r#type,
+                    assignee.as_deref(),
+                    None,
+                )?;
                 for issue in &issues {
                     let json = serde_json::to_string(&issue)?;
                     println!("{}", json);
@@ -1314,7 +1373,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("mb version 0.9.0");
+            println!("mb version 0.10.0");
             Ok(())
         }
 
@@ -1322,6 +1381,7 @@ fn run() -> Result<()> {
             to,
             dry_run,
             mb_patch_code,
+            no_change_config,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -1332,7 +1392,9 @@ fn run() -> Result<()> {
 
             match to.as_str() {
                 "hash" => {
-                    let (changes, id_mapping) = storage.migrate_to_hash_ids(dry_run)?;
+                    let update_config = !no_change_config;
+                    let (changes, id_mapping) =
+                        storage.migrate_to_hash_ids(dry_run, update_config)?;
 
                     if json {
                         println!("{}", serde_json::to_string_pretty(&changes)?);
@@ -1346,7 +1408,9 @@ fn run() -> Result<()> {
                             "Successfully migrated {} issue(s) to hash-based IDs",
                             changes.len() / 3
                         );
-                        println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+                        if update_config {
+                            println!("Updated config-minibeads.yaml: mb-hash-ids: true");
+                        }
 
                         // Patch code references if requested
                         if mb_patch_code {
@@ -1357,7 +1421,9 @@ fn run() -> Result<()> {
                     }
                 }
                 "numeric" => {
-                    let (changes, id_mapping) = storage.migrate_to_numeric_ids(dry_run)?;
+                    let update_config = !no_change_config;
+                    let (changes, id_mapping) =
+                        storage.migrate_to_numeric_ids(dry_run, update_config)?;
 
                     if json {
                         println!("{}", serde_json::to_string_pretty(&changes)?);
@@ -1375,7 +1441,9 @@ fn run() -> Result<()> {
                             "Successfully migrated {} issue(s) to numeric IDs",
                             issue_count
                         );
-                        println!("Updated config-minibeads.yaml: mb-hash-ids: false");
+                        if update_config {
+                            println!("Updated config-minibeads.yaml: mb-hash-ids: false");
+                        }
 
                         // Patch code references if requested
                         if mb_patch_code {
