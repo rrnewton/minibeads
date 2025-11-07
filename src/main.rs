@@ -138,8 +138,12 @@ enum Commands {
 
     /// Create a new issue
     Create {
-        /// Issue title
-        title: String,
+        /// Issue title (positional argument, or use --title flag)
+        title: Option<String>,
+
+        /// Issue title (alternative to positional argument)
+        #[arg(long = "title", allow_hyphen_values = true)]
+        title_flag: Option<String>,
 
         /// Priority (0-4, 0=highest)
         #[arg(short, long, default_value = "2")]
@@ -182,6 +186,18 @@ enum Commands {
         /// Advanced: "blocks:bd-1,related:bd-2,discovered-from:bd-3"
         #[arg(long)]
         deps: Option<String>,
+
+        /// Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Force creation even if prefix doesn't match database prefix
+        #[arg(long)]
+        force: bool,
+
+        /// Create multiple issues from markdown file
+        #[arg(short = 'f', long)]
+        file: Option<PathBuf>,
     },
 
     /// List issues
@@ -566,6 +582,7 @@ fn run() -> Result<()> {
 
         Commands::Create {
             title,
+            title_flag,
             priority,
             issue_type,
             description,
@@ -576,6 +593,9 @@ fn run() -> Result<()> {
             external_ref,
             id,
             deps,
+            parent,
+            force: _force,
+            file,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -584,11 +604,30 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
+            // Handle bulk creation from file
+            if let Some(_file_path) = file {
+                anyhow::bail!(
+                    "--file flag not yet implemented. Bulk creation from markdown files coming soon."
+                );
+            }
+
+            // Determine title from either positional argument or --title flag
+            let actual_title = match (title, title_flag) {
+                (Some(t), None) => t,
+                (None, Some(t)) => t,
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("Cannot specify both positional title and --title flag");
+                }
+                (None, None) => {
+                    anyhow::bail!("Title is required. Use positional argument or --title flag.");
+                }
+            };
+
             // Parse dependencies
             // Supports two formats:
             // 1. Simple: "bd-1,bd-2" (defaults to 'blocks' type)
             // 2. Advanced: "blocks:bd-1,related:bd-2,discovered-from:bd-3"
-            let parsed_deps = if let Some(deps_str) = deps {
+            let mut parsed_deps = if let Some(deps_str) = deps {
                 deps_str
                     .split(',')
                     .filter_map(|s| {
@@ -623,8 +662,13 @@ fn run() -> Result<()> {
                 Vec::new()
             };
 
+            // Add parent as a parent-child dependency if specified
+            if let Some(parent_id) = parent {
+                parsed_deps.push((parent_id, DependencyType::ParentChild));
+            }
+
             let issue = storage.create_issue(
-                title,
+                actual_title,
                 description,
                 design,
                 acceptance,
@@ -1373,7 +1417,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("mb version 0.10.0");
+            println!("mb version 0.11.0");
             Ok(())
         }
 

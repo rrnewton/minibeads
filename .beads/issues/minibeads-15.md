@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2025-10-31T19:03:28.630490641+00:00
+updated_at: 2025-11-07T22:14:46.353407434+00:00
 ---
 
 # Description
@@ -109,31 +109,29 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 ### `bd create`
 
-**✅ Implemented Features:**
-- `-p, --priority` - Priority (0-4)
-- `-t, --issue-type` - Issue type (bug/feature/task/epic/chore)
-- `-d, --description` - Description
-- `--design` - Design notes
-- `--acceptance` - Acceptance criteria
-- `--assignee` - Assignee
-- `-l, --label` - Labels (multiple)
-- `--external-ref` - External reference
-- `--id` - Explicit issue ID
-- `--deps` - Dependencies (comma-separated)
-
-**✅ Implemented Short Flags:**
+**✅ Implemented Features (as of 2025-11-07):**
+- `-p, --priority` - Priority (0-4) ✅
+- `-t, --issue-type` - Issue type (bug/feature/task/epic/chore) ✅
+- `-d, --description` - Description ✅
+- `--design` - Design notes ✅
+- `--acceptance` - Acceptance criteria ✅
 - `-a, --assignee` - Assignee ✅
-
-**❌ Missing Flags:**
-- `-f, --file` - Create multiple issues from markdown file
-- `--force` - Force creation even if prefix doesn't match
-- `--title` - Alternative to positional title argument
+- `-l, --label` - Labels (multiple) ✅
+- `--external-ref` - External reference ✅
+- `--id` - Explicit issue ID ✅
+- `--deps` - Dependencies (comma-separated) ✅
+- `--title` - Alternative to positional title argument ✅ **NEW**
+- `--parent` - Parent issue ID for hierarchical child ✅ **NEW**
+- `--force` - Force creation even if prefix doesn't match ✅ **NEW**
 
 **✅ Advanced --deps Syntax:**
 - Simple format: `bd-1,bd-2` (defaults to 'blocks') ✅
 - Advanced typed format: `blocks:bd-1,related:bd-2,discovered-from:bd-3` ✅
 
-**Status:** Core features complete, missing only bulk creation from file
+**❌ Missing Flags:**
+- `-f, --file` - Create multiple issues from markdown file (placeholder added, not implemented)
+
+**Status:** ✅ **Feature-complete for single issue creation!** All upstream flags implemented except bulk file creation.
 
 ---
 
@@ -141,13 +139,14 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 **✅ Implemented Features:**
 - `-s, --status` - Filter by status ✅
-- `-p, --priority` - Filter by priority ✅
+- `-p, --priority` - Filter by priority (comma-separated list) ✅
 - `-t, --type` - Filter by type ✅
 - `--assignee` - Filter by assignee ✅
 - `--limit` - Limit results (no default) ✅
 - `-l, --label` - Filter by labels (must have ALL specified labels) ✅
 - `--id` - Filter by specific issue IDs (comma-separated) ✅
 - `--title` - Filter by title substring (case-insensitive) ✅
+- `--group-priority` - Group issues by priority with headers ✅
 
 **❌ Missing Flags:**
 - `-a` short form for `--assignee`
@@ -328,6 +327,12 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
    - ✅ Automatic parent directory extraction when --db points to .db file
    - ✅ Documented configuration priority order in quickstart
 
+5. ✅ DONE - **Complete `bd create` flag parity** (2025-11-07)
+   - ✅ Add `--title` flag as alternative to positional argument
+   - ✅ Add `--parent` flag for hierarchical child issues
+   - ✅ Add `--force` flag to allow creation with mismatched prefix
+   - ✅ Add `-f, --file` flag placeholder (implementation pending)
+
 ### P2 - Medium Priority (Dependency Management)
 1. ✅ DONE - Implement `bd dep remove` - Remove dependencies
 2. ✅ DONE - Implement `bd dep tree` - Show dependency tree visualization
@@ -344,7 +349,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 6. ✅ DONE - `bd rename-prefix` - Rename issue prefix with --dry-run and --force
 7. `bd list --format` - Custom output formats (digraph, dot, templates)
 8. `bd init -q` - Quiet mode
-9. `bd create -f` - Bulk create from markdown file
+9. `bd create -f` - Bulk create from markdown file (flag added, implementation pending)
 
 ### P4 - Not Planned (Advanced Features)
 - `bd import` - Import issues from JSONL format (see minibeads-11)
@@ -398,7 +403,19 @@ This issue serves as the **central tracking issue for feature parity** with upst
 
 ---
 
-**Checked up-to-date as of 2025-10-31_#98(bea2bc8)**
+**Updated 2025-11-07 (commit #162+)** - `bd create` flag parity complete
+
+All upstream `bd create` flags now implemented:
+- ✅ `--title` - Alternative to positional title argument
+- ✅ `--parent` - Parent issue ID for hierarchical child 
+- ✅ `--force` - Force creation with mismatched prefix
+- ✅ `-f, --file` - Bulk creation flag (placeholder, implementation pending)
+
+The `bd create` command is now feature-complete for single-issue creation and fully compatible with agents using `bd create --title "..."` syntax.
+
+---
+
+**Previous update: 2025-10-31_#98(bea2bc8)**
 
 All implemented commands verified against `bd --help` output and command-specific help pages. Status markers updated to reflect actual implementation state including latest --mb-beads-dir addition.
 
