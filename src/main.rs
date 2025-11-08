@@ -419,6 +419,7 @@ enum Commands {
     Quickstart,
 
     /// Show version information
+    #[command(alias = "v")]
     Version,
 
     /// Migrate between numeric and hash-based IDs (minibeads-specific)
