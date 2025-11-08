@@ -1612,19 +1612,24 @@ impl Storage {
         // Load all issues
         let all_issues = self.list_all_issues_no_dependents()?;
 
-        // Identify hash-based IDs and collect for migration
-        let mut hash_issues = Vec::new();
-        let mut max_numeric_id = 0u32;
+        // Identify hash-based IDs and collect for migration using gap-based heuristic
+        const MAX_GAP: u32 = 100; // Gap size to distinguish numeric vs hash IDs
 
+        let mut hash_issues = Vec::new();
+        let mut numeric_ids = Vec::new();
+        let mut numeric_id_to_issue: HashMap<u32, Issue> = HashMap::new();
+
+        // First pass: collect all numeric IDs with matching prefix
         for issue in &all_issues {
             if let Some(pos) = issue.id.rfind('-') {
                 let issue_prefix = &issue.id[..pos];
                 let issue_suffix = &issue.id[pos + 1..];
 
                 if issue_prefix == prefix {
-                    // Check if it's numeric (and track max)
+                    // Check if it's numeric
                     if let Ok(num) = issue_suffix.parse::<u32>() {
-                        max_numeric_id = max_numeric_id.max(num);
+                        numeric_ids.push(num);
+                        numeric_id_to_issue.insert(num, issue.clone());
                     } else {
                         // Non-numeric suffix = hash-based ID
                         hash_issues.push(issue.clone());
@@ -1638,22 +1643,24 @@ impl Storage {
             }
         }
 
-        // Also check for pure numeric IDs with suffix length >= 4 (these are likely hash IDs with numeric-only hashes)
-        for issue in &all_issues {
-            if let Some(pos) = issue.id.rfind('-') {
-                let issue_prefix = &issue.id[..pos];
-                let issue_suffix = &issue.id[pos + 1..];
+        // Use gap-based heuristic to find true max numeric ID and identify hash IDs
+        let (max_numeric_id, ids_above_gap) = find_max_numeric_id_before_gap(&numeric_ids, MAX_GAP);
 
-                if issue_prefix == prefix && issue_suffix.len() >= 4 {
-                    if let Ok(_num) = issue_suffix.parse::<u32>() {
-                        // Numeric but length >= 4, could be a hash ID
-                        // Only add if not already in hash_issues
-                        if !hash_issues.iter().any(|i| i.id == issue.id) {
-                            hash_issues.push(issue.clone());
-                        }
-                    }
+        // Add numeric IDs above the gap to hash_issues (these are likely hash IDs with all-numeric hashes)
+        if !ids_above_gap.is_empty() {
+            eprintln!("Warning: Found {} numeric ID(s) above a gap of {} (likely hash IDs with all-numeric hashes)",
+                      ids_above_gap.len(), MAX_GAP);
+            eprintln!("         These will be treated as hash IDs and renumbered:");
+            for id_num in &ids_above_gap {
+                if let Some(issue) = numeric_id_to_issue.get(id_num) {
+                    eprintln!("         - {}", issue.id);
+                    hash_issues.push(issue.clone());
                 }
             }
+            eprintln!(
+                "         True max numeric ID before gap: {}",
+                max_numeric_id
+            );
         }
 
         if hash_issues.is_empty() {
@@ -1932,6 +1939,55 @@ pub fn get_file_mtime(file_path: &Path) -> Result<chrono::DateTime<chrono::Utc>>
     let datetime: DateTime<Utc> = mtime.into();
 
     Ok(datetime)
+}
+
+/// Find the true maximum numeric ID before a large gap
+///
+/// This function implements a gap-based heuristic to distinguish legitimate numeric IDs
+/// from hash IDs that happen to be all-numeric. It counts sequentially from 1 until it
+/// finds MAX_GAP (default 100) consecutive missing IDs, then treats everything before
+/// that gap as legitimate numeric IDs and everything after as hash IDs.
+///
+/// Returns: (max_numeric_id, ids_above_gap)
+/// - max_numeric_id: The highest numeric ID before the gap (or 0 if none found)
+/// - ids_above_gap: Numeric IDs that appear after the gap (likely hash IDs)
+fn find_max_numeric_id_before_gap(numeric_ids: &[u32], max_gap: u32) -> (u32, Vec<u32>) {
+    if numeric_ids.is_empty() {
+        return (0, Vec::new());
+    }
+
+    // Sort the numeric IDs
+    let mut sorted_ids = numeric_ids.to_vec();
+    sorted_ids.sort_unstable();
+
+    // Find the first gap of size >= MAX_GAP
+    let mut max_before_gap = sorted_ids[0];
+    let mut gap_start = 0;
+    let mut found_gap = false;
+
+    for i in 0..sorted_ids.len() - 1 {
+        let current = sorted_ids[i];
+        let next = sorted_ids[i + 1];
+        let gap_size = next - current;
+
+        if gap_size >= max_gap {
+            max_before_gap = current;
+            gap_start = i + 1;
+            found_gap = true;
+            break;
+        }
+    }
+
+    // If no gap found, use the highest ID
+    if !found_gap {
+        max_before_gap = *sorted_ids.last().unwrap();
+        return (max_before_gap, Vec::new());
+    }
+
+    // Collect IDs above the gap (these are likely hash IDs with numeric-only hashes)
+    let ids_above_gap = sorted_ids[gap_start..].to_vec();
+
+    (max_before_gap, ids_above_gap)
 }
 
 /// Update a single key-value pair in a YAML file while preserving comments and formatting
