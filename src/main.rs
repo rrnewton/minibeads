@@ -1418,7 +1418,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("mb version 0.11.0");
+            println!("mb version 0.12.0");
             Ok(())
         }
 
@@ -1592,7 +1592,7 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
         .open(&log_path)
         .context("Failed to open command history log")?;
 
-    writeln!(file, "{} {}", timestamp, command_line)
+    writeln!(file, "<<BD_INVOKE>> {} {}", timestamp, command_line)
         .context("Failed to write to command history log")?;
 
     Ok(())
