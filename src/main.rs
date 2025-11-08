@@ -439,6 +439,10 @@ enum Commands {
         /// Don't update config-minibeads.yaml (minibeads-specific)
         #[arg(long = "no-change-config")]
         no_change_config: bool,
+
+        /// Repack numeric IDs to fill gaps (e.g., 1,3,5 -> 1,2,3) (minibeads-specific)
+        #[arg(long = "repack-contiguous")]
+        repack_contiguous: bool,
     },
 }
 
@@ -1427,12 +1431,51 @@ fn run() -> Result<()> {
             dry_run,
             mb_patch_code,
             no_change_config,
+            repack_contiguous,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            // Handle --repack-contiguous separately (fills gaps in numeric IDs)
+            if repack_contiguous {
+                let (changes, id_mapping) = storage.repack_numeric_ids(dry_run)?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&changes)?);
+                } else if dry_run {
+                    println!("Dry run - would make the following changes:");
+                    for change in &changes {
+                        println!("  {}", change);
+                    }
+                } else {
+                    let issue_count = changes
+                        .iter()
+                        .filter(|c| c.starts_with("Rename file:"))
+                        .count();
+                    if issue_count > 0 {
+                        println!(
+                            "Successfully repacked {} issue(s) to fill gaps",
+                            issue_count
+                        );
+
+                        // Patch code references if requested
+                        if mb_patch_code {
+                            if let Err(e) = code_patch::patch_code_for_migration(&id_mapping) {
+                                eprintln!("Warning: Code patching failed: {}", e);
+                            }
+                        }
+                    } else {
+                        // No changes made
+                        for change in &changes {
+                            println!("{}", change);
+                        }
+                    }
+                }
+                return Ok(());
             }
 
             match to.as_str() {

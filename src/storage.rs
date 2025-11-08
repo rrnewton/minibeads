@@ -1797,6 +1797,176 @@ impl Storage {
 
         Ok((changes, id_mapping))
     }
+
+    /// Repack numeric IDs to fill gaps (make them contiguous)
+    ///
+    /// This operation:
+    /// - Collects all issues with numeric IDs for the current prefix
+    /// - Sorts them by creation timestamp (preserves chronological order)
+    /// - Renumbers them as 1, 2, 3, ... (fills gaps)
+    /// - Updates all dependency references
+    /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
+    /// - Is atomic (all updates succeed or none)
+    ///
+    /// Example: If you have issues 1, 3, 5, 7, they become 1, 2, 3, 4
+    pub fn repack_numeric_ids(
+        &self,
+        dry_run: bool,
+    ) -> Result<(Vec<String>, HashMap<String, String>)> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        // Get current prefix
+        let prefix = self.get_prefix()?;
+
+        // Load all issues
+        let all_issues = self.list_all_issues_no_dependents()?;
+
+        // Collect all numeric IDs with matching prefix
+        let mut numeric_issues = Vec::new();
+        for issue in &all_issues {
+            if let Some(pos) = issue.id.rfind('-') {
+                let issue_prefix = &issue.id[..pos];
+                let issue_suffix = &issue.id[pos + 1..];
+
+                if issue_prefix == prefix {
+                    // Check if it's numeric
+                    if issue_suffix.parse::<u32>().is_ok() {
+                        numeric_issues.push(issue.clone());
+                    }
+                }
+            }
+        }
+
+        if numeric_issues.is_empty() {
+            anyhow::bail!("No numeric IDs found to repack. Use 'mb migrate --to numeric' first.");
+        }
+
+        // Sort by creation timestamp to preserve chronological order
+        numeric_issues.sort_by_key(|issue| issue.created_at);
+
+        // Build mapping from old ID to new contiguous ID
+        let mut id_mapping = HashMap::new();
+        let mut next_id = 1;
+
+        for issue in &numeric_issues {
+            let new_id = format!("{}-{}", prefix, next_id);
+
+            // Only add to mapping if ID actually changes
+            if issue.id != new_id {
+                id_mapping.insert(issue.id.clone(), new_id);
+            }
+
+            next_id += 1;
+        }
+
+        if id_mapping.is_empty() {
+            eprintln!("No gaps found - IDs are already contiguous (1, 2, 3, ...)");
+            return Ok((
+                vec!["No changes needed - IDs already contiguous".to_string()],
+                HashMap::new(),
+            ));
+        }
+
+        // Track all changes for dry-run mode
+        let mut changes = Vec::new();
+        changes.push(format!(
+            "Repacking {} numeric IDs to fill gaps",
+            id_mapping.len()
+        ));
+
+        // Plan all file renames and content updates
+        for issue in &all_issues {
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                changes.push(format!("Rename file: {}.md -> {}.md", issue.id, new_id));
+                changes.push(format!(
+                    "Update ID in frontmatter: {} -> {}",
+                    issue.id, new_id
+                ));
+
+                // Check if this issue has dependencies that will be renamed
+                for dep_id in issue.depends_on.keys() {
+                    if id_mapping.contains_key(dep_id) {
+                        changes.push(format!(
+                            "Update dependency in {}: {} -> {}",
+                            new_id,
+                            dep_id,
+                            id_mapping.get(dep_id).unwrap()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If dry-run, return changes without applying (return empty mapping for dry-run)
+        if dry_run {
+            return Ok((changes, HashMap::new()));
+        }
+
+        // Apply changes atomically
+        // Step 1: Update all issue files (content + dependencies + text replacements)
+        for issue in all_issues {
+            let mut updated_issue = issue.clone();
+            let mut issue_modified = false;
+
+            // Check if this issue's ID needs to be repacked
+            if let Some(new_id) = id_mapping.get(&issue.id) {
+                updated_issue.id = new_id.clone();
+                issue_modified = true;
+            }
+
+            // Update dependency references
+            let mut new_depends_on = HashMap::new();
+            for (dep_id, dep_type) in &updated_issue.depends_on {
+                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
+                if mapped_dep_id != dep_id {
+                    issue_modified = true;
+                }
+                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
+            }
+            updated_issue.depends_on = new_depends_on;
+
+            // Apply text replacements to all text fields
+            let old_title = updated_issue.title.clone();
+            let old_description = updated_issue.description.clone();
+            let old_design = updated_issue.design.clone();
+            let old_notes = updated_issue.notes.clone();
+            let old_acceptance = updated_issue.acceptance_criteria.clone();
+
+            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
+
+            // Check if any text fields changed
+            if updated_issue.title != old_title
+                || updated_issue.description != old_description
+                || updated_issue.design != old_design
+                || updated_issue.notes != old_notes
+                || updated_issue.acceptance_criteria != old_acceptance
+            {
+                issue_modified = true;
+            }
+
+            // Only write if the issue was modified
+            if issue_modified {
+                updated_issue.updated_at = chrono::Utc::now();
+
+                // Write to new file (or overwrite if ID didn't change)
+                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
+                let markdown = issue_to_markdown(&updated_issue)?;
+                fs::write(&new_path, markdown).context(format!(
+                    "Failed to write repacked issue: {}",
+                    updated_issue.id
+                ))?;
+
+                // Remove old file if ID changed
+                if updated_issue.id != issue.id {
+                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
+                    fs::remove_file(&old_path)
+                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                }
+            }
+        }
+
+        Ok((changes, id_mapping))
+    }
 }
 
 /// Infer prefix from the parent directory name
