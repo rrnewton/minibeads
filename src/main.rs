@@ -443,6 +443,11 @@ enum Commands {
         /// Repack numeric IDs to fill gaps (e.g., 1,3,5 -> 1,2,3) (minibeads-specific)
         #[arg(long = "repack-contiguous")]
         repack_contiguous: bool,
+
+        /// Starting ID for closed issues when repacking (only valid with --repack-contiguous)
+        /// Example: --closed-issue-start=1000 packs open issues as 1,2,3... and closed as 1000,1001,1002...
+        #[arg(long = "closed-issue-start")]
+        closed_issue_start: Option<u32>,
     },
 }
 
@@ -1432,6 +1437,7 @@ fn run() -> Result<()> {
             mb_patch_code,
             no_change_config,
             repack_contiguous,
+            closed_issue_start,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -1440,9 +1446,15 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
+            // Validate that --closed-issue-start is only valid with --repack-contiguous
+            if closed_issue_start.is_some() && !repack_contiguous {
+                anyhow::bail!("--closed-issue-start is only valid with --repack-contiguous");
+            }
+
             // Handle --repack-contiguous separately (fills gaps in numeric IDs)
             if repack_contiguous {
-                let (changes, id_mapping) = storage.repack_numeric_ids(dry_run)?;
+                let (changes, id_mapping) =
+                    storage.repack_numeric_ids(dry_run, closed_issue_start)?;
 
                 if json {
                     println!("{}", serde_json::to_string_pretty(&changes)?);

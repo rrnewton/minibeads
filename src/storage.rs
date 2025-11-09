@@ -1804,14 +1804,21 @@ impl Storage {
     /// - Collects all issues with numeric IDs for the current prefix
     /// - Sorts them by creation timestamp (preserves chronological order)
     /// - Renumbers them as 1, 2, 3, ... (fills gaps)
+    /// - If closed_issue_start is provided, numbers open and closed issues separately:
+    ///   - Open issues: 1, 2, 3, ...
+    ///   - Closed issues: closed_issue_start, closed_issue_start+1, ...
     /// - Updates all dependency references
     /// - Updates all text mentions of old IDs in all issues (title, description, design, notes, acceptance_criteria)
     /// - Is atomic (all updates succeed or none)
     ///
     /// Example: If you have issues 1, 3, 5, 7, they become 1, 2, 3, 4
+    /// Example with --closed-issue-start=1000:
+    ///   - Open issues 1, 3, 5 -> 1, 2, 3
+    ///   - Closed issues 2, 4, 6 -> 1000, 1001, 1002
     pub fn repack_numeric_ids(
         &self,
         dry_run: bool,
+        closed_issue_start: Option<u32>,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
@@ -1846,17 +1853,72 @@ impl Storage {
 
         // Build mapping from old ID to new contiguous ID
         let mut id_mapping = HashMap::new();
-        let mut next_id = 1;
 
-        for issue in &numeric_issues {
-            let new_id = format!("{}-{}", prefix, next_id);
+        // If closed_issue_start is provided, number open and closed issues separately
+        if let Some(closed_start) = closed_issue_start {
+            // Separate open and closed issues (maintaining chronological order within each group)
+            let mut open_issues = Vec::new();
+            let mut closed_issues = Vec::new();
 
-            // Only add to mapping if ID actually changes
-            if issue.id != new_id {
-                id_mapping.insert(issue.id.clone(), new_id);
+            for issue in &numeric_issues {
+                if issue.status == Status::Closed {
+                    closed_issues.push(issue.clone());
+                } else {
+                    open_issues.push(issue.clone());
+                }
             }
 
-            next_id += 1;
+            // Validate that we have room for all open issues before the closed_issue_start
+            if open_issues.len() as u32 >= closed_start {
+                anyhow::bail!(
+                    "Cannot repack: {} open issues found, but --closed-issue-start is set to {}. \
+                     Open issues would collide with closed issue numbering. \
+                     Use a larger value for --closed-issue-start (e.g., {}).",
+                    open_issues.len(),
+                    closed_start,
+                    open_issues.len() as u32 + 1
+                );
+            }
+
+            // Number open issues: 1, 2, 3, ...
+            let mut next_open_id = 1;
+            for issue in &open_issues {
+                let new_id = format!("{}-{}", prefix, next_open_id);
+
+                // Only add to mapping if ID actually changes
+                if issue.id != new_id {
+                    id_mapping.insert(issue.id.clone(), new_id);
+                }
+
+                next_open_id += 1;
+            }
+
+            // Number closed issues: closed_issue_start, closed_issue_start+1, ...
+            let mut next_closed_id = closed_start;
+            for issue in &closed_issues {
+                let new_id = format!("{}-{}", prefix, next_closed_id);
+
+                // Only add to mapping if ID actually changes
+                if issue.id != new_id {
+                    id_mapping.insert(issue.id.clone(), new_id);
+                }
+
+                next_closed_id += 1;
+            }
+        } else {
+            // Original behavior: number all issues sequentially
+            let mut next_id = 1;
+
+            for issue in &numeric_issues {
+                let new_id = format!("{}-{}", prefix, next_id);
+
+                // Only add to mapping if ID actually changes
+                if issue.id != new_id {
+                    id_mapping.insert(issue.id.clone(), new_id);
+                }
+
+                next_id += 1;
+            }
         }
 
         if id_mapping.is_empty() {
