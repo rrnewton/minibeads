@@ -262,6 +262,11 @@ if [ -n "$UPSTREAM_BD" ]; then
     echo -e "${BLUE}→ cp $JSONL_FILE .beads/issues.jsonl${NC}"
     cp "$JSONL_FILE" .beads/issues.jsonl
 
+    # Import the JSONL into the database (required since bd init starts a daemon)
+    echo -e "${BLUE}→ $UPSTREAM_BD import -i .beads/issues.jsonl${NC}"
+    "$UPSTREAM_BD" import -i .beads/issues.jsonl >/dev/null 2>&1
+    echo -e "${BLUE}  (import completed)${NC}"
+
     # Test upstream bd list (latest upstream uses database mode, not --no-db)
     echo -e "${BLUE}→ $UPSTREAM_BD list${NC}"
     UPSTREAM_LIST=$("$UPSTREAM_BD" list 2>&1)
