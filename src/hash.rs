@@ -1,6 +1,70 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+/// Base36 alphabet for encoding (0-9, a-z)
+const BASE36_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Encode bytes to base36 string of specified length
+///
+/// Converts a byte slice to a base36 string representation.
+/// Uses big-integer arithmetic to convert bytes to base36.
+/// Pads with leading zeros if needed to reach the target length.
+///
+/// # Arguments
+/// * `data` - Byte slice to encode
+/// * `length` - Desired output length in base36 characters
+///
+/// # Returns
+/// A base36 string of the specified length
+fn encode_base36(data: &[u8], length: usize) -> String {
+    use num_bigint::BigUint;
+    use num_traits::Zero;
+
+    // Convert bytes to big integer
+    let mut num = BigUint::from_bytes_be(data);
+
+    // Handle zero case
+    let zero = BigUint::zero();
+    if num == zero {
+        return "0".repeat(length);
+    }
+
+    // Convert to base36
+    let base = BigUint::from(36u32);
+    let mut chars = Vec::new();
+
+    // Build the string in reverse
+    while num > zero {
+        let remainder = &num % &base;
+        num /= &base;
+        // remainder is always 0-35, so this is safe
+        let digit_idx = if let Some(digits) = remainder.to_u32_digits().first() {
+            *digits as usize
+        } else {
+            0
+        };
+        chars.push(BASE36_ALPHABET[digit_idx]);
+    }
+
+    // Reverse to get correct order
+    chars.reverse();
+
+    // Convert to string
+    let mut result = String::from_utf8(chars).unwrap_or_else(|_| String::from("0"));
+
+    // Pad with zeros if needed
+    if result.len() < length {
+        result = "0".repeat(length - result.len()) + &result;
+    }
+
+    // Truncate to exact length if needed (keep least significant digits)
+    if result.len() > length {
+        result = result[result.len() - length..].to_string();
+    }
+
+    result
+}
+
 /// Generate a hash-based ID with collision handling
 ///
 /// Takes a collision checker function that returns true if the ID already exists.
@@ -31,13 +95,16 @@ where
     let creator = "user"; // Default creator
 
     // Adaptive length based on database size (matching upstream logic)
+    // Base36 starts at length 3 (vs hex which started at 4)
     let initial_length = if estimated_db_size < 10 {
-        4
+        3
     } else if estimated_db_size < 100 {
-        5
+        4
     } else if estimated_db_size < 1000 {
-        6
+        5
     } else if estimated_db_size < 10000 {
+        6
+    } else if estimated_db_size < 100000 {
         7
     } else {
         8
@@ -71,8 +138,9 @@ where
 
 /// Generate a hash-based issue ID from content and metadata.
 ///
-/// This matches the upstream beads implementation in internal/storage/sqlite/sqlite.go
+/// This matches the upstream beads implementation in internal/storage/sqlite/ids.go
 /// The hash is deterministic based on title, description, creator, timestamp, and nonce.
+/// Uses base36 encoding (0-9, a-z) for better information density than hex.
 ///
 /// # Arguments
 /// * `prefix` - The issue prefix (e.g., "minibeads")
@@ -80,11 +148,11 @@ where
 /// * `description` - Issue description
 /// * `creator` - Issue creator (typically "user" or system user)
 /// * `timestamp` - Creation timestamp
-/// * `length` - Number of hex characters to use (4-8)
+/// * `length` - Number of base36 characters to use (3-8)
 /// * `nonce` - Collision avoidance nonce
 ///
 /// # Returns
-/// A hash-based ID like "minibeads-4f10" or "minibeads-b127a5"
+/// A hash-based ID like "minibeads-3s9" or "minibeads-0qeg" (base36 encoded)
 pub fn generate_hash_id(
     prefix: &str,
     title: &str,
@@ -110,50 +178,20 @@ pub fn generate_hash_id(
     hasher.update(content.as_bytes());
     let hash_result = hasher.finalize();
 
-    // Extract variable-length prefix (4-8 hex chars)
-    let short_hash = match length {
-        4 => {
-            // 2 bytes → 4 hex chars
-            format!("{:02x}{:02x}", hash_result[0], hash_result[1])
-        }
-        5 => {
-            // 2.5 bytes → 5 hex chars (take first 5 chars from 3 bytes)
-            let three_byte_hex = format!(
-                "{:02x}{:02x}{:02x}",
-                hash_result[0], hash_result[1], hash_result[2]
-            );
-            three_byte_hex[..5].to_string()
-        }
-        6 => {
-            // 3 bytes → 6 hex chars
-            format!(
-                "{:02x}{:02x}{:02x}",
-                hash_result[0], hash_result[1], hash_result[2]
-            )
-        }
-        7 => {
-            // 3.5 bytes → 7 hex chars (take first 7 chars from 4 bytes)
-            let four_byte_hex = format!(
-                "{:02x}{:02x}{:02x}{:02x}",
-                hash_result[0], hash_result[1], hash_result[2], hash_result[3]
-            );
-            four_byte_hex[..7].to_string()
-        }
-        8 => {
-            // 4 bytes → 8 hex chars
-            format!(
-                "{:02x}{:02x}{:02x}{:02x}",
-                hash_result[0], hash_result[1], hash_result[2], hash_result[3]
-            )
-        }
-        _ => {
-            // Default to 6 hex chars (3 bytes)
-            format!(
-                "{:02x}{:02x}{:02x}",
-                hash_result[0], hash_result[1], hash_result[2]
-            )
-        }
+    // Use base36 encoding with variable length (3-8 chars)
+    // Determine how many bytes to use based on desired output length
+    // Matching upstream logic from ids.go generateHashID
+    let num_bytes = match length {
+        3 => 2, // 2 bytes = 16 bits ≈ 3.09 base36 chars
+        4 => 3, // 3 bytes = 24 bits ≈ 4.63 base36 chars
+        5 => 4, // 4 bytes = 32 bits ≈ 6.18 base36 chars
+        6 => 4, // 4 bytes = 32 bits ≈ 6.18 base36 chars
+        7 => 5, // 5 bytes = 40 bits ≈ 7.73 base36 chars
+        8 => 5, // 5 bytes = 40 bits ≈ 7.73 base36 chars
+        _ => 3, // default to 3 bytes for length 4
     };
+
+    let short_hash = encode_base36(&hash_result[..num_bytes], length);
 
     format!("{}-{}", prefix, short_hash)
 }
@@ -178,7 +216,11 @@ mod tests {
 
         // Should be format: prefix-hash
         assert!(id.starts_with("test-"));
-        assert_eq!(id.len(), "test-".len() + 4); // prefix + dash + 4 hex chars
+        assert_eq!(id.len(), "test-".len() + 4); // prefix + dash + 4 base36 chars
+
+        // Verify it's base36 (only contains 0-9, a-z)
+        let hash_part = &id["test-".len()..];
+        assert!(hash_part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 
     #[test]
@@ -241,7 +283,8 @@ mod tests {
     fn test_generate_hash_id_different_lengths() {
         let timestamp = Utc.with_ymd_and_hms(2025, 10, 31, 12, 0, 0).unwrap();
 
-        for length in 4..=8 {
+        // Base36 encoding supports lengths from 3-8
+        for length in 3..=8 {
             let id = generate_hash_id(
                 "test",
                 "First issue",
@@ -254,6 +297,10 @@ mod tests {
 
             assert!(id.starts_with("test-"));
             assert_eq!(id.len(), "test-".len() + length);
+
+            // Verify it's base36 (only contains 0-9, a-z)
+            let hash_part = &id["test-".len()..];
+            assert!(hash_part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
         }
     }
 
