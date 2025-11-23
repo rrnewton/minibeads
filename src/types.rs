@@ -2,6 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
+/// Default priority for issues imported from upstream beads (which doesn't have priority)
+fn default_priority() -> i32 {
+    2 // Medium priority
+}
+
 /// Issue status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,6 +153,23 @@ pub struct Dependency {
     pub dep_type: String,
 }
 
+/// Upstream beads dependency format (from steveyegge/beads)
+/// Contains additional metadata fields that we ignore during import
+#[derive(Debug, Clone, Deserialize)]
+struct UpstreamDependency {
+    #[allow(dead_code)]
+    pub issue_id: String,
+    pub depends_on_id: String,
+    #[serde(rename = "type")]
+    pub dep_type: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub created_by: Option<String>,
+}
+
 /// Custom serialization for depends_on HashMap -> dependencies array
 fn serialize_dependencies<S>(
     map: &HashMap<String, DependencyType>,
@@ -166,11 +188,16 @@ where
     deps.serialize(serializer)
 }
 
-/// Helper enum for deserializing either old HashMap or new array format
+/// Helper enum for deserializing dependencies in multiple formats
+/// Order matters for untagged enums - most specific first
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum DependenciesFormat {
+    /// Upstream beads format with metadata (checked first - most specific)
+    Upstream(Vec<UpstreamDependency>),
+    /// Minibeads array format
     Array(Vec<Dependency>),
+    /// Legacy map format
     Map(HashMap<String, DependencyType>),
 }
 
@@ -184,6 +211,17 @@ where
     use serde::de::Error;
 
     match DependenciesFormat::deserialize(deserializer)? {
+        DependenciesFormat::Upstream(deps) => {
+            let mut map = HashMap::new();
+            for dep in deps {
+                let dep_type = dep.dep_type.parse::<DependencyType>().map_err(|_| {
+                    Error::custom(format!("Invalid dependency type: {}", dep.dep_type))
+                })?;
+                // Use depends_on_id as the key (ignore issue_id since we're deserializing into that issue)
+                map.insert(dep.depends_on_id, dep_type);
+            }
+            Ok(map)
+        }
         DependenciesFormat::Array(deps) => {
             let mut map = HashMap::new();
             for dep in deps {
@@ -212,6 +250,7 @@ pub struct Issue {
     #[serde(default)]
     pub acceptance_criteria: String,
     pub status: Status,
+    #[serde(default = "default_priority")]
     pub priority: i32,
     pub issue_type: IssueType,
     #[serde(default)]
