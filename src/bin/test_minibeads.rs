@@ -1324,7 +1324,9 @@ fn is_base36_hash_id(id: &str, prefix: &str) -> bool {
     }
 
     // All characters in hash part must be base36 (0-9, a-z lowercase only)
-    hash_part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    hash_part
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 /// Check if an ID is a hexadecimal hash ID (not base36)
@@ -1359,7 +1361,9 @@ fn is_hex_hash_id(id: &str, prefix: &str) -> bool {
 
     // Check if it has alphabetic characters AND they're all in hex range (a-f)
     let has_alpha = hash_part.chars().any(|c| c.is_alphabetic());
-    let is_hex_chars = hash_part.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase());
+    let is_hex_chars = hash_part
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase());
 
     // Check if it's NOT pure base36 (contains NO g-z)
     let has_extended_base36 = hash_part.chars().any(|c| matches!(c, 'g'..='z'));

@@ -185,6 +185,36 @@ impl Storage {
         }
     }
 
+    /// Get hash encoding format from config-minibeads.yaml
+    fn get_hash_encoding(&self) -> Result<hash::HashEncoding> {
+        let config_path = self.beads_dir.join("config-minibeads.yaml");
+
+        if !config_path.exists() {
+            return Ok(hash::HashEncoding::Base36); // Default to base36 if no config
+        }
+
+        let content =
+            fs::read_to_string(&config_path).context("Failed to read config-minibeads.yaml")?;
+        let config: HashMap<String, String> =
+            serde_yaml::from_str(&content).context("Failed to parse config-minibeads.yaml")?;
+
+        // Parse hash-encoding field (default to base36 if not present)
+        match config.get("hash-encoding") {
+            Some(value) => match value.as_str() {
+                "hex" => Ok(hash::HashEncoding::Hex),
+                "base36" => Ok(hash::HashEncoding::Base36),
+                _ => {
+                    eprintln!(
+                        "Warning: Unknown hash-encoding value '{}' in config-minibeads.yaml, using base36",
+                        value
+                    );
+                    Ok(hash::HashEncoding::Base36)
+                }
+            },
+            None => Ok(hash::HashEncoding::Base36),
+        }
+    }
+
     /// Infer prefix from existing issues in the filesystem
     fn infer_prefix_from_issues(&self) -> Result<String> {
         let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
@@ -247,6 +277,9 @@ impl Storage {
         let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
         let issue_count = entries.count();
 
+        // Get hash encoding from config
+        let encoding = self.get_hash_encoding()?;
+
         // Use hash::generate_hash_id_with_collision_check with filesystem checker
         hash::generate_hash_id_with_collision_check(
             prefix,
@@ -254,6 +287,7 @@ impl Storage {
             description,
             timestamp,
             issue_count,
+            encoding,
             |candidate| self.issues_dir.join(format!("{}.md", candidate)).exists(),
         )
     }
@@ -2082,6 +2116,17 @@ fn create_minibeads_config(beads_dir: &Path, mb_hash_ids: bool) -> Result<()> {
         "mb-hash-ids: {}",
         if mb_hash_ids { "true" } else { "false" }
     )?;
+    writeln!(file)?;
+
+    // Hash encoding format
+    writeln!(file, "# Hash encoding format for hash-based IDs")?;
+    writeln!(file, "# base36: Uses characters [0-9a-z] for better information density (recommended, matches upstream bd)")?;
+    writeln!(
+        file,
+        "# hex: Uses characters [0-9a-f] for hexadecimal encoding (legacy format)"
+    )?;
+    writeln!(file, "# Default: base36")?;
+    writeln!(file, "hash-encoding: base36")?;
 
     Ok(())
 }
