@@ -436,31 +436,40 @@ async fn run_migration_test(
         post_migration_count
     ));
 
-    // Verify all IDs are now hash-based
-    let mut all_hash_ids = true;
-    let mut numeric_ids = Vec::new();
+    // Verify all IDs are now hash-based and use base36 encoding (not hex)
+    // Note: Hash IDs can contain only digits (e.g., "test-9753") and still be valid hash IDs
+    let mut hex_ids = Vec::new();
+    let prefix = "test"; // Migration test uses "test" prefix
 
     for line in list_text.lines() {
         if let Some(id) = line.split(':').next() {
             let id = id.trim();
-            // Check if ID contains hex digits (a-f)
-            if !id.is_empty() && !id.contains(|c: char| c.is_ascii_hexdigit() && c.is_alphabetic())
-            {
-                all_hash_ids = false;
-                numeric_ids.push(id.to_string());
+            if id.is_empty() {
+                continue;
+            }
+
+            // Check if it's a hex-only ID with alphabetic chars (suggests hex encoding)
+            // We only flag IDs that have alphabetic hex chars (a-f) but no extended base36 chars (g-z)
+            // All-digit hash IDs are valid and can occur with either encoding
+            if is_hex_hash_id(id, prefix) {
+                hex_ids.push(id.to_string());
             }
         }
     }
 
-    if !all_hash_ids {
+    if !hex_ids.is_empty() {
         eprintln!(
-            "❌ Not all IDs are hash-based! Found numeric IDs: {:?}",
-            numeric_ids
+            "❌ Migration failed: Found {} hex-encoded IDs (should be base36): {:?}",
+            hex_ids.len(),
+            &hex_ids[..std::cmp::min(3, hex_ids.len())]
         );
-        return Err(anyhow::anyhow!("Migration did not convert all IDs"));
+        return Err(anyhow::anyhow!(
+            "Migration used hexadecimal encoding instead of base36: {} IDs affected",
+            hex_ids.len()
+        ));
     }
 
-    logger.log("✓ All issue IDs are hash-based".to_string());
+    logger.log("✓ All issue IDs appear to use base36 encoding".to_string());
 
     // Verify dependencies are intact by checking a few issues
     let show_output = std::process::Command::new(&minibeads_binary)
@@ -1268,6 +1277,138 @@ fn is_critical_failure(result: &minibeads::beads_generator::ExecutionResult) -> 
     result.exit_code.unwrap_or(1) != 0
 }
 
+/// Check if an ID is a valid base36 hash ID (contains only 0-9, a-z after prefix)
+///
+/// Base36 encoding uses characters [0-9a-z], giving better information density than hex.
+/// Upstream bd uses base36 for hash IDs.
+///
+/// Examples of valid base36 hash IDs:
+/// - "test-3s9"
+/// - "minibeads-0qeg"
+/// - "bd-12f8393"
+///
+/// Examples of invalid (contains hex-only chars or uppercase):
+/// - "test-4f10" (valid hex but 'f' is valid in base36 too, but if it has ONLY hex it might be wrong impl)
+/// - "test-ABCD" (uppercase not allowed)
+/// - "test-xyz!" (! is not base36)
+fn is_base36_hash_id(id: &str, prefix: &str) -> bool {
+    // Must start with prefix-
+    let expected_prefix = format!("{}-", prefix);
+    if !id.starts_with(&expected_prefix) {
+        return false;
+    }
+
+    // Extract the hash part after prefix-
+    let hash_part = &id[expected_prefix.len()..];
+
+    // Hash must not be empty
+    if hash_part.is_empty() {
+        return false;
+    }
+
+    // All characters in hash part must be base36 (0-9, a-z lowercase only)
+    hash_part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Check if an ID is a hexadecimal hash ID (not base36)
+///
+/// This detects if we're using hex encoding instead of base36.
+/// Hex-only IDs contain 0-9 and a-f, but base36 can also contain g-z.
+///
+/// Returns true if the ID uses ONLY hex characters (suggesting wrong encoding).
+fn is_hex_hash_id(id: &str, prefix: &str) -> bool {
+    // Must start with prefix-
+    let expected_prefix = format!("{}-", prefix);
+    if !id.starts_with(&expected_prefix) {
+        return false;
+    }
+
+    // Extract the hash part after prefix-
+    let hash_part = &id[expected_prefix.len()..];
+
+    // Hash must not be empty
+    if hash_part.is_empty() {
+        return false;
+    }
+
+    // Check if it looks like hex (only 0-9, a-f)
+    let is_hex_chars = hash_part.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase());
+
+    // Check if it's NOT pure base36 (contains NO g-z)
+    let has_extended_base36 = hash_part.chars().any(|c| matches!(c, 'g'..='z'));
+
+    // It's hex-based if it uses only hex chars and doesn't use extended base36
+    is_hex_chars && !has_extended_base36
+}
+
+/// Validate that all hash IDs in a collection use base36 encoding
+///
+/// Returns Ok if all IDs are base36, Err with list of violating IDs otherwise.
+fn validate_hash_ids_are_base36(
+    issues: &std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>,
+    prefix: &str,
+    logger: &Logger,
+) -> Result<()> {
+    let mut non_base36_ids = Vec::new();
+    let mut hex_ids = Vec::new();
+
+    for id in issues.keys() {
+        // Skip if it's a numeric ID (doesn't contain alphabetic chars)
+        let id_suffix = id.strip_prefix(&format!("{}-", prefix)).unwrap_or(id);
+        if id_suffix.chars().all(|c| c.is_ascii_digit()) {
+            continue; // Numeric ID, skip validation
+        }
+
+        if !is_base36_hash_id(id, prefix) {
+            non_base36_ids.push(id.clone());
+        } else if is_hex_hash_id(id, prefix) {
+            hex_ids.push(id.clone());
+        }
+    }
+
+    if !hex_ids.is_empty() {
+        logger.verbose(format!(
+            "   ⚠️  Found {} hash IDs using hex encoding (should be base36): {:?}",
+            hex_ids.len(),
+            &hex_ids[..std::cmp::min(5, hex_ids.len())]
+        ));
+        return Err(anyhow::anyhow!(
+            "Hash IDs use hexadecimal encoding instead of base36: {} IDs affected (e.g., {})",
+            hex_ids.len(),
+            hex_ids.first().unwrap()
+        ));
+    }
+
+    if !non_base36_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Found {} invalid hash IDs (not base36): {:?}",
+            non_base36_ids.len(),
+            &non_base36_ids[..std::cmp::min(5, non_base36_ids.len())]
+        ));
+    }
+
+    logger.verbose(format!(
+        "   ✓ All {} hash IDs use valid base36 encoding",
+        issues.len()
+    ));
+    Ok(())
+}
+
+/// Detect if we're in hash ID mode by checking if any ID contains non-numeric characters
+fn is_hash_id_mode(
+    issues: &std::collections::HashMap<String, minibeads::beads_generator::ReferenceIssue>,
+    prefix: &str,
+) -> bool {
+    for id in issues.keys() {
+        let id_suffix = id.strip_prefix(&format!("{}-", prefix)).unwrap_or(id);
+        // If any ID has alphabetic characters, we're in hash mode
+        if id_suffix.chars().any(|c| c.is_alphabetic()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Verify the final state is consistent with the reference interpreter
 /// Returns (bytes_written, num_issues) on success
 fn verify_consistency(
@@ -1431,6 +1572,12 @@ fn verify_minibeads_state(
         }
     }
 
+    // Validate hash ID encoding if in hash mode
+    if !actual_issues.is_empty() && is_hash_id_mode(&actual_issues, reference.get_prefix()) {
+        logger.verbose("   Validating hash ID encoding format...".to_string());
+        validate_hash_ids_are_base36(&actual_issues, reference.get_prefix(), logger)?;
+    }
+
     // Compare with reference
     compare_issue_states(&actual_issues, reference.get_final_state(), logger)?;
 
@@ -1506,6 +1653,12 @@ fn verify_upstream_dual_export(
         "   ✓ Parsed {} issues from custom.jsonl",
         custom_issues.len()
     ));
+
+    // Validate hash ID encoding if in hash mode
+    if !custom_issues.is_empty() && is_hash_id_mode(&custom_issues, reference.get_prefix()) {
+        logger.verbose("   Validating hash ID encoding format...".to_string());
+        validate_hash_ids_are_base36(&custom_issues, reference.get_prefix(), logger)?;
+    }
 
     // Parse sync export
     logger.verbose("   Parsing .beads/issues.jsonl...".to_string());

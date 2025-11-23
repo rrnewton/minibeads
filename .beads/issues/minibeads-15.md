@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2025-11-07T22:14:46.353407434+00:00
+updated_at: 2025-11-23T06:03:01.588163229+00:00
 ---
 
 # Description
@@ -431,3 +431,7 @@ Validated CLI features at commit #98:
 - ✅ Export, rename, rename-prefix, ready --sort all feature-complete
 
 All P0, P1, and P2 features are complete. Many P3 features also completed.
+
+# Notes
+
+**DIVERGENCE IDENTIFIED (2025-11-23):** minibeads currently uses hexadecimal (base16) encoding for hash IDs, while upstream bd uses base36 (0-9, a-z). This affects hash ID format and length. See minibeads-25 for implementation tracking.
