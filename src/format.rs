@@ -105,8 +105,58 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
     }
 
     // Parse frontmatter
-    let fm: Frontmatter = serde_yaml::from_str(parts[1])
-        .with_context(|| format!("Failed to parse frontmatter in {}.md", issue_id))?;
+    let fm: Frontmatter = serde_yaml::from_str(parts[1]).map_err(|e| {
+        // Try to provide helpful context about what field might be missing
+        let yaml_error = e.to_string();
+        let mut error_msg = format!(
+            "Failed to parse frontmatter in {}.md: {}",
+            issue_id, yaml_error
+        );
+
+        // Show the frontmatter content for debugging
+        error_msg.push_str("\n\nFrontmatter content (between --- markers):\n");
+        for (i, line) in parts[1].lines().enumerate() {
+            error_msg.push_str(&format!("{:3}: {}\n", i + 1, line));
+        }
+
+        // Check for common issues
+        let mut missing_fields = Vec::new();
+        if !parts[1].contains("title:") {
+            missing_fields.push("title");
+        }
+        if !parts[1].contains("status:") {
+            missing_fields.push("status");
+        }
+        if !parts[1].contains("priority:") {
+            missing_fields.push("priority");
+        }
+        if !parts[1].contains("issue_type:") {
+            missing_fields.push("issue_type");
+        }
+        if !parts[1].contains("created_at:") {
+            missing_fields.push("created_at");
+        }
+        if !parts[1].contains("updated_at:") {
+            missing_fields.push("updated_at");
+        }
+
+        if !missing_fields.is_empty() {
+            error_msg.push_str("\nMissing required fields: ");
+            error_msg.push_str(&missing_fields.join(", "));
+            error_msg.push('\n');
+        }
+
+        // Check for common quoting issues
+        if yaml_error.contains("did not find expected key") {
+            error_msg.push_str("\nPossible cause: Improperly quoted string values.\n");
+            error_msg.push_str(
+                "If a value contains special characters (like colons), it must be fully quoted.\n",
+            );
+            error_msg.push_str("Example: title: \"This is: a properly quoted title\"\n");
+        }
+
+        anyhow::anyhow!(error_msg)
+    })?;
 
     // Parse body sections
     let (description, design, acceptance_criteria, notes) = parse_sections(parts[2]);
