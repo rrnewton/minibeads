@@ -301,4 +301,37 @@ mod tests {
         let sanitized = sanitize_section_content(content);
         assert!(sanitized.starts_with("## This is a header"));
     }
+
+    #[test]
+    fn test_title_with_special_chars() {
+        // Test that titles with colons and other special chars are properly quoted
+        let test_cases = vec![
+            "Simple title",
+            "Title: with colon",
+            "Entity not found: 0",
+            "Title with 'single quotes'",
+            "Title with \"double quotes\"",
+            "Title with #hash",
+            "Multiple: colons: here",
+        ];
+
+        for title in test_cases {
+            let mut issue = Issue::new("test-1".to_string(), title.to_string(), 2, IssueType::Bug);
+            issue.description = "Test".to_string();
+
+            // Serialize to markdown
+            let markdown = issue_to_markdown(&issue).unwrap();
+
+            // Parse it back
+            let parsed = markdown_to_issue("test-1", &markdown)
+                .unwrap_or_else(|e| panic!("Failed to parse title '{}': {}", title, e));
+
+            // Verify the title round-tripped correctly
+            assert_eq!(
+                parsed.title, title,
+                "Title '{}' did not round-trip correctly",
+                title
+            );
+        }
+    }
 }
