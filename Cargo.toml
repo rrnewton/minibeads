@@ -1,6 +1,6 @@
 [package]
 name = "minibeads"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 description = "A minimal, markdown-based drop-in replacement for the beads issue tracker"
 license = "MIT"
