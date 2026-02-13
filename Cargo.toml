@@ -2,6 +2,26 @@
 name = "minibeads"
 version = "0.13.0"
 edition = "2021"
+description = "A minimal, markdown-based drop-in replacement for the beads issue tracker"
+license = "MIT"
+repository = "https://github.com/rrnewton/minibeads"
+homepage = "https://github.com/rrnewton/minibeads"
+readme = "README.md"
+keywords = ["issue-tracker", "markdown", "beads", "ai", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".claude_template/",
+    ".devcontainer/",
+    ".gitmodules",
+    "beads/",
+    ".beads/",
+    "scratch/",
+    "TRASH/",
+    "ai_docs/",
+]
+
+[features]
+test-tools = []
 
 [[bin]]
 name = "mb"
@@ -10,6 +30,7 @@ path = "src/main.rs"
 [[bin]]
 name = "test_minibeads"
 path = "src/bin/test_minibeads.rs"
+required-features = ["test-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

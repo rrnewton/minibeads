@@ -16,11 +16,19 @@ minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workf
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install minibeads
+```
+
+This installs the `mb` binary (short for "minibeads").
+
 ### Build from source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/minibeads.git
+git clone https://github.com/rrnewton/minibeads.git
 cd minibeads
 
 # Build in debug mode (recommended for development)
@@ -245,7 +253,7 @@ See `.beads/issues/` for tracking:
 
 ## License
 
-[License TBD - check upstream beads for guidance]
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Links
 
