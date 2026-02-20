@@ -78,7 +78,7 @@ struct GlobalOpts {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Validation mode for parsing issues (minibeads-specific)
+    /// Validation mode for parsing issues: silent, warn, error (minibeads-specific)
     #[arg(
         long = "mb-validation",
         global = true,
@@ -149,7 +149,7 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         priority: i32,
 
-        /// Issue type
+        /// Issue type: bug, feature, task, epic, chore
         #[arg(short = 't', long, default_value = "task")]
         issue_type: IssueType,
 
@@ -202,7 +202,7 @@ enum Commands {
 
     /// List issues
     List {
-        /// Filter by status
+        /// Filter by status: open, in_progress, blocked, closed
         #[arg(short = 's', long)]
         status: Option<Status>,
 
@@ -210,7 +210,7 @@ enum Commands {
         #[arg(short = 'p', long)]
         priority: Option<String>,
 
-        /// Filter by type
+        /// Filter by type: bug, feature, task, epic, chore
         #[arg(long)]
         r#type: Option<IssueType>,
 
@@ -250,7 +250,7 @@ enum Commands {
         /// Issue IDs to update
         issue_ids: Vec<String>,
 
-        /// New status
+        /// New status: open, in_progress, blocked, closed
         #[arg(short = 's', long)]
         status: Option<Status>,
 
@@ -364,7 +364,7 @@ enum Commands {
         #[arg(long = "mb-output-default")]
         mb_output_default: bool,
 
-        /// Filter by status
+        /// Filter by status: open, in_progress, blocked, closed
         #[arg(long)]
         status: Option<Status>,
 
@@ -372,7 +372,7 @@ enum Commands {
         #[arg(long)]
         priority: Option<i32>,
 
-        /// Filter by type
+        /// Filter by type: bug, feature, task, epic, chore
         #[arg(long)]
         r#type: Option<IssueType>,
 
@@ -461,7 +461,7 @@ enum DepCommands {
         /// Issue that issue_id depends on
         depends_on_id: String,
 
-        /// Dependency type
+        /// Dependency type: blocks, related, parent-child, discovered-from
         #[arg(short = 't', long, default_value = "blocks")]
         r#type: DependencyType,
     },
@@ -1427,7 +1427,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("mb version 0.12.0");
+            println!("mb version {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
 
