@@ -20,6 +20,25 @@ pub struct Storage {
 /// This prevents matching IDs that are embedded in longer strings.
 ///
 /// Uses a HashMap for O(1) lookup of replacement mappings.
+/// Extract the trailing numeric component of an issue ID (the part after the
+/// last hyphen) if it is a plain integer, e.g. `minibeads-42` -> `Some(42)`.
+/// Hash-based IDs like `minibeads-a3f9` return `None`.
+fn numeric_id_suffix(id: &str) -> Option<u32> {
+    let suffix = id.rsplit_once('-').map(|(_, s)| s).unwrap_or(id);
+    suffix.parse::<u32>().ok()
+}
+
+/// Ordering for `list`: numeric IDs first (ascending, so the most recent
+/// appear last), then hash-based IDs ordered by creation date (oldest first).
+fn compare_for_list(a: &Issue, b: &Issue) -> std::cmp::Ordering {
+    match (numeric_id_suffix(&a.id), numeric_id_suffix(&b.id)) {
+        (Some(an), Some(bn)) => an.cmp(&bn),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.created_at.cmp(&b.created_at),
+    }
+}
+
 fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -> String {
     if text.is_empty() || id_mapping.is_empty() {
         return text.to_string();
@@ -1019,8 +1038,10 @@ impl Storage {
             issues.push(issue);
         }
 
-        // Sort by creation date (oldest first)
-        issues.sort_by_key(|i| i.created_at);
+        // Sort so that numeric IDs are clustered first, in ascending numeric
+        // order (1..N) so the most recent ones appear at the end, followed by
+        // hash-based IDs ordered by creation date (oldest first).
+        issues.sort_by(compare_for_list);
 
         // Apply limit
         if let Some(limit) = limit {
@@ -2319,4 +2340,50 @@ fn update_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result
         .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod list_order_tests {
+    use super::*;
+    use crate::types::IssueType;
+    use chrono::{DateTime, Duration};
+
+    fn issue_at(id: &str, created: DateTime<chrono::Utc>) -> Issue {
+        let mut issue = Issue::new(id.to_string(), "t".to_string(), 3, IssueType::Task);
+        issue.created_at = created;
+        issue
+    }
+
+    #[test]
+    fn numeric_suffix_parsing() {
+        assert_eq!(numeric_id_suffix("minibeads-42"), Some(42));
+        assert_eq!(numeric_id_suffix("minibeads-1"), Some(1));
+        assert_eq!(numeric_id_suffix("minibeads-a3f9"), None);
+        assert_eq!(numeric_id_suffix("foo-bar-7"), Some(7));
+    }
+
+    #[test]
+    fn numeric_cluster_first_then_hash() {
+        let base = chrono::Utc::now();
+        let mut issues = vec![
+            issue_at("minibeads-a3f9", base + Duration::seconds(1)),
+            issue_at("minibeads-10", base + Duration::seconds(2)),
+            issue_at("minibeads-2", base + Duration::seconds(3)),
+            issue_at("minibeads-b001", base),
+            issue_at("minibeads-1", base + Duration::seconds(4)),
+        ];
+        issues.sort_by(compare_for_list);
+        let order: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+        // Numeric ascending first (1, 2, 10), then hash-based by creation date.
+        assert_eq!(
+            order,
+            vec![
+                "minibeads-1",
+                "minibeads-2",
+                "minibeads-10",
+                "minibeads-b001",
+                "minibeads-a3f9",
+            ]
+        );
+    }
 }
