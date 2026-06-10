@@ -1,7 +1,27 @@
 [package]
 name = "minibeads"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2021"
+description = "A minimal, markdown-based drop-in replacement for the beads issue tracker"
+license = "MIT"
+repository = "https://github.com/rrnewton/minibeads"
+homepage = "https://github.com/rrnewton/minibeads"
+readme = "README.md"
+keywords = ["issue-tracker", "beads", "markdown", "cli", "todo"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".devcontainer",
+    ".claude_template",
+    ".beads",
+    "beads",
+    "scratch",
+    "ai_docs",
+    "TRASH",
+    ".github",
+    "benches",
+    "TODO_test_import.md",
+    "*.sh",
+]
 
 [[bin]]
 name = "mb"
