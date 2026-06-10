@@ -1554,8 +1554,24 @@ fn verify_config(
 
     // Use Storage::get_prefix() to read config - this is the single source of truth
     let storage = Storage::open(beads_dir.to_path_buf())?;
-    let actual_prefix = storage.get_prefix()?;
     let expected_prefix = reference.get_prefix().to_string(); // Clone to avoid borrow issues
+
+    // Upstream bd stores issues (and the prefix) in its SQLite database and
+    // leaves `issue-prefix` commented out in config.yaml, so minibeads cannot
+    // recover the prefix from the on-disk markdown view. The prefix is verified
+    // for real via the JSONL dual-export step, so here we tolerate an
+    // undeterminable prefix for upstream and only warn.
+    let actual_prefix = match storage.get_prefix() {
+        Ok(prefix) => prefix,
+        Err(e) if is_upstream => {
+            logger.verbose(format!(
+                "   ⚠️  Upstream prefix not readable from markdown view ({e}); \
+                 expected '{expected_prefix}' (verified via JSONL export)"
+            ));
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     if actual_prefix != expected_prefix {
         if is_upstream {

@@ -108,13 +108,14 @@ impl Storage {
             let config_yaml = serde_yaml::to_string(&config)?;
             fs::write(&config_path, config_yaml).context("Failed to create config.yaml")?;
         } else {
-            // Validate that config has issue-prefix
+            // Validate that config.yaml parses. We do NOT require an active
+            // `issue-prefix` key here: upstream bd writes a config.yaml template
+            // where `issue-prefix` is commented out (the prefix lives in its
+            // SQLite DB). To stay a drop-in replacement we tolerate that and
+            // infer the prefix from issue filenames on demand (see get_prefix).
             let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
-            let config: HashMap<String, String> =
-                serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
-            if !config.contains_key("issue-prefix") {
-                anyhow::bail!("config.yaml is missing required 'issue-prefix' field");
-            }
+            serde_yaml::from_str::<HashMap<String, String>>(&content)
+                .context("Failed to parse config.yaml")?;
         }
 
         // Ensure config-minibeads.yaml exists with defaults (don't clobber if exists)
@@ -178,10 +179,13 @@ impl Storage {
         let config: HashMap<String, String> =
             serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
 
-        config
-            .get("issue-prefix")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("issue-prefix not found in config.yaml"))
+        // Upstream bd leaves `issue-prefix` commented out in config.yaml and
+        // stores the prefix in its database; fall back to inferring it from the
+        // existing issue filenames so we can operate on upstream-created repos.
+        match config.get("issue-prefix") {
+            Some(prefix) => Ok(prefix.clone()),
+            None => self.infer_prefix_from_issues(),
+        }
     }
 
     /// Check if hash-based IDs are enabled in config-minibeads.yaml
@@ -2385,5 +2389,35 @@ mod list_order_tests {
                 "minibeads-a3f9",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod config_compat_tests {
+    use super::*;
+
+    /// Upstream bd leaves `issue-prefix` commented out in config.yaml (the
+    /// prefix lives in its database). Opening such a repo must succeed, and the
+    /// prefix must be inferred from the issue filenames rather than erroring.
+    #[test]
+    fn open_tolerates_commented_issue_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let issues_dir = beads_dir.join("issues");
+        fs::create_dir_all(&issues_dir).unwrap();
+
+        // Upstream-style config.yaml: issue-prefix only appears as a comment.
+        fs::write(
+            beads_dir.join("config.yaml"),
+            "# Beads Configuration File\n# issue-prefix: \"\"\nno-db: false\n",
+        )
+        .unwrap();
+
+        // Two issues on disk so the prefix can be inferred.
+        fs::write(issues_dir.join("acme-1.md"), "placeholder").unwrap();
+        fs::write(issues_dir.join("acme-2.md"), "placeholder").unwrap();
+
+        let storage = Storage::open(beads_dir).expect("open must tolerate commented prefix");
+        assert_eq!(storage.get_prefix().unwrap(), "acme");
     }
 }
