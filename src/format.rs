@@ -23,6 +23,10 @@ pub struct Frontmatter {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_until: Option<String>,
 }
 
 /// Convert an Issue to markdown format
@@ -46,6 +50,8 @@ pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
         created_at: issue.created_at.to_rfc3339(),
         updated_at: issue.updated_at.to_rfc3339(),
         closed_at: issue.closed_at.map(|t| t.to_rfc3339()),
+        claimed_at: issue.claimed_at.map(|t| t.to_rfc3339()),
+        claimed_until: issue.claimed_until.map(|t| t.to_rfc3339()),
     };
 
     // Write YAML frontmatter
@@ -180,6 +186,11 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
         created_at: parse_timestamp(&fm.created_at)?,
         updated_at: parse_timestamp(&fm.updated_at)?,
         closed_at: fm.closed_at.as_ref().and_then(|s| parse_timestamp(s).ok()),
+        claimed_at: fm.claimed_at.as_ref().and_then(|s| parse_timestamp(s).ok()),
+        claimed_until: fm
+            .claimed_until
+            .as_ref()
+            .and_then(|s| parse_timestamp(s).ok()),
     };
 
     // Convert dependencies
@@ -293,6 +304,47 @@ mod tests {
         assert_eq!(issue.title, parsed.title);
         assert_eq!(issue.description, parsed.description);
         assert_eq!(issue.depends_on, parsed.depends_on);
+    }
+
+    #[test]
+    fn test_claim_fields_roundtrip() {
+        // A claimed issue must round-trip its assignee + claim window losslessly
+        // through markdown so the claim survives sync to/from JSONL.
+        let mut issue = Issue::new(
+            "test-9".to_string(),
+            "Claimed".to_string(),
+            2,
+            IssueType::Task,
+        );
+        issue.assignee = "buildbox/backend".to_string();
+        issue.status = crate::types::Status::InProgress;
+        let now = Utc::now();
+        issue.claimed_at = Some(now);
+        issue.claimed_until = Some(now + chrono::Duration::hours(48));
+
+        let markdown = issue_to_markdown(&issue).unwrap();
+        assert!(markdown.contains("assignee: buildbox/backend"));
+        assert!(markdown.contains("claimed_until:"));
+
+        let parsed = markdown_to_issue("test-9", &markdown).unwrap();
+        assert_eq!(parsed.assignee, "buildbox/backend");
+        assert_eq!(parsed.status, crate::types::Status::InProgress);
+        assert_eq!(parsed.claimed_at, issue.claimed_at);
+        assert_eq!(parsed.claimed_until, issue.claimed_until);
+    }
+
+    #[test]
+    fn test_unclaimed_issue_omits_claim_fields() {
+        let issue = Issue::new(
+            "test-8".to_string(),
+            "Plain".to_string(),
+            2,
+            IssueType::Task,
+        );
+        let markdown = issue_to_markdown(&issue).unwrap();
+        assert!(!markdown.contains("claimed_at"));
+        assert!(!markdown.contains("claimed_until"));
+        assert!(!markdown.contains("assignee"));
     }
 
     #[test]

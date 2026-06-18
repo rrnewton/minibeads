@@ -1,6 +1,68 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+
+/// Default lifetime of a claim when no explicit duration is given (48 hours).
+///
+/// After this window elapses, the claim is considered stale and another worker
+/// may reclaim the issue. This is the stale-recovery mechanism that upstream bd
+/// lacks: a crashed or abandoned agent's claim does not pin an issue forever.
+pub const DEFAULT_CLAIM_HOURS: i64 = 48;
+
+/// How long a claim should be held, parsed from a compact duration string such
+/// as `48h`, `2d`, or `90m`. A bare integer (e.g. `12`) is interpreted as hours.
+///
+/// We use a dedicated type rather than a bare integer so the unit is explicit at
+/// every call site and the parsing/validation lives in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimDuration(pub Duration);
+
+impl ClaimDuration {
+    /// The default claim duration ([`DEFAULT_CLAIM_HOURS`] hours).
+    pub fn default_duration() -> Self {
+        ClaimDuration(Duration::hours(DEFAULT_CLAIM_HOURS))
+    }
+}
+
+impl std::str::FromStr for ClaimDuration {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            anyhow::bail!("Empty claim duration");
+        }
+
+        // Split into the leading number and an optional unit suffix.
+        let (num_part, unit) = match s.chars().last() {
+            Some(c) if c.is_ascii_alphabetic() => (&s[..s.len() - 1], c.to_ascii_lowercase()),
+            _ => (s, 'h'), // bare number => hours
+        };
+
+        let value: i64 = num_part.trim().parse().map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid claim duration: '{}'. Use forms like '48h', '2d', '90m', or a bare number of hours.",
+                s
+            )
+        })?;
+        if value <= 0 {
+            anyhow::bail!("Claim duration must be positive, got '{}'", s);
+        }
+
+        let duration = match unit {
+            'm' => Duration::minutes(value),
+            'h' => Duration::hours(value),
+            'd' => Duration::days(value),
+            other => anyhow::bail!(
+                "Invalid claim duration unit '{}' in '{}'. Valid units: m (minutes), h (hours), d (days).",
+                other,
+                s
+            ),
+        };
+
+        Ok(ClaimDuration(duration))
+    }
+}
 
 /// Issue status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +293,14 @@ pub struct Issue {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    /// When the current claim was taken (minibeads-specific). `None` if unclaimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// When the current claim expires (minibeads-specific). After this instant
+    /// the claim is stale and another worker may reclaim the issue. `None` if
+    /// unclaimed (or claimed via a plain `--assignee` with no expiry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_until: Option<DateTime<Utc>>,
 }
 
 impl Issue {
@@ -254,6 +324,22 @@ impl Issue {
             created_at: now,
             updated_at: now,
             closed_at: None,
+            claimed_at: None,
+            claimed_until: None,
+        }
+    }
+
+    /// Whether this issue is currently claimed and that claim is still active as
+    /// of `now`. A claim with no `claimed_until` (e.g. a plain `--assignee`) is
+    /// treated as held indefinitely; a claim past its `claimed_until` is stale
+    /// and reclaimable.
+    pub fn is_actively_claimed(&self, now: DateTime<Utc>) -> bool {
+        if self.assignee.is_empty() {
+            return false;
+        }
+        match self.claimed_until {
+            Some(until) => until > now,
+            None => true,
         }
     }
 
@@ -306,4 +392,69 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
     pub is_cycle: bool,
     pub depth_exceeded: bool,
+}
+
+#[cfg(test)]
+mod claim_type_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_duration_units() {
+        assert_eq!(
+            ClaimDuration::from_str("90m").unwrap().0,
+            Duration::minutes(90)
+        );
+        assert_eq!(
+            ClaimDuration::from_str("48h").unwrap().0,
+            Duration::hours(48)
+        );
+        assert_eq!(ClaimDuration::from_str("2d").unwrap().0, Duration::days(2));
+        // Bare number is hours.
+        assert_eq!(
+            ClaimDuration::from_str("12").unwrap().0,
+            Duration::hours(12)
+        );
+        // Case-insensitive unit.
+        assert_eq!(ClaimDuration::from_str("3H").unwrap().0, Duration::hours(3));
+    }
+
+    #[test]
+    fn rejects_bad_durations() {
+        assert!(ClaimDuration::from_str("").is_err());
+        assert!(ClaimDuration::from_str("0h").is_err());
+        assert!(ClaimDuration::from_str("-5h").is_err());
+        assert!(ClaimDuration::from_str("abc").is_err());
+        assert!(ClaimDuration::from_str("10y").is_err());
+    }
+
+    #[test]
+    fn default_duration_is_48h() {
+        assert_eq!(
+            ClaimDuration::default_duration().0,
+            Duration::hours(DEFAULT_CLAIM_HOURS)
+        );
+    }
+
+    #[test]
+    fn active_claim_detection() {
+        let now = Utc::now();
+        let mut issue = Issue::new("demo-1".to_string(), "t".to_string(), 2, IssueType::Task);
+
+        // Unclaimed.
+        assert!(!issue.is_actively_claimed(now));
+
+        // Claimed with a future expiry => active.
+        issue.assignee = "host-a".to_string();
+        issue.claimed_until = Some(now + Duration::hours(1));
+        assert!(issue.is_actively_claimed(now));
+
+        // Past expiry => stale.
+        issue.claimed_until = Some(now - Duration::hours(1));
+        assert!(!issue.is_actively_claimed(now));
+
+        // Assignee but no expiry => held indefinitely.
+        issue.claimed_until = None;
+        assert!(issue.is_actively_claimed(now));
+    }
 }

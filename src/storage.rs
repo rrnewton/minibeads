@@ -479,6 +479,132 @@ impl Storage {
         Ok(issue)
     }
 
+    /// Atomically claim an issue for `actor`.
+    ///
+    /// This is the local half of minibeads' git-as-coordination model: the claim
+    /// records `assignee`/`status=in_progress`/`claimed_at`/`claimed_until` in the
+    /// markdown file. The cross-machine "compare-and-swap" is the subsequent
+    /// `git push` (a losing push is rejected, the loser pulls and sees the issue
+    /// is taken). Within a single working copy the [`Lock`] serializes writers.
+    ///
+    /// Succeeds when the issue is unclaimed, when the existing claim has expired
+    /// (`claimed_until` in the past), or when `actor` already holds it (refresh /
+    /// extend). Fails with an "already claimed" error when another worker holds an
+    /// active claim. `extra_updates` carries any sibling field edits from
+    /// `mb update --claim` (the `status`/`assignee` keys are ignored: the claim
+    /// controls those).
+    pub fn claim_issue(
+        &self,
+        id: &str,
+        actor: &str,
+        claimed_until: chrono::DateTime<chrono::Utc>,
+        extra_updates: &HashMap<String, String>,
+    ) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        if issue.status == Status::Closed {
+            anyhow::bail!("Cannot claim {}: issue is closed", id);
+        }
+
+        // Compare-and-swap precondition: refuse if another worker holds an active
+        // claim. A claim by `actor` is allowed through (refresh/extend), as is a
+        // stale (expired) claim by anyone.
+        let now = chrono::Utc::now();
+        if issue.is_actively_claimed(now) && issue.assignee != actor {
+            let until = issue
+                .claimed_until
+                .map(|u| format!(" until {}", u.to_rfc3339()))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Issue {} is already claimed by '{}'{}",
+                id,
+                issue.assignee,
+                until
+            );
+        }
+
+        // Apply any sibling field edits, but never let them override the claim's
+        // own assignee/status.
+        for (key, value) in extra_updates {
+            match key.as_str() {
+                "title" => issue.title = value.clone(),
+                "description" => issue.description = value.clone(),
+                "design" => issue.design = value.clone(),
+                "notes" => issue.notes = value.clone(),
+                "acceptance_criteria" => issue.acceptance_criteria = value.clone(),
+                "priority" => issue.priority = value.parse()?,
+                "issue_type" => issue.issue_type = value.parse()?,
+                "external_ref" => {
+                    issue.external_ref = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.clone())
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        issue.assignee = actor.to_string();
+        issue.status = Status::InProgress;
+        issue.claimed_at = Some(now);
+        issue.claimed_until = Some(claimed_until);
+        issue.updated_at = now;
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
+    /// Release a claim, returning the issue to the backlog.
+    ///
+    /// Clears `assignee`/`claimed_at`/`claimed_until` and, if the issue was
+    /// `in_progress`, flips it back to `open` so `mb ready` surfaces it again.
+    /// Refuses to release a claim held by a different worker unless `force` is
+    /// set (a stale claim can also simply be reclaimed via [`claim_issue`]).
+    pub fn release_issue(&self, id: &str, actor: &str, force: bool) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        if !issue.assignee.is_empty() && issue.assignee != actor && !force {
+            anyhow::bail!(
+                "Issue {} is claimed by '{}', not '{}'. Use --force to release it anyway.",
+                id,
+                issue.assignee,
+                actor
+            );
+        }
+
+        issue.assignee = String::new();
+        issue.claimed_at = None;
+        issue.claimed_until = None;
+        if issue.status == Status::InProgress {
+            issue.status = Status::Open;
+        }
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
     /// Close an issue
     pub fn close_issue(&self, id: &str, _reason: &str) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
@@ -2419,5 +2545,150 @@ mod config_compat_tests {
 
         let storage = Storage::open(beads_dir).expect("open must tolerate commented prefix");
         assert_eq!(storage.get_prefix().unwrap(), "acme");
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    /// Create an initialized storage in a temp dir with a single open issue.
+    fn storage_with_one_issue() -> (tempfile::TempDir, Storage, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage =
+            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let issue = storage
+            .create_issue(
+                "A task".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .expect("create issue");
+        (tmp, storage, issue.id)
+    }
+
+    #[test]
+    fn claim_sets_assignee_status_and_window() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let until = Utc::now() + Duration::hours(48);
+        let empty = HashMap::new();
+
+        let issue = storage.claim_issue(&id, "host-a", until, &empty).unwrap();
+        assert_eq!(issue.assignee, "host-a");
+        assert_eq!(issue.status, Status::InProgress);
+        assert!(issue.claimed_at.is_some());
+        assert_eq!(issue.claimed_until, Some(until));
+    }
+
+    #[test]
+    fn claim_rejected_when_actively_claimed_by_other() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let until = Utc::now() + Duration::hours(48);
+        let empty = HashMap::new();
+
+        storage.claim_issue(&id, "host-a", until, &empty).unwrap();
+        let err = storage
+            .claim_issue(&id, "host-b", until, &empty)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already claimed"),
+            "unexpected error: {err}"
+        );
+        // The original holder must be untouched.
+        let issue = storage.get_issue(&id).unwrap().unwrap();
+        assert_eq!(issue.assignee, "host-a");
+    }
+
+    #[test]
+    fn same_actor_can_refresh_its_own_claim() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let empty = HashMap::new();
+        let first = Utc::now() + Duration::hours(1);
+        storage.claim_issue(&id, "host-a", first, &empty).unwrap();
+
+        let extended = Utc::now() + Duration::hours(72);
+        let issue = storage
+            .claim_issue(&id, "host-a", extended, &empty)
+            .unwrap();
+        assert_eq!(issue.assignee, "host-a");
+        assert_eq!(issue.claimed_until, Some(extended));
+    }
+
+    #[test]
+    fn expired_claim_can_be_taken_by_another_worker() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let empty = HashMap::new();
+        // A claim that already expired in the past.
+        let past = Utc::now() - Duration::hours(1);
+        storage.claim_issue(&id, "host-a", past, &empty).unwrap();
+
+        let fresh = Utc::now() + Duration::hours(48);
+        let issue = storage
+            .claim_issue(&id, "host-b", fresh, &empty)
+            .expect("stale claim should be reclaimable");
+        assert_eq!(issue.assignee, "host-b");
+    }
+
+    #[test]
+    fn claiming_a_closed_issue_fails() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        storage.close_issue(&id, "done").unwrap();
+        let until = Utc::now() + Duration::hours(1);
+        let err = storage
+            .claim_issue(&id, "host-a", until, &HashMap::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("closed"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn release_clears_claim_and_reopens() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let until = Utc::now() + Duration::hours(48);
+        storage
+            .claim_issue(&id, "host-a", until, &HashMap::new())
+            .unwrap();
+
+        let issue = storage.release_issue(&id, "host-a", false).unwrap();
+        assert!(issue.assignee.is_empty());
+        assert_eq!(issue.status, Status::Open);
+        assert!(issue.claimed_at.is_none());
+        assert!(issue.claimed_until.is_none());
+    }
+
+    #[test]
+    fn release_by_other_requires_force() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let until = Utc::now() + Duration::hours(48);
+        storage
+            .claim_issue(&id, "host-a", until, &HashMap::new())
+            .unwrap();
+
+        assert!(storage.release_issue(&id, "host-b", false).is_err());
+        let issue = storage.release_issue(&id, "host-b", true).unwrap();
+        assert!(issue.assignee.is_empty());
+    }
+
+    #[test]
+    fn claim_applies_sibling_updates_but_not_status_override() {
+        let (_tmp, storage, id) = storage_with_one_issue();
+        let until = Utc::now() + Duration::hours(48);
+        let mut updates = HashMap::new();
+        updates.insert("priority".to_string(), "0".to_string());
+        // A status override in the same call must be ignored by claim.
+        updates.insert("status".to_string(), "blocked".to_string());
+
+        let issue = storage.claim_issue(&id, "host-a", until, &updates).unwrap();
+        assert_eq!(issue.priority, 0);
+        assert_eq!(issue.status, Status::InProgress);
     }
 }

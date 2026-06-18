@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2025-11-23T06:03:01.588163229+00:00
+updated_at: 2026-06-18T22:20:47.055547180+00:00
 ---
 
 # Description
@@ -431,6 +431,9 @@ Validated CLI features at commit #98:
 - ✅ Export, rename, rename-prefix, ready --sort all feature-complete
 
 All P0, P1, and P2 features are complete. Many P3 features also completed.
+
+## Claiming / multi-agent coordination (IMPLEMENTED v0.18.0, minibeads-29)
+Issue claiming for cross-machine team coordination: `mb claim` / `mb update --claim` / `mb claim --release`. Atomic compare-and-swap on assignee+status=in_progress, with minibeads-only claimed_at/claimed_until frontmatter fields and stale-claim recovery (a claim past claimed_until is reclaimable). Goes beyond upstream bd's --claim, which has no expiry. assignee+status remain upstream-compatible.
 
 # Notes
 

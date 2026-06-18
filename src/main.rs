@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use storage::Storage;
-use types::{DependencyType, IssueType, Status};
+use types::{ClaimDuration, DependencyType, IssueType, Status};
 
 /// Generate long version string with git info and build date
 fn long_version() -> &'static str {
@@ -285,6 +285,58 @@ enum Commands {
         /// New external reference
         #[arg(long)]
         external_ref: Option<String>,
+
+        /// Atomically claim the issue: sets you as assignee and status to
+        /// in_progress, recording claimed_at/claimed_until. Fails if another
+        /// worker holds an active claim. (minibeads-specific)
+        #[arg(long)]
+        claim: bool,
+
+        /// Team suffix for the claim identity (assignee becomes `host/team`).
+        /// Only meaningful with --claim. (minibeads-specific)
+        #[arg(long, requires = "claim")]
+        team: Option<String>,
+
+        /// How long to hold the claim, e.g. `48h`, `2d`, `90m` (default 48h).
+        /// Only meaningful with --claim. (minibeads-specific)
+        #[arg(long = "for", requires = "claim")]
+        claim_for: Option<ClaimDuration>,
+
+        /// Override the claim identity instead of using the detected hostname.
+        /// Only meaningful with --claim. (minibeads-specific)
+        #[arg(long = "as", requires = "claim")]
+        claim_as: Option<String>,
+    },
+
+    /// Claim or release an issue for cross-machine coordination (minibeads-specific)
+    ///
+    /// Shorthand for `mb update --claim`. Sets you as assignee, flips status to
+    /// in_progress, and records claimed_at/claimed_until. The claim is enforced
+    /// across machines by committing and pushing the change: a losing push is
+    /// rejected, so the loser pulls and sees the issue is already taken.
+    Claim {
+        /// Issue IDs to claim (or release with --release)
+        issue_ids: Vec<String>,
+
+        /// Release the claim instead of taking it (returns the issue to the backlog)
+        #[arg(long)]
+        release: bool,
+
+        /// Team suffix for the claim identity (assignee becomes `host/team`)
+        #[arg(long)]
+        team: Option<String>,
+
+        /// How long to hold the claim, e.g. `48h`, `2d`, `90m` (default 48h)
+        #[arg(long = "for")]
+        claim_for: Option<ClaimDuration>,
+
+        /// Override the claim identity instead of using the detected hostname
+        #[arg(long = "as")]
+        claim_as: Option<String>,
+
+        /// With --release, release even a claim held by another worker
+        #[arg(long)]
+        force: bool,
     },
 
     /// Close one or more issues
@@ -845,6 +897,14 @@ fn run() -> Result<()> {
                     if !issue.assignee.is_empty() {
                         println!("Assignee: {}", issue.assignee);
                     }
+                    if let Some(until) = issue.claimed_until {
+                        let state = if issue.is_actively_claimed(chrono::Utc::now()) {
+                            "active"
+                        } else {
+                            "STALE"
+                        };
+                        println!("Claimed until: {} ({})", until.to_rfc3339(), state);
+                    }
                     if !issue.description.is_empty() {
                         println!("\nDescription:\n{}", issue.description);
                     }
@@ -870,6 +930,10 @@ fn run() -> Result<()> {
             acceptance,
             notes,
             external_ref,
+            claim,
+            team,
+            claim_for,
+            claim_as,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -910,7 +974,13 @@ fn run() -> Result<()> {
             // Update all specified issues
             let mut updated_issues = Vec::new();
             for issue_id in &issue_ids {
-                let issue = storage.update_issue(issue_id, updates.clone())?;
+                let issue = if claim {
+                    let actor = resolve_actor(team.as_deref(), claim_as.as_deref());
+                    let until = claim_deadline(claim_for);
+                    storage.claim_issue(issue_id, &actor, until, &updates)?
+                } else {
+                    storage.update_issue(issue_id, updates.clone())?
+                };
                 updated_issues.push(issue);
             }
 
@@ -918,7 +988,60 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&updated_issues)?);
             } else {
                 for issue in &updated_issues {
-                    println!("Updated issue: {}", issue.id);
+                    if claim {
+                        print_claim_result(issue);
+                    } else {
+                        println!("Updated issue: {}", issue.id);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Claim {
+            issue_ids,
+            release,
+            team,
+            claim_for,
+            claim_as,
+            force,
+        } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            if issue_ids.is_empty() {
+                anyhow::bail!(
+                    "No issue IDs given to {}",
+                    if release { "release" } else { "claim" }
+                );
+            }
+
+            let actor = resolve_actor(team.as_deref(), claim_as.as_deref());
+            let no_updates = HashMap::new();
+
+            let mut result_issues = Vec::new();
+            for issue_id in &issue_ids {
+                let issue = if release {
+                    storage.release_issue(issue_id, &actor, force)?
+                } else {
+                    let until = claim_deadline(claim_for);
+                    storage.claim_issue(issue_id, &actor, until, &no_updates)?
+                };
+                result_issues.push(issue);
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result_issues)?);
+            } else {
+                for issue in &result_issues {
+                    if release {
+                        println!("Released {} (was claimed by '{}')", issue.id, actor);
+                    } else {
+                        print_claim_result(issue);
+                    }
                 }
             }
             Ok(())
@@ -1653,6 +1776,75 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Detect this machine's short hostname for use as the default claim identity.
+///
+/// Tries the `HOSTNAME`/`COMPUTERNAME` environment variables first, then the
+/// `hostname` command, falling back to `"unknown-host"`. The result is reduced
+/// to the short name (everything before the first `.`) and any `/` is replaced
+/// so it cannot collide with the `host/team` separator.
+fn detect_host() -> String {
+    fn sanitize(raw: &str) -> Option<String> {
+        let short = raw.trim().split('.').next().unwrap_or("").trim();
+        if short.is_empty() {
+            None
+        } else {
+            Some(short.replace('/', "_"))
+        }
+    }
+
+    if let Some(h) = env::var("HOSTNAME").ok().and_then(|v| sanitize(&v)) {
+        return h;
+    }
+    if let Some(h) = env::var("COMPUTERNAME").ok().and_then(|v| sanitize(&v)) {
+        return h;
+    }
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            if let Some(h) = sanitize(&String::from_utf8_lossy(&output.stdout)) {
+                return h;
+            }
+        }
+    }
+    "unknown-host".to_string()
+}
+
+/// Resolve the claim identity (`assignee` value) for a claim.
+///
+/// The base identity is the detected hostname, or the `--as` override when given.
+/// A non-empty `--team` is appended as `base/team`. Team is expected to be empty
+/// most of the time; it only exists to distinguish multiple teams sharing one
+/// host.
+fn resolve_actor(team: Option<&str>, as_override: Option<&str>) -> String {
+    let base = match as_override {
+        Some(a) => a.to_string(),
+        None => detect_host(),
+    };
+    match team {
+        Some(t) if !t.is_empty() => format!("{base}/{t}"),
+        _ => base,
+    }
+}
+
+/// Compute the instant a claim should expire from an optional duration flag,
+/// defaulting to [`types::DEFAULT_CLAIM_HOURS`] hours.
+fn claim_deadline(claim_for: Option<ClaimDuration>) -> chrono::DateTime<chrono::Utc> {
+    let ClaimDuration(duration) = claim_for.unwrap_or_else(ClaimDuration::default_duration);
+    chrono::Utc::now() + duration
+}
+
+/// Print a human-readable summary of a successful claim.
+fn print_claim_result(issue: &types::Issue) {
+    match issue.claimed_until {
+        Some(until) => println!(
+            "Claimed {} as '{}' until {}",
+            issue.id,
+            issue.assignee,
+            until.to_rfc3339()
+        ),
+        None => println!("Claimed {} as '{}'", issue.id, issue.assignee),
+    }
+}
+
 fn print_quickstart() {
     println!(
         r#"mb - Dependency-Aware Issue Tracker
@@ -1691,6 +1883,24 @@ READY WORK
   mb ready       Show issues ready to work on
             Ready = status is 'open' AND no blocking dependencies
             Perfect for agents to claim next work!
+
+CLAIMING WORK (cross-machine coordination)
+  mb claim myapp-1       Claim an issue for yourself
+            Sets assignee to your hostname, status to in_progress, and records
+            claimed_at/claimed_until (default: 48h). Fails if another worker
+            already holds an active claim.
+  mb claim myapp-1 --for 4h   Claim for a custom window (e.g. 4h, 2d, 90m)
+  mb claim myapp-1 --team backend   Identity becomes 'host/backend'
+  mb claim myapp-1 --release  Release the claim (returns it to the backlog)
+  mb update myapp-1 --claim   Equivalent long form of 'mb claim'
+
+            HOW THE LOCK WORKS: a claim is just a small commit. Claim the issue,
+            commit, and push to the shared branch. If two machines race, the
+            losing 'git push' is rejected; that worker pulls, sees the issue is
+            claimed, and moves on. A claim past its claimed_until is stale and
+            may be reclaimed by anyone. Typical agent flow when starting work on
+            an already-committed backlog issue:
+              mb claim myapp-1 && git commit -am "claim myapp-1" && git push
 
 UPDATING ISSUES
   mb update myapp-1 --status in_progress
