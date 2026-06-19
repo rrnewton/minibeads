@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2026-06-18T22:20:47.055547180+00:00
+updated_at: 2026-06-19T03:41:17.933591163+00:00
 ---
 
 # Description
@@ -186,8 +186,9 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `--notes` - Additional notes ✅
 - `--external-ref` - New external reference ✅
 - Multiple issue IDs as arguments (bulk update) ✅
+- `--search/--replace [--field] [--replace-all]` - targeted aider-style edit of a text field (minibeads-30, minibeads-specific) ✅
 
-**Status:** ✅ Feature-complete with all short flags and bulk operations
+**Status:** ✅ Feature-complete with all short flags and bulk operations; plus minibeads-specific search/replace editing
 
 ---
 

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use storage::Storage;
-use types::{ClaimDuration, DependencyType, IssueType, Status};
+use types::{ClaimDuration, DependencyType, EditField, IssueType, Status};
 
 /// Generate long version string with git info and build date
 fn long_version() -> &'static str {
@@ -269,6 +269,32 @@ enum Commands {
         /// New description
         #[arg(short, long, allow_hyphen_values = true)]
         description: Option<String>,
+
+        /// Targeted edit: find this exact text in a field and swap it for
+        /// --replace, instead of overwriting the whole field. Safer for agents
+        /// than rewriting a long description wholesale. By default the text must
+        /// match exactly once. Requires --replace. (minibeads-specific)
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            requires = "replace",
+            conflicts_with_all = ["description", "title", "design", "acceptance", "notes", "claim"]
+        )]
+        search: Option<String>,
+
+        /// Replacement text for --search. (minibeads-specific)
+        #[arg(long, allow_hyphen_values = true, requires = "search")]
+        replace: Option<String>,
+
+        /// Which field --search/--replace edits: title, description, design,
+        /// notes, or acceptance (default: description). (minibeads-specific)
+        #[arg(long = "field", default_value = "description")]
+        search_field: EditField,
+
+        /// With --search, replace every occurrence instead of requiring the
+        /// search text to match exactly once. (minibeads-specific)
+        #[arg(long, requires = "search")]
+        replace_all: bool,
 
         /// New design notes
         #[arg(long, allow_hyphen_values = true)]
@@ -926,6 +952,10 @@ fn run() -> Result<()> {
             assignee,
             title,
             description,
+            search,
+            replace,
+            search_field,
+            replace_all,
             design,
             acceptance,
             notes,
@@ -940,6 +970,32 @@ fn run() -> Result<()> {
             // Log command after storage is validated
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            // Targeted search/replace edit. clap guarantees --search comes with
+            // --replace and is mutually exclusive with the wholesale field
+            // setters and --claim, so this is a self-contained mode.
+            if let Some(search) = search {
+                let replace = replace.unwrap_or_default();
+                let mut updated_issues = Vec::new();
+                for issue_id in &issue_ids {
+                    let issue = storage.search_replace_issue(
+                        issue_id,
+                        search_field,
+                        &search,
+                        &replace,
+                        replace_all,
+                    )?;
+                    updated_issues.push(issue);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&updated_issues)?);
+                } else {
+                    for issue in &updated_issues {
+                        println!("Updated issue: {} ({} field)", issue.id, search_field);
+                    }
+                }
+                return Ok(());
             }
 
             let mut updates = HashMap::new();
@@ -1906,6 +1962,22 @@ UPDATING ISSUES
   mb update myapp-1 --status in_progress
   mb update myapp-1 --priority 0
   mb update myapp-1 --assignee bob
+
+EDITING DESCRIPTIONS (do NOT hand-edit the .beads/*.md files!)
+  Always go through 'mb' to change an issue. To revise long text, use a
+  targeted search/replace edit instead of overwriting the whole field with
+  --description (which is error-prone and drops content):
+
+  mb update myapp-1 --search "old wording" --replace "new wording"
+  mb update myapp-1 --field design --search "foo" --replace "bar"
+  mb update myapp-1 --search "TODO" --replace "DONE" --replace-all
+
+            The --search text must match the field EXACTLY (including newlines)
+            and, by default, match exactly once -- include enough surrounding
+            context to be unambiguous. A missing or ambiguous match is an error
+            and the issue is left untouched, so the edit is safe to retry.
+            --field selects the text field (title, description, design, notes,
+            acceptance; default description).
 
 CLOSING ISSUES
   mb close myapp-1

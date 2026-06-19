@@ -1,7 +1,7 @@
 use crate::format::{issue_to_markdown, markdown_to_issue};
 use crate::hash;
 use crate::lock::Lock;
-use crate::types::{BlockedIssue, DependencyType, Issue, IssueType, Stats, Status};
+use crate::types::{BlockedIssue, DependencyType, EditField, Issue, IssueType, Stats, Status};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -473,6 +473,72 @@ impl Storage {
         issue.updated_at = chrono::Utc::now();
 
         // Write back
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
+    /// Apply a targeted search/replace edit to one free-text field of an issue.
+    ///
+    /// This is the safer alternative to overwriting a whole field via
+    /// [`update_issue`]: the caller supplies an exact `search` substring and its
+    /// `replace`ment, mirroring the "aider" edit pattern that LLM agents handle
+    /// far more reliably than wholesale rewrites or line-numbered diffs.
+    ///
+    /// By default the edit is refused unless `search` occurs **exactly once** in
+    /// the field, so an ambiguous or stale search cannot silently corrupt the
+    /// wrong location. Pass `replace_all = true` to rewrite every occurrence.
+    /// An empty `search`, a `search` that is not found, or (without
+    /// `replace_all`) a `search` that matches more than once is an error and the
+    /// file is left untouched.
+    pub fn search_replace_issue(
+        &self,
+        id: &str,
+        field: EditField,
+        search: &str,
+        replace: &str,
+        replace_all: bool,
+    ) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        if search.is_empty() {
+            anyhow::bail!("--search text must not be empty");
+        }
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        let target = issue.text_field_mut(field);
+        let occurrences = target.matches(search).count();
+        if occurrences == 0 {
+            anyhow::bail!(
+                "Search text not found in {} field of {}. The --search text must match the current contents exactly (including whitespace and newlines).",
+                field,
+                id
+            );
+        }
+        if occurrences > 1 && !replace_all {
+            anyhow::bail!(
+                "Search text matches {} times in {} field of {}. Add surrounding context so it matches exactly once, or pass --replace-all to replace every occurrence.",
+                occurrences,
+                field,
+                id
+            );
+        }
+
+        // replacen with the full count is equivalent to replace-all; the
+        // single-match path has already been bounded to one occurrence above.
+        let limit = if replace_all { occurrences } else { 1 };
+        *target = target.replacen(search, replace, limit);
+
+        issue.updated_at = chrono::Utc::now();
+
         let markdown = issue_to_markdown(&issue)?;
         fs::write(&issue_path, markdown).context("Failed to write issue file")?;
 
@@ -2690,5 +2756,110 @@ mod claim_tests {
         let issue = storage.claim_issue(&id, "host-a", until, &updates).unwrap();
         assert_eq!(issue.priority, 0);
         assert_eq!(issue.status, Status::InProgress);
+    }
+}
+
+#[cfg(test)]
+mod search_replace_tests {
+    use super::*;
+
+    /// Create an initialized storage with one issue whose description is `desc`.
+    fn storage_with_description(desc: &str) -> (tempfile::TempDir, Storage, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage =
+            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let issue = storage
+            .create_issue(
+                "A task".to_string(),
+                desc.to_string(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .expect("create issue");
+        (tmp, storage, issue.id)
+    }
+
+    #[test]
+    fn unique_match_is_replaced() {
+        let (_tmp, storage, id) = storage_with_description("hello world, hello there");
+        let issue = storage
+            .search_replace_issue(&id, EditField::Description, "world", "rust", false)
+            .unwrap();
+        assert_eq!(issue.description, "hello rust, hello there");
+    }
+
+    #[test]
+    fn missing_search_text_errors_and_leaves_file_untouched() {
+        let (_tmp, storage, id) = storage_with_description("unchanged body");
+        let err = storage
+            .search_replace_issue(&id, EditField::Description, "absent", "x", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"), "unexpected: {err}");
+        let issue = storage.get_issue(&id).unwrap().unwrap();
+        assert_eq!(issue.description, "unchanged body");
+    }
+
+    #[test]
+    fn ambiguous_match_errors_without_replace_all() {
+        let (_tmp, storage, id) = storage_with_description("a a a");
+        let err = storage
+            .search_replace_issue(&id, EditField::Description, "a", "b", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("3 times"), "unexpected: {err}");
+        // Nothing was written.
+        let issue = storage.get_issue(&id).unwrap().unwrap();
+        assert_eq!(issue.description, "a a a");
+    }
+
+    #[test]
+    fn replace_all_rewrites_every_occurrence() {
+        let (_tmp, storage, id) = storage_with_description("a a a");
+        let issue = storage
+            .search_replace_issue(&id, EditField::Description, "a", "b", true)
+            .unwrap();
+        assert_eq!(issue.description, "b b b");
+    }
+
+    #[test]
+    fn empty_search_is_rejected() {
+        let (_tmp, storage, id) = storage_with_description("body");
+        let err = storage
+            .search_replace_issue(&id, EditField::Description, "", "x", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn multiline_search_targets_selected_field() {
+        let (_tmp, storage, id) = storage_with_description("body");
+        storage
+            .update_issue(
+                &id,
+                HashMap::from([(
+                    "design".to_string(),
+                    "line one\nline two\nline three".to_string(),
+                )]),
+            )
+            .unwrap();
+        let issue = storage
+            .search_replace_issue(
+                &id,
+                EditField::Design,
+                "line two\nline three",
+                "line two only",
+                false,
+            )
+            .unwrap();
+        assert_eq!(issue.design, "line one\nline two only");
+        // The description field is untouched by a design-targeted edit.
+        assert_eq!(issue.description, "body");
     }
 }

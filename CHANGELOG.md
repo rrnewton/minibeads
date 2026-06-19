@@ -4,6 +4,32 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [0.19.0]
+
+### Added
+
+- **Targeted search/replace edits** (`mb update --search TEXT --replace TEXT`).
+  A safer alternative to overwriting a whole field with `--description`: find an
+  exact substring and swap it for the replacement, mirroring the "aider"
+  search/replace pattern that LLM agents handle far more reliably than wholesale
+  rewrites or line-numbered diffs. This discourages agents from hand-editing the
+  `.beads/*.md` files directly (which bypasses locking and corrupts state).
+
+  ```
+  mb update myapp-1 --search "old sentence" --replace "new sentence"
+  mb update myapp-1 --field design --search "foo" --replace "bar"
+  mb update myapp-1 --search "TODO" --replace "DONE" --replace-all
+  ```
+
+  By default the search text must match **exactly once**; a missing match, or an
+  ambiguous one (multiple matches without `--replace-all`), is an error and the
+  issue file is left untouched. `--field` selects which text field is edited
+  (`title`, `description`, `design`, `notes`, `acceptance`; default
+  `description`). `--search` is mutually exclusive with the wholesale field
+  setters and with `--claim`. `mb quickstart` now steers agents toward this
+  method. (minibeads-specific — upstream `bd` has no equivalent, so this is an
+  additive extension.)
+
 ## [0.18.0]
 
 ### Added

@@ -179,6 +179,12 @@ minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing th
 - `bd list [FILTERS]` - List issues with optional filters
 - `bd show ISSUE_ID` - Show detailed issue information
 - `bd update ISSUE_ID [OPTIONS]` - Update issue fields
+  - `--search TEXT --replace TEXT [--field FIELD] [--replace-all]` - targeted,
+    aider-style edit of a text field (default `description`) instead of
+    overwriting it wholesale. By default the search text must match exactly once;
+    a missing or ambiguous match is an error and the issue is left untouched.
+    This is the recommended way for agents to revise a long description — far
+    safer than rewriting the whole field. (minibeads-specific)
 - `bd close ISSUE_ID [--reason REASON]` - Close (complete) an issue
 - `bd reopen ISSUE_ID...` - Reopen closed issues
 

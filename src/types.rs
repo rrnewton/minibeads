@@ -157,6 +157,59 @@ impl std::str::FromStr for IssueType {
     }
 }
 
+/// A free-text field of an issue that a targeted search/replace edit can rewrite.
+///
+/// `mb update --search/--replace` swaps a substring of one of these fields rather
+/// than overwriting the whole field, which is the safer interface for agents
+/// editing long descriptions (the "aider" search/replace pattern). We use an
+/// explicit enum rather than a bare string key so the set of editable fields is
+/// closed and checked at compile time. (minibeads-specific)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditField {
+    Title,
+    Description,
+    Design,
+    Notes,
+    Acceptance,
+}
+
+impl EditField {
+    /// Canonical, user-facing name of this field.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EditField::Title => "title",
+            EditField::Description => "description",
+            EditField::Design => "design",
+            EditField::Notes => "notes",
+            EditField::Acceptance => "acceptance",
+        }
+    }
+}
+
+impl std::fmt::Display for EditField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for EditField {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "title" => Ok(EditField::Title),
+            "description" | "desc" => Ok(EditField::Description),
+            "design" => Ok(EditField::Design),
+            "notes" => Ok(EditField::Notes),
+            "acceptance" | "acceptance_criteria" => Ok(EditField::Acceptance),
+            _ => Err(anyhow::anyhow!(
+                "Invalid field: '{}'. Valid values are: title, description, design, notes, acceptance",
+                s
+            )),
+        }
+    }
+}
+
 /// Dependency type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -340,6 +393,19 @@ impl Issue {
         match self.claimed_until {
             Some(until) => until > now,
             None => true,
+        }
+    }
+
+    /// Mutable access to one of the issue's free-text fields, selected by
+    /// [`EditField`]. Used by targeted search/replace edits so the field name
+    /// validated at the CLI maps to exactly one storage location.
+    pub fn text_field_mut(&mut self, field: EditField) -> &mut String {
+        match field {
+            EditField::Title => &mut self.title,
+            EditField::Description => &mut self.description,
+            EditField::Design => &mut self.design,
+            EditField::Notes => &mut self.notes,
+            EditField::Acceptance => &mut self.acceptance_criteria,
         }
     }
 
