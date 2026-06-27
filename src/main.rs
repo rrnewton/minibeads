@@ -665,6 +665,9 @@ enum GithubCommands {
         /// Random seed for reproducing a stress-test sequence
         #[arg(long)]
         seed: Option<u64>,
+        /// Mutate a batch of issues before each sync, including deliberate conflicts
+        #[arg(long)]
+        adversarial: bool,
         /// Print each live stress action and verification step to stderr
         #[arg(long)]
         verbose: bool,
@@ -1839,9 +1842,11 @@ fn run() -> Result<()> {
                     iterations,
                     steps,
                     seed,
+                    adversarial,
                     verbose,
                 } => {
-                    let report = github::stress_test(&repo, iterations, steps, seed, verbose)?;
+                    let report =
+                        github::stress_test(&repo, iterations, steps, seed, adversarial, verbose)?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {

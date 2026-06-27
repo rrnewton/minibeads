@@ -10,11 +10,15 @@ issue tracker; the binary is named `mb`.
 
 - `mb show` now uses TTY-aware color and external markdown highlighting via
   `batcat`/`bat` when available, while keeping piped output plain.
+- `mb github stress-test --adversarial` now mutates a batch of temporary
+  GitHub-linked issues before syncing, including deliberate both-side conflicts.
 
 ### Fixed
 
 - `mb show` now displays notes and comments alongside description/design/
   acceptance content in one markdown-formatted issue view.
+- GitHub sync now leaves conflicted field ancestry untouched instead of
+  recording divergent local/remote hashes as if they were synced.
 
 ## [0.21.1]
 
