@@ -4,6 +4,23 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [0.20.2]
+
+### Added
+
+- Linked GitHub issues now receive a GitHub-side marker comment containing
+  `MB_DO_NOT_SYNC`, pointing back to the synced local minibeads issue. The marker
+  is excluded from comment sync.
+- Added `mb github stress-test -R owner/repo` for randomized real-GitHub sync
+  testing against a disposable repository.
+
+### Fixed
+
+- GitHub sync now repairs inherited divergent sync-state entries by pushing the
+  local issue fields to GitHub to establish a single common base. This fixes
+  cases where a closed local issue was linked to an open GitHub issue but future
+  syncs did nothing because both divergent hashes had been recorded as synced.
+
 ## [0.20.1]
 
 ### Fixed

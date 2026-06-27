@@ -648,6 +648,16 @@ enum GithubCommands {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// Stress-test GitHub sync against a disposable GitHub repository
+    StressTest {
+        /// GitHub repository, e.g. owner/repo
+        #[arg(short = 'R', long)]
+        repo: String,
+        /// Number of real GitHub issues to create and close
+        #[arg(short = 'n', long, default_value = "5")]
+        iterations: usize,
+    },
 }
 
 #[derive(serde::Serialize)]
@@ -1590,6 +1600,21 @@ fn run() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         print_github_report(&report, quiet, verbose);
+                    }
+                    return Ok(());
+                }
+                GithubCommands::StressTest { repo, iterations } => {
+                    let report = github::stress_test(&repo, iterations)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!(
+                            "GitHub sync stress test passed: {} iteration(s), {} issue(s) created and closed in {}",
+                            report.iterations, report.issues_created, report.repo
+                        );
+                        for issue in report.github_urls {
+                            println!("  {}", issue);
+                        }
                     }
                     return Ok(());
                 }

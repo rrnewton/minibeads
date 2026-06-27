@@ -214,12 +214,17 @@ issues are ignored.
 - `bd github list` - Show current minibeads-to-GitHub issue links
 - `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
 - `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
+- `bd github stress-test -R owner/repo [-n N]` - Create real temporary GitHub issues in a disposable repo and stress-test sync
 
 Synced fields are title, description/body, open/closed state, and append-only
 comments. minibeads keeps `.beads/github-sync-state.json` as the last-synced
 ancestry record so it can distinguish local-only changes, GitHub-only changes,
 and both-sides conflicts. Labels, priority, assignee, dependencies, and other
 minibeads-specific metadata remain local for now.
+
+Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
+viewing the GitHub issue can see which local minibeads issue owns the sync. That
+marker comment is ignored by comment sync and is not imported into minibeads.
 
 By default, `bd github sync` prints one informative line per linked issue plus a
 summary. Use `--quiet` for only the summary line, or `--verbose` to include
