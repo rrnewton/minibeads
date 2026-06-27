@@ -1,5 +1,6 @@
 mod code_patch;
 mod format;
+mod github;
 mod hash;
 mod lock;
 mod storage;
@@ -16,7 +17,7 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use storage::Storage;
+use storage::{is_github_issue_ref, Storage};
 use types::{ClaimDuration, DependencyType, EditField, IssueType, Status};
 
 /// Generate long version string with git info and build date
@@ -222,6 +223,10 @@ enum Commands {
         #[arg(short = 'l', long = "label")]
         labels: Vec<String>,
 
+        /// Show only issues linked to GitHub Issues (minibeads-specific)
+        #[arg(long)]
+        github: bool,
+
         /// Filter by specific issue IDs (comma-separated)
         #[arg(long)]
         id: Option<String>,
@@ -426,6 +431,18 @@ enum Commands {
         command: DepCommands,
     },
 
+    /// Manage issue comments (minibeads-specific)
+    Comments {
+        #[command(subcommand)]
+        command: CommentCommands,
+    },
+
+    /// Sync selected minibeads issues with GitHub Issues via gh (minibeads-specific)
+    Github {
+        #[command(subcommand)]
+        command: GithubCommands,
+    },
+
     /// Get statistics
     Stats,
 
@@ -571,6 +588,124 @@ enum DepCommands {
     Cycles,
 }
 
+#[derive(Subcommand)]
+enum CommentCommands {
+    /// Add a comment to an issue
+    Add {
+        issue_id: String,
+
+        /// Comment body
+        #[arg(short, long, allow_hyphen_values = true)]
+        body: String,
+    },
+
+    /// List comments for an issue
+    List { issue_id: String },
+}
+
+#[derive(Subcommand)]
+enum GithubCommands {
+    /// Link an existing minibeads issue to an existing GitHub issue
+    Link {
+        issue_id: String,
+        /// GitHub issue URL or number
+        github_issue: String,
+        /// GitHub repository, e.g. owner/repo. Required when github_issue is a number outside the current repo.
+        #[arg(short = 'R', long)]
+        repo: Option<String>,
+        /// Preview without writing local sync state
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Create a GitHub issue from a minibeads issue and link it
+    Publish {
+        issue_id: String,
+        /// GitHub repository, e.g. owner/repo
+        #[arg(short = 'R', long)]
+        repo: Option<String>,
+        /// Preview without creating the GitHub issue
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Sync all linked issues, or only the provided issue IDs
+    Sync {
+        issue_ids: Vec<String>,
+        /// GitHub repository override, e.g. owner/repo
+        #[arg(short = 'R', long)]
+        repo: Option<String>,
+        /// Preview changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+        /// Print only the one-line summary
+        #[arg(long, conflicts_with = "verbose")]
+        quiet: bool,
+        /// Print extra per-issue details
+        #[arg(long)]
+        verbose: bool,
+    },
+}
+
+fn print_github_summary(report: &github::GithubSyncReport) {
+    println!(
+        "GitHub sync: linked {}, created remote {}, pushed {}, pulled {}, comments exported {}, comments imported {}, conflicts {}",
+        report.linked,
+        report.created_remote,
+        report.pushed_issues,
+        report.pulled_issues,
+        report.exported_comments,
+        report.imported_comments,
+        report.conflicts.len()
+    );
+}
+
+fn print_github_report(report: &github::GithubSyncReport, quiet: bool, verbose: bool) {
+    if quiet {
+        print_github_summary(report);
+        return;
+    }
+
+    if report.issues.is_empty() {
+        println!("No GitHub-linked issues matched.");
+    } else {
+        for issue in &report.issues {
+            let mut extras = Vec::new();
+            if issue.comments_exported > 0 {
+                extras.push(format!("{} comment(s) exported", issue.comments_exported));
+            }
+            if issue.comments_imported > 0 {
+                extras.push(format!("{} comment(s) imported", issue.comments_imported));
+            }
+            if issue.conflict.is_some() {
+                extras.push("conflict".to_string());
+            }
+
+            let suffix = if extras.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", extras.join(", "))
+            };
+            println!(
+                "{}: {} -> {}{}",
+                issue.issue_id, issue.action, issue.github_url, suffix
+            );
+
+            if verbose {
+                println!("  title: {}", issue.title);
+                for detail in &issue.details {
+                    println!("  - {}", detail);
+                }
+                if let Some(conflict) = &issue.conflict {
+                    println!("  conflict: {}", conflict);
+                }
+            }
+        }
+    }
+
+    print_github_summary(report);
+}
+
 /// Print a dependency tree in a visual format
 fn print_dependency_tree(node: &types::TreeNode, depth: usize, prefix: &str, is_last: bool) {
     // Print the current node
@@ -637,6 +772,7 @@ fn run() -> Result<()> {
     let db = &cli.global_opts.db;
     let json = cli.global_opts.json;
     let mb_no_cmd_logging = cli.global_opts.mb_no_cmd_logging;
+    let actor = cli.global_opts.actor.clone();
 
     match cli.command {
         Commands::Init {
@@ -783,6 +919,7 @@ fn run() -> Result<()> {
             r#type,
             assignee,
             labels,
+            github,
             id,
             title,
             limit,
@@ -812,6 +949,15 @@ fn run() -> Result<()> {
             // Apply label filter (must have ALL specified labels)
             if !labels.is_empty() {
                 issues.retain(|issue| labels.iter().all(|label| issue.labels.contains(label)));
+            }
+
+            if github {
+                issues.retain(|issue| {
+                    issue
+                        .external_ref
+                        .as_deref()
+                        .is_some_and(is_github_issue_ref)
+                });
             }
 
             // Apply ID filter (comma-separated list of specific IDs)
@@ -1315,6 +1461,100 @@ fn run() -> Result<()> {
                             println!();
                         }
                     }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Comments { command } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            match command {
+                CommentCommands::Add { issue_id, body } => {
+                    let author = actor
+                        .as_deref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| resolve_actor(None, None));
+                    let comment = storage.add_comment(&issue_id, &author, &body)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&comment)?);
+                    } else {
+                        println!("Added comment: {}", comment.id);
+                    }
+                }
+                CommentCommands::List { issue_id } => {
+                    let comments = storage.list_comments(&issue_id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&comments)?);
+                    } else {
+                        for comment in comments {
+                            println!(
+                                "[{} at {}] {}\n{}",
+                                comment.author,
+                                comment.created_at.to_rfc3339(),
+                                comment.id,
+                                comment.body
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Github { command } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            let report = match command {
+                GithubCommands::Link {
+                    issue_id,
+                    github_issue,
+                    repo,
+                    dry_run,
+                } => github::link_issue(
+                    &storage,
+                    &issue_id,
+                    &github_issue,
+                    repo.as_deref(),
+                    dry_run,
+                )?,
+                GithubCommands::Publish {
+                    issue_id,
+                    repo,
+                    dry_run,
+                } => github::publish_issue(&storage, &issue_id, repo.as_deref(), dry_run)?,
+                GithubCommands::Sync {
+                    issue_ids,
+                    repo,
+                    dry_run,
+                    quiet,
+                    verbose,
+                } => {
+                    let report =
+                        github::sync_linked(&storage, &issue_ids, repo.as_deref(), dry_run)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_github_report(&report, quiet, verbose);
+                    }
+                    return Ok(());
+                }
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_github_summary(&report);
+                for conflict in report.conflicts {
+                    println!("Conflict: {}", conflict);
                 }
             }
             Ok(())

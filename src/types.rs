@@ -263,6 +263,24 @@ pub struct Dependency {
     pub dep_type: String,
 }
 
+/// File-backed issue comment.
+///
+/// Comments are stored outside the markdown issue body so syncing them to
+/// systems such as GitHub does not churn the main issue description.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Comment {
+    pub id: String,
+    pub issue_id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+}
+
 /// Custom serialization for depends_on HashMap -> dependencies array
 fn serialize_dependencies<S>(
     map: &HashMap<String, DependencyType>,

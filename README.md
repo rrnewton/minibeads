@@ -73,9 +73,11 @@ minibeads stores all data in `.beads/issues/` as markdown files:
 .beads/
 ├── config.yaml           # Contains issue-prefix
 ├── .gitignore           # Auto-managed (minibeads.lock, command_history.log)
-└── issues/
-    ├── myproject-1.md   # Issue files with YAML frontmatter
-    └── myproject-2.md
+├── issues/
+│   ├── myproject-1.md   # Issue files with YAML frontmatter
+│   └── myproject-2.md
+├── comments/            # Optional per-issue comment JSON files
+└── github-sync-state.json # Last-synced GitHub ancestry state, when used
 ```
 
 ### Issue Format
@@ -187,6 +189,8 @@ minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing th
     safer than rewriting the whole field. (minibeads-specific)
 - `bd close ISSUE_ID [--reason REASON]` - Close (complete) an issue
 - `bd reopen ISSUE_ID...` - Reopen closed issues
+- `bd comments add ISSUE_ID --body TEXT` - Add a local issue comment
+- `bd comments list ISSUE_ID` - List local issue comments
 
 ### Dependencies
 
@@ -198,6 +202,33 @@ minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing th
 - `bd ready [--assignee USER] [--priority N]` - Find ready work (no blockers)
 - `bd blocked` - Show blocked issues and what blocks them
 - `bd stats` - Show statistics (total, open, blocked, average lead time)
+- `bd list --github` - Show only issues linked to GitHub Issues
+
+### GitHub Issues Sync
+
+minibeads can sync a subset of issues with GitHub Issues using the authenticated
+`gh` CLI. Linked issues store the GitHub issue URL in `external_ref`; unlinked
+issues are ignored.
+
+- `bd github link ISSUE_ID GITHUB_ISSUE [-R owner/repo]` - Link to an existing GitHub issue
+- `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
+- `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
+
+Synced fields are title, description/body, open/closed state, and append-only
+comments. minibeads keeps `.beads/github-sync-state.json` as the last-synced
+ancestry record so it can distinguish local-only changes, GitHub-only changes,
+and both-sides conflicts. Labels, priority, assignee, dependencies, and other
+minibeads-specific metadata remain local for now.
+
+By default, `bd github sync` prints one informative line per linked issue plus a
+summary. Use `--quiet` for only the summary line, or `--verbose` to include
+field/comment details under each issue.
+
+Design note: upstream Beads has an `external_ref` field and import/collision
+logic around it, but does not provide this exact GitHub sync workflow in the
+vendored version. minibeads uses the same `external_ref` idea for the URL and
+keeps the sync ancestry outside the issue markdown to avoid churning normal
+issue fields.
 
 ### Options
 
@@ -219,7 +250,7 @@ minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing th
 - **No SQLite database**: Markdown is the only storage
 - **No issues.jsonl**: Markdown files are the source of truth
 - **Simpler locking**: Coarse-grained lock instead of per-issue locks
-- **No comments/events yet**: Planned for future releases (see minibeads-9, minibeads-10)
+- **File-backed comments**: Comments are stored separately from issue markdown
 - **Better markdown sanitization**: Auto-escapes section headers in user content
 
 ### Migration Path

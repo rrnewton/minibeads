@@ -1,9 +1,12 @@
 use crate::format::{issue_to_markdown, markdown_to_issue};
 use crate::hash;
 use crate::lock::Lock;
-use crate::types::{BlockedIssue, DependencyType, EditField, Issue, IssueType, Stats, Status};
+use crate::types::{
+    BlockedIssue, Comment, DependencyType, EditField, Issue, IssueType, Stats, Status,
+};
 use anyhow::{Context, Result};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,6 +84,10 @@ fn replace_ids_in_issue_text(issue: &mut Issue, id_mapping: &HashMap<String, Str
     issue.design = replace_issue_ids_in_text(&issue.design, id_mapping);
     issue.acceptance_criteria = replace_issue_ids_in_text(&issue.acceptance_criteria, id_mapping);
     issue.notes = replace_issue_ids_in_text(&issue.notes, id_mapping);
+}
+
+pub fn is_github_issue_ref(value: &str) -> bool {
+    value.starts_with("https://github.com/") && value.contains("/issues/")
 }
 
 impl Storage {
@@ -395,6 +402,120 @@ impl Storage {
         Self::populate_dependents_for_one(&all_issues, &mut issue);
 
         Ok(Some(issue))
+    }
+
+    fn comments_dir(&self) -> PathBuf {
+        self.beads_dir.join("comments")
+    }
+
+    fn comment_path(&self, issue_id: &str) -> PathBuf {
+        self.comments_dir().join(format!("{}.json", issue_id))
+    }
+
+    fn read_comments_no_lock(&self, issue_id: &str) -> Result<Vec<Comment>> {
+        let path = self.comment_path(issue_id);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut comments: Vec<Comment> = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        comments.sort_by_key(|c| c.created_at);
+        Ok(comments)
+    }
+
+    fn write_comments_no_lock(&self, issue_id: &str, comments: &[Comment]) -> Result<()> {
+        let comments_dir = self.comments_dir();
+        fs::create_dir_all(&comments_dir).context("Failed to create comments directory")?;
+
+        let mut sorted = comments.to_vec();
+        sorted.sort_by_key(|c| c.created_at);
+        let content =
+            serde_json::to_string_pretty(&sorted).context("Failed to serialize comments")?;
+        let path = self.comment_path(issue_id);
+        fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Add a local comment to an issue.
+    pub fn add_comment(&self, issue_id: &str, author: &str, body: &str) -> Result<Comment> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", issue_id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", issue_id);
+        }
+
+        let mut comments = self.read_comments_no_lock(issue_id)?;
+        let now = chrono::Utc::now();
+        let hash = Sha256::digest(format!(
+            "{}\n{}\n{}\n{}",
+            issue_id,
+            author,
+            body,
+            now.to_rfc3339()
+        ));
+        let id = format!("{}-c{:x}", issue_id, hash)
+            .chars()
+            .take(issue_id.len() + 12)
+            .collect::<String>();
+        let comment = Comment {
+            id,
+            issue_id: issue_id.to_string(),
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: now,
+            updated_at: now,
+            source_url: None,
+            source_id: None,
+        };
+        comments.push(comment.clone());
+        self.write_comments_no_lock(issue_id, &comments)?;
+        Ok(comment)
+    }
+
+    /// List comments for an issue.
+    pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+        self.read_comments_no_lock(issue_id)
+    }
+
+    /// Upsert comments imported from an external source.
+    pub fn upsert_comments(&self, issue_id: &str, incoming: Vec<Comment>) -> Result<usize> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+        let mut comments = self.read_comments_no_lock(issue_id)?;
+        let mut changed = 0;
+
+        for comment in incoming {
+            let existing = comments.iter_mut().find(|c| {
+                (!comment.source_id.as_deref().unwrap_or("").is_empty()
+                    && c.source_id == comment.source_id)
+                    || (!comment.source_url.as_deref().unwrap_or("").is_empty()
+                        && c.source_url == comment.source_url)
+                    || c.id == comment.id
+            });
+
+            if let Some(existing) = existing {
+                if *existing != comment {
+                    *existing = comment;
+                    changed += 1;
+                }
+            } else {
+                comments.push(comment);
+                changed += 1;
+            }
+        }
+
+        if changed > 0 {
+            self.write_comments_no_lock(issue_id, &comments)?;
+        }
+        Ok(changed)
     }
 
     /// Helper to load all issues without computing dependents (to avoid recursion)
@@ -2756,6 +2877,118 @@ mod claim_tests {
         let issue = storage.claim_issue(&id, "host-a", until, &updates).unwrap();
         assert_eq!(issue.priority, 0);
         assert_eq!(issue.status, Status::InProgress);
+    }
+}
+
+#[cfg(test)]
+mod github_metadata_tests {
+    use super::*;
+
+    fn storage() -> (tempfile::TempDir, Storage) {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage =
+            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        (tmp, storage)
+    }
+
+    #[test]
+    fn create_with_github_external_ref_preserves_labels() {
+        let (_tmp, storage) = storage();
+        let issue = storage
+            .create_issue(
+                "linked".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                vec!["bug".to_string()],
+                Some("https://github.com/owner/repo/issues/123".to_string()),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(issue.labels, vec!["bug".to_string()]);
+    }
+
+    #[test]
+    fn github_external_ref_can_be_detected_without_labels() {
+        let (_tmp, storage) = storage();
+        let issue = storage
+            .create_issue(
+                "local".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        storage
+            .update_issue(
+                &issue.id,
+                HashMap::from([(
+                    "external_ref".to_string(),
+                    "https://github.com/owner/repo/issues/456".to_string(),
+                )]),
+            )
+            .unwrap();
+
+        let issues = storage.list_issues(None, None, None, None, None).unwrap();
+        let github_ids: Vec<_> = issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .external_ref
+                    .as_deref()
+                    .is_some_and(is_github_issue_ref)
+            })
+            .map(|issue| issue.id.as_str())
+            .collect();
+        assert_eq!(github_ids, vec![issue.id.as_str()]);
+    }
+
+    #[test]
+    fn comments_round_trip_in_created_order() {
+        let (_tmp, storage) = storage();
+        let issue = storage
+            .create_issue(
+                "commented".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        let first = storage
+            .add_comment(&issue.id, "alice", "first comment")
+            .unwrap();
+        let second = storage
+            .add_comment(&issue.id, "bob", "second comment")
+            .unwrap();
+
+        let comments = storage.list_comments(&issue.id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, first.id);
+        assert_eq!(comments[0].body, "first comment");
+        assert_eq!(comments[1].id, second.id);
+        assert_eq!(comments[1].body, "second comment");
     }
 }
 
