@@ -657,6 +657,12 @@ enum GithubCommands {
         /// Number of real GitHub issues to create and close
         #[arg(short = 'n', long, default_value = "5")]
         iterations: usize,
+        /// Random mutation steps to run per temporary GitHub issue
+        #[arg(long, default_value = "8")]
+        steps: usize,
+        /// Random seed for reproducing a stress-test sequence
+        #[arg(long)]
+        seed: Option<u64>,
     },
 }
 
@@ -1604,14 +1610,23 @@ fn run() -> Result<()> {
                     }
                     return Ok(());
                 }
-                GithubCommands::StressTest { repo, iterations } => {
-                    let report = github::stress_test(&repo, iterations)?;
+                GithubCommands::StressTest {
+                    repo,
+                    iterations,
+                    steps,
+                    seed,
+                } => {
+                    let report = github::stress_test(&repo, iterations, steps, seed)?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         println!(
-                            "GitHub sync stress test passed: {} iteration(s), {} issue(s) created and closed in {}",
-                            report.iterations, report.issues_created, report.repo
+                            "GitHub sync stress test passed: {} iteration(s), {} step(s) each, {} issue(s) created and closed in {} (seed {})",
+                            report.iterations,
+                            report.steps,
+                            report.issues_created,
+                            report.repo,
+                            report.seed
                         );
                         for issue in report.github_urls {
                             println!("  {}", issue);

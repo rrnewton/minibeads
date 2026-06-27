@@ -4,7 +4,7 @@ use crate::storage::Storage;
 use crate::types::{Comment, Issue, IssueType, Status};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -66,6 +66,8 @@ pub struct GithubIssueSyncReport {
 pub struct GithubStressReport {
     pub repo: String,
     pub iterations: usize,
+    pub steps: usize,
+    pub seed: u64,
     pub issues_created: usize,
     pub github_urls: Vec<String>,
 }
@@ -810,9 +812,17 @@ async fn sync_linked_async(
     Ok(report)
 }
 
-pub fn stress_test(repo: &str, iterations: usize) -> Result<GithubStressReport> {
+pub fn stress_test(
+    repo: &str,
+    iterations: usize,
+    steps: usize,
+    seed: Option<u64>,
+) -> Result<GithubStressReport> {
     if iterations == 0 {
         return Err(anyhow!("--iterations must be greater than zero"));
+    }
+    if steps == 0 {
+        return Err(anyhow!("--steps must be greater than zero"));
     }
 
     let tmp = tempfile::tempdir().context("Failed to create temporary stress workspace")?;
@@ -822,6 +832,8 @@ pub fn stress_test(repo: &str, iterations: usize) -> Result<GithubStressReport> 
         false,
     )
     .context("Failed to initialize temporary stress minibeads database")?;
+    let seed = seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let mut rng = StdRng::seed_from_u64(seed);
     let run_id: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(8)
@@ -830,8 +842,8 @@ pub fn stress_test(repo: &str, iterations: usize) -> Result<GithubStressReport> 
 
     let mut urls = Vec::new();
     for i in 0..iterations {
-        let title = format!("mb gh sync stress {run_id} #{i}");
-        let body = format!("initial local body {run_id} #{i}");
+        let title = format!("mb gh sync stress {run_id} issue {i}");
+        let body = format!("initial local body {run_id} issue {i}");
         let issue = storage.create_issue(
             title.clone(),
             body.clone(),
@@ -859,98 +871,191 @@ pub fn stress_test(repo: &str, iterations: usize) -> Result<GithubStressReport> 
         assert_remote_matches(&remote, &title, &body, Status::Open)?;
         assert_marker_present(&remote, &issue.id)?;
 
-        let local_title = format!("local title {run_id} #{i}");
-        let local_body = format!("local body {run_id} #{i}");
-        storage.update_issue(
-            &issue.id,
-            HashMap::from([
-                ("title".to_string(), local_title.clone()),
-                ("description".to_string(), local_body.clone()),
-            ]),
-        )?;
-        sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-            .with_context(|| format!("stress local-to-GitHub sync failed for {}", issue.id))?;
-        let remote = gh_issue_view(&url, Some(repo))?;
-        assert_remote_matches(&remote, &local_title, &local_body, Status::Open)?;
-        assert_marker_present(&remote, &issue.id)?;
-        assert_marker_not_imported(&storage, &issue.id)?;
+        let mut expected = StressExpected {
+            title,
+            body,
+            status: Status::Open,
+            local_comment_bodies: Vec::new(),
+            remote_comment_bodies: Vec::new(),
+        };
+        assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
 
-        let mb_comment = format!("local comment {run_id} #{i}");
-        storage.add_comment(&issue.id, "stress-local", &mb_comment)?;
-        sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-            .with_context(|| format!("stress local comment sync failed for {}", issue.id))?;
-        let remote = gh_issue_view(&url, Some(repo))?;
-        let rendered = format!(
-            "_From minibeads {} by stress-local_\n\n{}",
-            issue.id, mb_comment
-        );
-        if !remote
-            .comments
-            .iter()
-            .any(|comment| comment.body == rendered)
-        {
-            return Err(anyhow!("local comment was not exported for {}", issue.id));
-        }
-        let exported_count = remote
-            .comments
-            .iter()
-            .filter(|comment| comment.body == rendered)
-            .count();
-        if exported_count != 1 {
-            return Err(anyhow!(
-                "local comment exported {} times for {}",
-                exported_count,
-                issue.id
-            ));
-        }
+        for step in 0..steps {
+            let action = rng.gen_range(0..8);
+            match action {
+                0 => {
+                    expected.title = format!("local title {run_id} issue {i} step {step}");
+                    expected.body = format!("local body {run_id} issue {i} step {step}");
+                    storage.update_issue(
+                        &issue.id,
+                        HashMap::from([
+                            ("title".to_string(), expected.title.clone()),
+                            ("description".to_string(), expected.body.clone()),
+                        ]),
+                    )?;
+                }
+                1 => {
+                    expected.title = format!("remote title {run_id} issue {i} step {step}");
+                    expected.body = format!("remote body {run_id} issue {i} step {step}");
+                    gh_status(&[
+                        "issue",
+                        "edit",
+                        &url,
+                        "--repo",
+                        repo,
+                        "--title",
+                        &expected.title,
+                        "--body",
+                        &expected.body,
+                    ])?;
+                }
+                2 => {
+                    let body = format!("local comment {run_id} issue {i} step {step}");
+                    storage.add_comment(&issue.id, "stress-local", &body)?;
+                    expected.local_comment_bodies.push(body);
+                }
+                3 => {
+                    let body = format!("remote comment {run_id} issue {i} step {step}");
+                    let remote_for_comment = gh_issue_view(&url, Some(repo))?;
+                    gh_issue_comment(&remote_for_comment, &body, Some(repo))?;
+                    expected.remote_comment_bodies.push(body);
+                }
+                4 => {
+                    storage.close_issue(&issue.id, "stress local close")?;
+                    expected.status = Status::Closed;
+                }
+                5 => {
+                    storage.reopen_issue(&issue.id)?;
+                    expected.status = Status::Open;
+                }
+                6 => {
+                    let remote = gh_issue_view(&url, Some(repo))?;
+                    if !remote.state.eq_ignore_ascii_case("closed") {
+                        gh_status(&["issue", "close", &url, "--repo", repo])?;
+                    }
+                    expected.status = Status::Closed;
+                }
+                _ => {
+                    let remote = gh_issue_view(&url, Some(repo))?;
+                    if remote.state.eq_ignore_ascii_case("closed") {
+                        gh_status(&["issue", "reopen", &url, "--repo", repo])?;
+                    }
+                    expected.status = Status::Open;
+                }
+            }
 
-        let remote_title = format!("remote title {run_id} #{i}");
-        let remote_body = format!("remote body {run_id} #{i}");
-        gh_status(&[
-            "issue",
-            "edit",
-            &url,
-            "--repo",
-            repo,
-            "--title",
-            &remote_title,
-            "--body",
-            &remote_body,
-        ])?;
-        let gh_comment = format!("remote comment {run_id} #{i}");
-        let remote_for_comment = gh_issue_view(&url, Some(repo))?;
-        gh_issue_comment(&remote_for_comment, &gh_comment, Some(repo))?;
-        sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-            .with_context(|| format!("stress GitHub-to-local sync failed for {}", issue.id))?;
-        let local = storage
-            .get_issue(&issue.id)?
-            .ok_or_else(|| anyhow!("local stress issue disappeared: {}", issue.id))?;
-        if local.title != remote_title || local.description != remote_body {
-            return Err(anyhow!("remote title/body was not pulled for {}", issue.id));
+            sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
+                .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
+            assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
+                .with_context(|| format!("stress convergence failed at step {}", step))?;
+
+            sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
+                .with_context(|| {
+                    format!("stress no-op sync failed for {} at step {}", issue.id, step)
+                })?;
+            assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
+                .with_context(|| format!("stress no-op convergence failed at step {}", step))?;
         }
-        let local_comments = storage.list_comments(&issue.id)?;
-        if !local_comments
-            .iter()
-            .any(|comment| comment.body == gh_comment)
-        {
-            return Err(anyhow!("remote comment was not imported for {}", issue.id));
-        }
-        assert_marker_not_imported(&storage, &issue.id)?;
 
         storage.close_issue(&issue.id, "stress complete")?;
+        expected.status = Status::Closed;
         sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
             .with_context(|| format!("stress close sync failed for {}", issue.id))?;
-        let remote = gh_issue_view(&url, Some(repo))?;
-        assert_remote_matches(&remote, &remote_title, &remote_body, Status::Closed)?;
-        assert_marker_present(&remote, &issue.id)?;
+        assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
     }
 
     Ok(GithubStressReport {
         repo: repo.to_string(),
         iterations,
+        steps,
+        seed,
         issues_created: urls.len(),
         github_urls: urls,
     })
+}
+
+struct StressExpected {
+    title: String,
+    body: String,
+    status: Status,
+    local_comment_bodies: Vec<String>,
+    remote_comment_bodies: Vec<String>,
+}
+
+fn assert_stress_converged(
+    storage: &Storage,
+    issue_id: &str,
+    url: &str,
+    repo: Option<&str>,
+    expected: &StressExpected,
+) -> Result<()> {
+    let local = storage
+        .get_issue(issue_id)?
+        .ok_or_else(|| anyhow!("local stress issue disappeared: {}", issue_id))?;
+    if local.title != expected.title {
+        return Err(anyhow!(
+            "local title mismatch for {}: expected {:?}, got {:?}",
+            issue_id,
+            expected.title,
+            local.title
+        ));
+    }
+    if local.description != expected.body {
+        return Err(anyhow!("local body mismatch for {}", issue_id));
+    }
+    if local.status != expected.status {
+        return Err(anyhow!(
+            "local status mismatch for {}: expected {}, got {}",
+            issue_id,
+            expected.status,
+            local.status
+        ));
+    }
+
+    let remote = gh_issue_view(url, repo)?;
+    assert_remote_matches(
+        &remote,
+        &expected.title,
+        &expected.body,
+        expected.status.clone(),
+    )?;
+    assert_marker_present(&remote, issue_id)?;
+    assert_marker_not_imported(storage, issue_id)?;
+
+    let local_comments = storage.list_comments(issue_id)?;
+    for body in &expected.remote_comment_bodies {
+        let count = local_comments
+            .iter()
+            .filter(|comment| comment.body == *body)
+            .count();
+        if count != 1 {
+            return Err(anyhow!(
+                "remote comment imported {} times for {}: {:?}",
+                count,
+                issue_id,
+                body
+            ));
+        }
+    }
+
+    for body in &expected.local_comment_bodies {
+        let rendered = format!("_From minibeads {} by stress-local_\n\n{}", issue_id, body);
+        let count = remote
+            .comments
+            .iter()
+            .filter(|comment| comment.body == rendered)
+            .count();
+        if count != 1 {
+            return Err(anyhow!(
+                "local comment exported {} times for {}: {:?}",
+                count,
+                issue_id,
+                body
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn assert_remote_matches(

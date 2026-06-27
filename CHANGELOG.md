@@ -11,8 +11,9 @@ issue tracker; the binary is named `mb`.
 - Linked GitHub issues now receive a GitHub-side marker comment containing
   `MB_DO_NOT_SYNC`, pointing back to the synced local minibeads issue. The marker
   is excluded from comment sync.
-- Added `mb github stress-test -R owner/repo` for randomized real-GitHub sync
-  testing against a disposable repository.
+- Added `mb github stress-test -R owner/repo` for seeded randomized
+  real-GitHub sync testing against a disposable repository, with `--steps` and
+  `--seed` controls for aggressive reproducible runs.
 - `mb github sync --verbose` now prints each underlying `gh` CLI call and its
   elapsed time to stderr.
 
