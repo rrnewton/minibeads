@@ -391,9 +391,20 @@ fn apply_remote_to_local(storage: &Storage, issue: &Issue, remote: &RemoteIssue)
 }
 
 fn import_remote_comments(storage: &Storage, issue: &Issue, remote: &RemoteIssue) -> Result<usize> {
+    let local_comments = storage.list_comments(&issue.id)?;
     let comments = remote
         .comments
         .iter()
+        .filter(|remote_comment| {
+            !local_comments.iter().any(|local| {
+                local.source_id.is_none()
+                    && remote_comment.body
+                        == format!(
+                            "_From minibeads {} by {}_\n\n{}",
+                            issue.id, local.author, local.body
+                        )
+            })
+        })
         .map(|c| Comment {
             id: format!("gh-{}", c.id),
             issue_id: issue.id.clone(),
