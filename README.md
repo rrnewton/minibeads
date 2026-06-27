@@ -228,7 +228,8 @@ marker comment is ignored by comment sync and is not imported into minibeads.
 
 By default, `bd github sync` prints one informative line per linked issue plus a
 summary. Use `--quiet` for only the summary line, or `--verbose` to include
-field/comment details under each issue.
+field/comment details under each issue and print each underlying `gh` CLI call
+with elapsed time to stderr.
 
 Design note: upstream Beads has an `external_ref` field and import/collision
 logic around it, but does not provide this exact GitHub sync workflow in the

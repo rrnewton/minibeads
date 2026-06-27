@@ -13,6 +13,8 @@ issue tracker; the binary is named `mb`.
   is excluded from comment sync.
 - Added `mb github stress-test -R owner/repo` for randomized real-GitHub sync
   testing against a disposable repository.
+- `mb github sync --verbose` now prints each underlying `gh` CLI call and its
+  elapsed time to stderr.
 
 ### Fixed
 

@@ -11,8 +11,26 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 const MARKER: &str = "MB_DO_NOT_SYNC";
+static TRACE_GH_CALLS: AtomicBool = AtomicBool::new(false);
+
+pub struct GhTraceGuard {
+    previous: bool,
+}
+
+impl Drop for GhTraceGuard {
+    fn drop(&mut self) {
+        TRACE_GH_CALLS.store(self.previous, Ordering::Relaxed);
+    }
+}
+
+pub fn trace_gh_calls(enabled: bool) -> GhTraceGuard {
+    let previous = TRACE_GH_CALLS.swap(enabled, Ordering::Relaxed);
+    GhTraceGuard { previous }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubSyncReport {
@@ -942,10 +960,30 @@ fn gh_status(args: &[&str]) -> Result<()> {
 }
 
 fn gh_output(args: &[&str]) -> Result<String> {
+    let started = Instant::now();
     let output = Command::new("gh")
         .args(args)
         .output()
         .with_context(|| format!("Failed to run gh {}", args.join(" ")))?;
+    let elapsed = started.elapsed();
+
+    if TRACE_GH_CALLS.load(Ordering::Relaxed) {
+        let status = if output.status.success() {
+            "ok".to_string()
+        } else {
+            output
+                .status
+                .code()
+                .map(|code| format!("exit {code}"))
+                .unwrap_or_else(|| "terminated".to_string())
+        };
+        eprintln!(
+            "gh {} -> {} in {:.3}s",
+            shell_quote_args(args),
+            status,
+            elapsed.as_secs_f64()
+        );
+    }
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -955,6 +993,26 @@ fn gh_output(args: &[&str]) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn shell_quote_args(args: &[&str]) -> String {
+    args.iter()
+        .map(|arg| shell_quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@'))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 fn parse_remote_issue(value: Value) -> Result<RemoteIssue> {

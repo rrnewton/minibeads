@@ -1594,6 +1594,7 @@ fn run() -> Result<()> {
                     quiet,
                     verbose,
                 } => {
+                    let _gh_trace = github::trace_gh_calls(verbose);
                     let report =
                         github::sync_linked(&storage, &issue_ids, repo.as_deref(), dry_run)?;
                     if json {
