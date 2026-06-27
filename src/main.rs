@@ -634,6 +634,49 @@ enum GithubCommands {
         dry_run: bool,
     },
 
+    /// Import unlinked GitHub issues as new linked minibeads issues
+    Import {
+        /// GitHub repository override, e.g. owner/repo
+        #[arg(short = 'R', long)]
+        repo: Option<String>,
+        /// Filter by state: open, closed, or all
+        #[arg(short = 's', long, value_parser = ["open", "closed", "all"])]
+        state: Option<String>,
+        /// Filter by label. May be provided multiple times.
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
+        /// Filter by assignee
+        #[arg(short = 'a', long)]
+        assignee: Option<String>,
+        /// Filter by author
+        #[arg(short = 'A', long)]
+        author: Option<String>,
+        /// Filter by mention
+        #[arg(long)]
+        mention: Option<String>,
+        /// Filter by milestone number or title
+        #[arg(short = 'm', long)]
+        milestone: Option<String>,
+        /// Filter by GitHub App author
+        #[arg(long)]
+        app: Option<String>,
+        /// Search query using GitHub issue search syntax
+        #[arg(short = 'S', long)]
+        search: Option<String>,
+        /// Maximum number of issues to fetch
+        #[arg(short = 'L', long)]
+        limit: Option<usize>,
+        /// Preview without creating local issues
+        #[arg(long)]
+        dry_run: bool,
+        /// Print only the one-line summary
+        #[arg(long, conflicts_with = "verbose")]
+        quiet: bool,
+        /// Print extra per-issue details
+        #[arg(long)]
+        verbose: bool,
+    },
+
     /// Sync all linked issues, or only the provided issue IDs
     Sync {
         issue_ids: Vec<String>,
@@ -739,6 +782,50 @@ fn print_github_report(report: &github::GithubSyncReport, quiet: bool, verbose: 
     }
 
     print_github_summary(report);
+}
+
+fn print_github_import_summary(report: &github::GithubImportReport) {
+    println!(
+        "GitHub import: imported {}, skipped existing {}",
+        report.imported, report.skipped_existing
+    );
+}
+
+fn print_github_import_report(report: &github::GithubImportReport, quiet: bool, verbose: bool) {
+    if quiet {
+        print_github_import_summary(report);
+        return;
+    }
+
+    if report.issues.is_empty() {
+        println!("No GitHub issues matched.");
+    } else {
+        for issue in &report.issues {
+            let local = issue
+                .issue_id
+                .as_ref()
+                .map(|id| format!(" -> {id}"))
+                .unwrap_or_default();
+            let comments = if issue.comments_imported > 0 {
+                format!(" ({} comment(s) imported)", issue.comments_imported)
+            } else {
+                String::new()
+            };
+            println!(
+                "{}: {}{}{}",
+                issue.github_url, issue.action, local, comments
+            );
+
+            if verbose {
+                println!("  title: {}", issue.title);
+                for detail in &issue.details {
+                    println!("  - {}", detail);
+                }
+            }
+        }
+    }
+
+    print_github_import_summary(report);
 }
 
 fn should_color_stdout() -> bool {
@@ -1820,6 +1907,43 @@ fn run() -> Result<()> {
                     repo,
                     dry_run,
                 } => github::publish_issue(&storage, &issue_id, repo.as_deref(), dry_run)?,
+                GithubCommands::Import {
+                    repo,
+                    state,
+                    labels,
+                    assignee,
+                    author,
+                    mention,
+                    milestone,
+                    app,
+                    search,
+                    limit,
+                    dry_run,
+                    quiet,
+                    verbose,
+                } => {
+                    let _gh_trace = github::trace_gh_calls(verbose);
+                    let options = github::GithubImportOptions {
+                        repo,
+                        state,
+                        labels,
+                        assignee,
+                        author,
+                        mention,
+                        milestone,
+                        app,
+                        search,
+                        limit,
+                        dry_run,
+                    };
+                    let report = github::import_issues(&storage, &options)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_github_import_report(&report, quiet, verbose);
+                    }
+                    return Ok(());
+                }
                 GithubCommands::Sync {
                     issue_ids,
                     repo,

@@ -215,6 +215,7 @@ issues are ignored.
 
 - `bd github link ISSUE_ID GITHUB_ISSUE [-R owner/repo]` - Link to an existing GitHub issue
 - `bd github list` - Show current minibeads-to-GitHub issue links
+- `bd github import [-R owner/repo] [--state open|closed|all] [--label LABEL] [--assignee USER] [--author USER] [--mention USER] [--milestone M] [--app APP] [--search QUERY] [--limit N] [--dry-run] [--quiet|--verbose]` - Import matching GitHub issues that are not already linked to minibeads issues
 - `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
 - `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
 - `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
@@ -228,6 +229,10 @@ minibeads-specific metadata remain local for now.
 Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
 viewing the GitHub issue can see which local minibeads issue owns the sync. That
 marker comment is ignored by comment sync and is not imported into minibeads.
+
+`bd github import` only creates local issues for GitHub issues whose URL is not
+already present in any local issue's `external_ref`; already linked issues remain
+the responsibility of `bd github sync`.
 
 By default, `bd github sync` prints one informative line per linked issue plus a
 summary. Use `--quiet` for only the summary line, or `--verbose` to include

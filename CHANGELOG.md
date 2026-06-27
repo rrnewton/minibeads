@@ -6,6 +6,11 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Added
+
+- Added `mb github import`, which imports matching unlinked GitHub Issues as new
+  linked minibeads issues while leaving already linked issues to normal sync.
+
 ### Fixed
 
 - `make validate` now builds the debug CLI before running routine tests and

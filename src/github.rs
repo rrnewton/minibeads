@@ -72,6 +72,41 @@ pub struct GithubStressReport {
     pub github_urls: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GithubImportOptions {
+    pub repo: Option<String>,
+    pub state: Option<String>,
+    pub labels: Vec<String>,
+    pub assignee: Option<String>,
+    pub author: Option<String>,
+    pub mention: Option<String>,
+    pub milestone: Option<String>,
+    pub app: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<usize>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubImportReport {
+    pub imported: usize,
+    pub skipped_existing: usize,
+    #[serde(default)]
+    pub issues: Vec<GithubImportedIssueReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubImportedIssueReport {
+    pub github_url: String,
+    pub title: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    pub comments_imported: usize,
+    #[serde(default)]
+    pub details: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct GithubSyncState {
     #[serde(default)]
@@ -574,6 +609,181 @@ pub fn sync_linked(
     dry_run: bool,
 ) -> Result<GithubSyncReport> {
     block_on_github(sync_linked_async(storage, issue_ids, repo, dry_run))
+}
+
+pub fn import_issues(
+    storage: &Storage,
+    options: &GithubImportOptions,
+) -> Result<GithubImportReport> {
+    block_on_github(import_issues_async(storage, options))
+}
+
+async fn import_issues_async(
+    storage: &Storage,
+    options: &GithubImportOptions,
+) -> Result<GithubImportReport> {
+    let store = GithubStore::new(options.repo.as_deref());
+    import_issues_with_store(storage, options, &store).await
+}
+
+async fn import_issues_with_store(
+    storage: &Storage,
+    options: &GithubImportOptions,
+    store: &GithubStore,
+) -> Result<GithubImportReport> {
+    let remote_issues = list_remote_issues(options, store).await?;
+    let existing_refs: HashSet<String> = storage
+        .list_issues(None, None, None, None, None)?
+        .into_iter()
+        .filter_map(|issue| issue.external_ref)
+        .collect();
+    let mut report = GithubImportReport {
+        imported: 0,
+        skipped_existing: 0,
+        issues: Vec::new(),
+    };
+
+    for remote in remote_issues {
+        let mut item = GithubImportedIssueReport {
+            github_url: remote.url.clone(),
+            title: remote.title.clone(),
+            action: "skipped-existing".to_string(),
+            issue_id: None,
+            comments_imported: 0,
+            details: Vec::new(),
+        };
+
+        if existing_refs.contains(&remote.url) {
+            report.skipped_existing += 1;
+            item.details
+                .push("GitHub URL is already linked to a minibeads issue".to_string());
+            report.issues.push(item);
+            continue;
+        }
+
+        if options.dry_run {
+            report.imported += 1;
+            item.action = "would-import".to_string();
+            item.comments_imported = remote
+                .comments
+                .iter()
+                .filter(|comment| !is_marker_comment(comment))
+                .count();
+            item.details
+                .push("would create a new linked minibeads issue".to_string());
+            report.issues.push(item);
+            continue;
+        }
+
+        let issue = storage.create_issue(
+            remote.title.clone(),
+            remote.body.clone(),
+            None,
+            None,
+            2,
+            IssueType::Task,
+            None,
+            Vec::new(),
+            Some(remote.url.clone()),
+            None,
+            Vec::new(),
+        )?;
+        let issue = if remote.state.eq_ignore_ascii_case("closed") {
+            storage.close_issue(&issue.id, "Imported closed GitHub issue")?
+        } else {
+            issue
+        };
+        let comments_imported = import_remote_comments(storage, &issue, &remote)?;
+        let handle = store.issue(&remote.url);
+        handle.ensure_marker(&issue).await?;
+        let remote_for_state = handle.snapshot_for_state().await?;
+        let comments = storage.list_comments(&issue.id)?;
+        remember_state(
+            &storage.get_beads_dir(),
+            &issue,
+            &remote_for_state,
+            &comments,
+        )?;
+
+        report.imported += 1;
+        item.action = "imported".to_string();
+        item.issue_id = Some(issue.id);
+        item.comments_imported = comments_imported;
+        item.details
+            .push("created local issue with GitHub URL in external_ref".to_string());
+        if remote.state.eq_ignore_ascii_case("closed") {
+            item.details
+                .push("created local issue as closed to match GitHub".to_string());
+        }
+        if comments_imported > 0 {
+            item.details
+                .push(format!("imported {} GitHub comment(s)", comments_imported));
+        }
+        report.issues.push(item);
+    }
+
+    Ok(report)
+}
+
+async fn list_remote_issues(
+    options: &GithubImportOptions,
+    store: &GithubStore,
+) -> Result<Vec<RemoteIssue>> {
+    let mut args = vec![
+        "issue".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+        "number,url,title,body,state,comments".to_string(),
+    ];
+    if let Some(repo) = &options.repo {
+        args.push("--repo".to_string());
+        args.push(repo.clone());
+    }
+    if let Some(state) = &options.state {
+        args.push("--state".to_string());
+        args.push(state.clone());
+    }
+    for label in &options.labels {
+        args.push("--label".to_string());
+        args.push(label.clone());
+    }
+    if let Some(assignee) = &options.assignee {
+        args.push("--assignee".to_string());
+        args.push(assignee.clone());
+    }
+    if let Some(author) = &options.author {
+        args.push("--author".to_string());
+        args.push(author.clone());
+    }
+    if let Some(mention) = &options.mention {
+        args.push("--mention".to_string());
+        args.push(mention.clone());
+    }
+    if let Some(milestone) = &options.milestone {
+        args.push("--milestone".to_string());
+        args.push(milestone.clone());
+    }
+    if let Some(app) = &options.app {
+        args.push("--app".to_string());
+        args.push(app.clone());
+    }
+    if let Some(search) = &options.search {
+        args.push("--search".to_string());
+        args.push(search.clone());
+    }
+    if let Some(limit) = options.limit {
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+
+    let value = store.gh_json(args).await?;
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("gh issue list returned non-array JSON"))?
+        .iter()
+        .cloned()
+        .map(parse_remote_issue)
+        .collect()
 }
 
 async fn sync_linked_async(
@@ -2071,6 +2281,50 @@ mod tests {
         (script.to_string_lossy().to_string(), log)
     }
 
+    #[cfg(unix)]
+    fn fake_gh_for_import(tmp: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = tmp.path().join("gh-import.log");
+        let list_json = tmp.path().join("issue-list.json");
+        let view_json = tmp.path().join("issue-view.json");
+        let script = tmp.path().join("gh-import-fake");
+        let comment = r#"{"id":"comment-2","url":"https://github.com/example/repo/issues/2#issuecomment-2","author":{"login":"octo"},"body":"remote import comment","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(
+            &list_json,
+            format!(
+                r#"[
+{{"url":"https://github.com/example/repo/issues/1","title":"Existing remote","body":"Existing remote body","state":"OPEN","comments":[]}},
+{{"url":"https://github.com/example/repo/issues/2","title":"New remote","body":"New remote body","state":"CLOSED","comments":[{}]}}
+]"#,
+                comment
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &view_json,
+            format!(
+                r#"{{"url":"https://github.com/example/repo/issues/2","title":"New remote","body":"New remote body","state":"CLOSED","comments":[{}]}}"#,
+                comment
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$1 $2\" in\n  'issue list') cat {} ;;\n  'issue view') cat {} ;;\n  'issue comment') exit 0 ;;\n  *) echo \"unexpected gh args: $*\" >&2; exit 99 ;;\nesac\n",
+                shell_quote_arg(&log.to_string_lossy()),
+                shell_quote_arg(&list_json.to_string_lossy()),
+                shell_quote_arg(&view_json.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        (script.to_string_lossy().to_string(), log)
+    }
+
     fn remote_comment(id: &str, body: &str) -> RemoteComment {
         RemoteComment {
             id: id.to_string(),
@@ -2178,6 +2432,77 @@ mod tests {
 
         let entry = state.issues.get(&remote.url).unwrap();
         assert_eq!(entry.synced_remote_comment_ids, vec!["regular"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_import_creates_only_unlinked_issues() {
+        let (tmp, storage, _issue) = storage_with_issue();
+        storage
+            .create_issue(
+                "Already linked".to_string(),
+                "Existing body".to_string(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                Some("https://github.com/example/repo/issues/1".to_string()),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let (program, log) = fake_gh_for_import(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+        let options = GithubImportOptions {
+            repo: Some("example/repo".to_string()),
+            state: Some("all".to_string()),
+            labels: vec!["bug".to_string()],
+            limit: Some(10),
+            ..GithubImportOptions::default()
+        };
+
+        let report = block_on_github(import_issues_with_store(&storage, &options, &store)).unwrap();
+
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped_existing, 1);
+        let imported = storage
+            .list_issues(None, None, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|issue| {
+                issue.external_ref.as_deref() == Some("https://github.com/example/repo/issues/2")
+            })
+            .unwrap();
+        assert_eq!(imported.title, "New remote");
+        assert_eq!(imported.description, "New remote body");
+        assert_eq!(imported.status, Status::Closed);
+
+        let comments = storage.list_comments(&imported.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].body, "remote import comment");
+        assert_eq!(comments[0].source_id.as_deref(), Some("comment-2"));
+
+        let state = load_state(&storage.get_beads_dir()).unwrap();
+        let entry = state
+            .issues
+            .get("https://github.com/example/repo/issues/2")
+            .unwrap();
+        assert_eq!(entry.local_id, imported.id);
+        assert_eq!(entry.synced_remote_comment_ids, vec!["comment-2"]);
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(
+            calls.contains(
+                "issue list --json number,url,title,body,state,comments --repo example/repo --state all --label bug --limit 10"
+            ),
+            "{calls}"
+        );
+        assert!(
+            calls.contains("issue comment https://github.com/example/repo/issues/2 --body"),
+            "{calls}"
+        );
     }
 
     #[cfg(unix)]
