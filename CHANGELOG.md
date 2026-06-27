@@ -4,6 +4,13 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [0.20.1]
+
+### Fixed
+
+- `mb github link` and `mb github publish` now use the same default per-issue
+  output as `mb github sync`, instead of printing only the summary line.
+
 ## [0.20.0]
 
 ### Added
