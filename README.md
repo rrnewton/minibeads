@@ -130,8 +130,11 @@ Set `BEADS_DB` or `MB_BEADS_DIR` environment variables, or let the MCP server au
 # Run all tests (unit + e2e)
 make test
 
-# Run full validation (test + fmt + clippy)
+# Run full validation (Rust tests + e2e + fmt + clippy)
 make validate
+
+# Run longer randomized/stress suites
+make stress-test
 
 # Format code
 make fmt

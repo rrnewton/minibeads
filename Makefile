@@ -1,4 +1,4 @@
-.PHONY: all build test validate validate-inner purge clean install help upstream bench
+.PHONY: all build test stress-test validate validate-inner purge clean install help upstream bench
 
 # Default target
 all: build
@@ -12,8 +12,12 @@ release:
 	cargo build --release
 
 # Run all tests
-test:
-	cargo test
+test: build
+	cargo test --lib --bins --test e2e_tests
+
+# Run longer randomized/stress suites
+stress-test:
+	cargo test --test random_minibeads
 
 upstream: beads/bd-upstream
 beads/bd-upstream:
@@ -61,8 +65,9 @@ help:
 	@echo "Minibeads Makefile targets:"
 	@echo "  make build     - Build debug binary"
 	@echo "  make release   - Build release binary"
-	@echo "  make test      - Run unit tests"
-	@echo "  make validate  - Run all validation checks (test, fmt, clippy)"
+	@echo "  make test      - Build debug binary, then run Rust tests and shell e2e tests"
+	@echo "  make validate  - Run all validation checks (test, e2e, fmt, clippy)"
+	@echo "  make stress-test - Run longer randomized/stress tests"
 	@echo "  make fmt       - Format code with rustfmt"
 	@echo "  make bench     - Run performance benchmarks"
 	@echo "  make clean     - Clean build artifacts"

@@ -6,6 +6,12 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Fixed
+
+- `make validate` now builds the debug CLI before running routine tests and
+  excludes long randomized stress tests, which are available via
+  `make stress-test`.
+
 ## [0.21.2] - 2026-06-27
 
 ### Added

@@ -659,7 +659,7 @@ async fn sync_linked_async(
             (false, _, _, _) => {
                 if !dry_run {
                     handle.edit_fields(&issue).await?;
-                    handle.set_state(issue.status.clone()).await?;
+                    handle.set_state(issue.status).await?;
                     remote_written = true;
                 }
                 item.action = if dry_run {
@@ -675,7 +675,7 @@ async fn sync_linked_async(
                 if local_hash != remote_hash {
                     if !dry_run {
                         handle.edit_fields(&issue).await?;
-                        handle.set_state(issue.status.clone()).await?;
+                        handle.set_state(issue.status).await?;
                         remote_written = true;
                     }
                     item.action = if dry_run {
@@ -719,7 +719,7 @@ async fn sync_linked_async(
             (_, _, true, false) => {
                 if !dry_run {
                     handle.edit_fields(&issue).await?;
-                    handle.set_state(issue.status.clone()).await?;
+                    handle.set_state(issue.status).await?;
                     remote_written = true;
                 }
                 item.action = if dry_run {
@@ -879,9 +879,15 @@ pub fn stress_test(
     }
 
     if adversarial {
-        return stress_test_adversarial(
-            &storage, repo, iterations, steps, seed, &run_id, &mut rng, verbose,
-        );
+        let context = AdversarialStressContext {
+            repo,
+            iterations,
+            steps,
+            seed,
+            run_id: &run_id,
+            verbose,
+        };
+        return stress_test_adversarial(&storage, &context, &mut rng);
     }
 
     let mut urls = Vec::new();
@@ -1108,27 +1114,31 @@ struct AdversarialIssue {
     remote_comment_bodies: Vec<String>,
 }
 
-fn stress_test_adversarial(
-    storage: &Storage,
-    repo: &str,
+struct AdversarialStressContext<'a> {
+    repo: &'a str,
     iterations: usize,
     steps: usize,
     seed: u64,
-    run_id: &str,
-    rng: &mut StdRng,
+    run_id: &'a str,
     verbose: bool,
+}
+
+fn stress_test_adversarial(
+    storage: &Storage,
+    context: &AdversarialStressContext<'_>,
+    rng: &mut StdRng,
 ) -> Result<GithubStressReport> {
     let mut issues = Vec::new();
-    for i in 0..iterations {
-        if verbose {
+    for i in 0..context.iterations {
+        if context.verbose {
             eprintln!(
                 "adversarial issue {}/{}: creating and publishing",
                 i + 1,
-                iterations
+                context.iterations
             );
         }
-        let title = format!("mb gh sync adversarial {run_id} issue {i}");
-        let body = format!("initial adversarial body {run_id} issue {i}");
+        let title = format!("mb gh sync adversarial {} issue {i}", context.run_id);
+        let body = format!("initial adversarial body {} issue {i}", context.run_id);
         let issue = storage.create_issue(
             title.clone(),
             body.clone(),
@@ -1142,7 +1152,7 @@ fn stress_test_adversarial(
             None,
             Vec::new(),
         )?;
-        let publish = publish_issue(storage, &issue.id, Some(repo), false)
+        let publish = publish_issue(storage, &issue.id, Some(context.repo), false)
             .with_context(|| format!("adversarial publish failed for {}", issue.id))?;
         let url = publish
             .issues
@@ -1162,7 +1172,7 @@ fn stress_test_adversarial(
             local_comment_bodies: Vec::new(),
             remote_comment_bodies: Vec::new(),
         };
-        assert_adversarial_issue(storage, Some(repo), &model)?;
+        assert_adversarial_issue(storage, Some(context.repo), &model)?;
         issues.push(model);
     }
 
@@ -1170,42 +1180,42 @@ fn stress_test_adversarial(
         .iter()
         .map(|issue| issue.id.clone())
         .collect::<Vec<_>>();
-    for step in 0..steps {
-        if verbose {
+    for step in 0..context.steps {
+        if context.verbose {
             eprintln!(
                 "adversarial round {}/{}: mutating {} issue(s) before one batch sync",
                 step + 1,
-                steps,
+                context.steps,
                 issues.len()
             );
         }
         for (idx, model) in issues.iter_mut().enumerate() {
-            apply_adversarial_mutation(storage, repo, run_id, step, idx, model, rng, verbose)?;
+            apply_adversarial_mutation(storage, context, step, idx, model, rng)?;
         }
 
-        let report = sync_linked(storage, &issue_ids, Some(repo), false)
+        let report = sync_linked(storage, &issue_ids, Some(context.repo), false)
             .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
-        assert_adversarial_batch(storage, Some(repo), &issues, &report)
+        assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
             .with_context(|| format!("adversarial convergence failed at round {}", step))?;
 
-        let noop = sync_linked(storage, &issue_ids, Some(repo), false)
+        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false)
             .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
-        assert_adversarial_batch(storage, Some(repo), &issues, &noop)
+        assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
             .with_context(|| format!("adversarial no-op check failed at round {}", step))?;
     }
 
     for model in &issues {
-        let remote = gh_issue_view(&model.url, Some(repo))?;
+        let remote = gh_issue_view(&model.url, Some(context.repo))?;
         if !remote.state.eq_ignore_ascii_case("closed") {
-            gh_status(&["issue", "close", &model.url, "--repo", repo])?;
+            gh_status(&["issue", "close", &model.url, "--repo", context.repo])?;
         }
     }
 
     Ok(GithubStressReport {
-        repo: repo.to_string(),
-        iterations,
-        steps,
-        seed,
+        repo: context.repo.to_string(),
+        iterations: context.iterations,
+        steps: context.steps,
+        seed: context.seed,
         issues_created: issues.len(),
         github_urls: issues.into_iter().map(|issue| issue.url).collect(),
     })
@@ -1213,13 +1223,11 @@ fn stress_test_adversarial(
 
 fn apply_adversarial_mutation(
     storage: &Storage,
-    repo: &str,
-    run_id: &str,
+    context: &AdversarialStressContext<'_>,
     step: usize,
     issue_index: usize,
     model: &mut AdversarialIssue,
     rng: &mut StdRng,
-    verbose: bool,
 ) -> Result<()> {
     let mut action = rng.gen_range(0..8);
     if model.field_conflict && action <= 5 {
@@ -1230,8 +1238,14 @@ fn apply_adversarial_mutation(
     match action {
         0 => {
             action_desc = "local title/body edit";
-            let title = format!("local adversarial title {run_id} {issue_index} {step}");
-            let body = format!("local adversarial body {run_id} {issue_index} {step}");
+            let title = format!(
+                "local adversarial title {} {issue_index} {step}",
+                context.run_id
+            );
+            let body = format!(
+                "local adversarial body {} {issue_index} {step}",
+                context.run_id
+            );
             storage.update_issue(
                 &model.id,
                 HashMap::from([
@@ -1246,10 +1260,24 @@ fn apply_adversarial_mutation(
         }
         1 => {
             action_desc = "GitHub title/body edit";
-            let title = format!("remote adversarial title {run_id} {issue_index} {step}");
-            let body = format!("remote adversarial body {run_id} {issue_index} {step}");
+            let title = format!(
+                "remote adversarial title {} {issue_index} {step}",
+                context.run_id
+            );
+            let body = format!(
+                "remote adversarial body {} {issue_index} {step}",
+                context.run_id
+            );
             gh_status(&[
-                "issue", "edit", &model.url, "--repo", repo, "--title", &title, "--body", &body,
+                "issue",
+                "edit",
+                &model.url,
+                "--repo",
+                context.repo,
+                "--title",
+                &title,
+                "--body",
+                &body,
             ])?;
             model.local_title = title.clone();
             model.local_body = body.clone();
@@ -1258,10 +1286,22 @@ fn apply_adversarial_mutation(
         }
         2 => {
             action_desc = "both-side title/body conflict";
-            let local_title = format!("conflict local title {run_id} {issue_index} {step}");
-            let local_body = format!("conflict local body {run_id} {issue_index} {step}");
-            let remote_title = format!("conflict remote title {run_id} {issue_index} {step}");
-            let remote_body = format!("conflict remote body {run_id} {issue_index} {step}");
+            let local_title = format!(
+                "conflict local title {} {issue_index} {step}",
+                context.run_id
+            );
+            let local_body = format!(
+                "conflict local body {} {issue_index} {step}",
+                context.run_id
+            );
+            let remote_title = format!(
+                "conflict remote title {} {issue_index} {step}",
+                context.run_id
+            );
+            let remote_body = format!(
+                "conflict remote body {} {issue_index} {step}",
+                context.run_id
+            );
             storage.update_issue(
                 &model.id,
                 HashMap::from([
@@ -1274,7 +1314,7 @@ fn apply_adversarial_mutation(
                 "edit",
                 &model.url,
                 "--repo",
-                repo,
+                context.repo,
                 "--title",
                 &remote_title,
                 "--body",
@@ -1294,18 +1334,23 @@ fn apply_adversarial_mutation(
         }
         4 => {
             action_desc = "GitHub close";
-            let remote = gh_issue_view(&model.url, Some(repo))?;
+            let remote = gh_issue_view(&model.url, Some(context.repo))?;
             if !remote.state.eq_ignore_ascii_case("closed") {
-                gh_status(&["issue", "close", &model.url, "--repo", repo])?;
+                gh_status(&["issue", "close", &model.url, "--repo", context.repo])?;
             }
             model.local_status = Status::Closed;
             model.remote_status = Status::Closed;
         }
         5 => {
             action_desc = "local status / GitHub field conflict";
-            let remote_title =
-                format!("status conflict remote title {run_id} {issue_index} {step}");
-            let remote_body = format!("status conflict remote body {run_id} {issue_index} {step}");
+            let remote_title = format!(
+                "status conflict remote title {} {issue_index} {step}",
+                context.run_id
+            );
+            let remote_body = format!(
+                "status conflict remote body {} {issue_index} {step}",
+                context.run_id
+            );
             if model.local_status == Status::Closed {
                 storage.reopen_issue(&model.id)?;
                 model.local_status = Status::Open;
@@ -1318,7 +1363,7 @@ fn apply_adversarial_mutation(
                 "edit",
                 &model.url,
                 "--repo",
-                repo,
+                context.repo,
                 "--title",
                 &remote_title,
                 "--body",
@@ -1330,20 +1375,26 @@ fn apply_adversarial_mutation(
         }
         6 => {
             action_desc = "local comment";
-            let body = format!("local adversarial comment {run_id} {issue_index} {step}");
+            let body = format!(
+                "local adversarial comment {} {issue_index} {step}",
+                context.run_id
+            );
             storage.add_comment(&model.id, "stress-local", &body)?;
             model.local_comment_bodies.push(body);
         }
         _ => {
             action_desc = "GitHub comment";
-            let body = format!("remote adversarial comment {run_id} {issue_index} {step}");
-            let remote = gh_issue_view(&model.url, Some(repo))?;
-            gh_issue_comment(&remote, &body, Some(repo))?;
+            let body = format!(
+                "remote adversarial comment {} {issue_index} {step}",
+                context.run_id
+            );
+            let remote = gh_issue_view(&model.url, Some(context.repo))?;
+            gh_issue_comment(&remote, &body, Some(context.repo))?;
             model.remote_comment_bodies.push(body);
         }
     }
 
-    if verbose {
+    if context.verbose {
         eprintln!(
             "adversarial round {} issue {}: {}{}",
             step + 1,
@@ -1406,7 +1457,7 @@ fn assert_adversarial_issue(
         &remote,
         &expected.remote_title,
         &expected.remote_body,
-        expected.remote_status.clone(),
+        expected.remote_status,
     )?;
     assert_marker_present(&remote, &expected.id)?;
     assert_marker_not_imported(storage, &expected.id)?;
@@ -1478,12 +1529,7 @@ fn assert_stress_converged(
     }
 
     let remote = gh_issue_view(url, repo)?;
-    assert_remote_matches(
-        &remote,
-        &expected.title,
-        &expected.body,
-        expected.status.clone(),
-    )?;
+    assert_remote_matches(&remote, &expected.title, &expected.body, expected.status)?;
     assert_marker_present(&remote, issue_id)?;
     assert_marker_not_imported(storage, issue_id)?;
 

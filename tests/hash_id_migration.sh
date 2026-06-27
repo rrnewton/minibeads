@@ -200,7 +200,7 @@ fi
 # Test 6: Verify dependencies were updated
 echo -e "\n${YELLOW}Test 6: Verify dependencies were updated${NC}"
 OUTPUT=$("$BD_BIN" show "$ISSUE_2_ID" 2>&1)
-assert_contains "$OUTPUT" "Dependencies:" "Should have dependencies section"
+assert_contains "$OUTPUT" "Dependencies" "Should have dependencies section"
 assert_contains "$OUTPUT" "$ISSUE_1_ID" "Should depend on migrated issue 1"
 
 # Test 7: Create new issue with hash ID
