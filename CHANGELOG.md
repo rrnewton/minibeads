@@ -18,6 +18,9 @@ issue tracker; the binary is named `mb`.
 
 ### Fixed
 
+- GitHub sync now routes issue operations through an async per-run `GithubStore`
+  cache, avoiding redundant `gh issue view` calls while keeping sync execution
+  sequential.
 - GitHub sync now repairs inherited divergent sync-state entries by pushing the
   local issue fields to GitHub to establish a single common base. This fixes
   cases where a closed local issue was linked to an open GitHub issue but future

@@ -9,10 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::{Mutex, Semaphore};
 
 const MARKER: &str = "MB_DO_NOT_SYNC";
 static TRACE_GH_CALLS: AtomicBool = AtomicBool::new(false);
@@ -104,6 +107,308 @@ struct RemoteComment {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
+struct GithubStore {
+    inner: Arc<GithubStoreInner>,
+}
+
+struct GithubStoreInner {
+    program: String,
+    repo: Option<String>,
+    marker_repo: String,
+    cache: Mutex<HashMap<String, Arc<Mutex<GithubIssueCache>>>>,
+    gh_limit: Semaphore,
+}
+
+#[derive(Debug, Default)]
+struct GithubIssueCache {
+    remote: Option<RemoteIssue>,
+    comments_dirty: bool,
+}
+
+#[derive(Clone)]
+struct GithubIssueHandle {
+    store: GithubStore,
+    reference: String,
+}
+
+impl GithubStore {
+    fn new(repo: Option<&str>) -> Self {
+        Self {
+            inner: Arc::new(GithubStoreInner {
+                program: "gh".to_string(),
+                repo: repo.map(ToString::to_string),
+                marker_repo: local_repo_name().unwrap_or_else(|| "unknown repository".to_string()),
+                cache: Mutex::new(HashMap::new()),
+                gh_limit: Semaphore::new(1),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_program(repo: Option<&str>, program: impl Into<String>) -> Self {
+        Self {
+            inner: Arc::new(GithubStoreInner {
+                program: program.into(),
+                repo: repo.map(ToString::to_string),
+                marker_repo: "test/repo".to_string(),
+                cache: Mutex::new(HashMap::new()),
+                gh_limit: Semaphore::new(1),
+            }),
+        }
+    }
+
+    fn issue(&self, reference: impl Into<String>) -> GithubIssueHandle {
+        GithubIssueHandle {
+            store: self.clone(),
+            reference: reference.into(),
+        }
+    }
+
+    async fn create_issue(&self, issue: &Issue) -> Result<RemoteIssue> {
+        let mut args = vec![
+            "issue".to_string(),
+            "create".to_string(),
+            "--title".to_string(),
+            issue.title.clone(),
+            "--body".to_string(),
+            issue.description.clone(),
+        ];
+        self.push_repo_args(&mut args);
+        let output = self.gh_output(args).await?;
+        let url = output
+            .lines()
+            .find(|line| is_github_issue_url(line.trim()))
+            .map(str::trim)
+            .ok_or_else(|| anyhow!("gh issue create did not return a GitHub issue URL"))?;
+        let remote = self.issue(url).refresh().await?;
+        Ok(remote)
+    }
+
+    fn push_repo_args(&self, args: &mut Vec<String>) {
+        if let Some(repo) = &self.inner.repo {
+            args.push("--repo".to_string());
+            args.push(repo.clone());
+        }
+    }
+
+    async fn gh_json(&self, args: Vec<String>) -> Result<Value> {
+        let printable = args.join(" ");
+        let output = self.gh_output(args).await?;
+        serde_json::from_str(&output)
+            .with_context(|| format!("Failed to parse gh JSON from gh {printable}"))
+    }
+
+    async fn gh_status(&self, args: Vec<String>) -> Result<()> {
+        self.gh_output(args).await.map(|_| ())
+    }
+
+    async fn gh_output(&self, args: Vec<String>) -> Result<String> {
+        let _permit = self
+            .inner
+            .gh_limit
+            .acquire()
+            .await
+            .context("GitHub command limiter closed")?;
+        gh_output_async(&self.inner.program, args).await
+    }
+
+    fn marker_body(&self, issue: &Issue) -> String {
+        marker_body_for_repo(issue, &self.inner.marker_repo)
+    }
+}
+
+impl GithubIssueHandle {
+    async fn get(&self) -> Result<RemoteIssue> {
+        let entry = self.entry().await;
+        let mut cache = entry.lock().await;
+        if let Some(remote) = &cache.remote {
+            return Ok(remote.clone());
+        }
+
+        let remote = self.fetch().await?;
+        cache.remote = Some(remote.clone());
+        drop(cache);
+        self.alias_url(&remote.url, entry).await;
+        Ok(remote)
+    }
+
+    async fn refresh(&self) -> Result<RemoteIssue> {
+        let entry = self.entry().await;
+        let mut cache = entry.lock().await;
+        let remote = self.fetch().await?;
+        cache.remote = Some(remote.clone());
+        cache.comments_dirty = false;
+        drop(cache);
+        self.alias_url(&remote.url, entry).await;
+        Ok(remote)
+    }
+
+    async fn ensure_marker(&self, issue: &Issue) -> Result<()> {
+        let remote = self.get().await?;
+        if remote
+            .comments
+            .iter()
+            .any(|comment| is_marker_comment(comment) && comment.body.contains(&issue.id))
+        {
+            return Ok(());
+        }
+
+        let body = self.store.marker_body(issue);
+        self.add_comment_raw(&body).await?;
+        self.mutate_cached_remote(|remote| {
+            remote.comments.push(RemoteComment {
+                id: format!("synthetic-marker-{}", issue.id),
+                url: remote.url.clone(),
+                author: "minibeads".to_string(),
+                body,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            });
+            Ok(())
+        })
+        .await
+    }
+
+    async fn edit_fields(&self, issue: &Issue) -> Result<()> {
+        let remote = self.get().await?;
+        let mut args = vec![
+            "issue".to_string(),
+            "edit".to_string(),
+            remote.url.clone(),
+            "--title".to_string(),
+            issue.title.clone(),
+            "--body".to_string(),
+            issue.description.clone(),
+        ];
+        self.store.push_repo_args(&mut args);
+        self.store.gh_status(args).await?;
+        self.mutate_cached_remote(|remote| {
+            remote.title = issue.title.clone();
+            remote.body = issue.description.clone();
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_state(&self, status: Status) -> Result<()> {
+        let remote = self.get().await?;
+        let is_closed = remote.state.eq_ignore_ascii_case("closed");
+        match status {
+            Status::Closed if !is_closed => {
+                let mut args = vec!["issue".to_string(), "close".to_string(), remote.url.clone()];
+                self.store.push_repo_args(&mut args);
+                self.store.gh_status(args).await?;
+                self.mutate_cached_remote(|remote| {
+                    remote.state = "CLOSED".to_string();
+                    Ok(())
+                })
+                .await?;
+            }
+            status if status != Status::Closed && is_closed => {
+                let mut args = vec![
+                    "issue".to_string(),
+                    "reopen".to_string(),
+                    remote.url.clone(),
+                ];
+                self.store.push_repo_args(&mut args);
+                self.store.gh_status(args).await?;
+                self.mutate_cached_remote(|remote| {
+                    remote.state = "OPEN".to_string();
+                    Ok(())
+                })
+                .await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn add_comment(&self, body: &str) -> Result<bool> {
+        let remote = self.get().await?;
+        if remote.comments.iter().any(|comment| comment.body == body) {
+            return Ok(false);
+        }
+        self.add_comment_raw(body).await?;
+        let entry = self.entry().await;
+        let mut cache = entry.lock().await;
+        cache.comments_dirty = true;
+        Ok(true)
+    }
+
+    async fn snapshot_for_state(&self) -> Result<RemoteIssue> {
+        let entry = self.entry().await;
+        let comments_dirty = entry.lock().await.comments_dirty;
+        if comments_dirty {
+            self.refresh().await
+        } else {
+            self.get().await
+        }
+    }
+
+    async fn entry(&self) -> Arc<Mutex<GithubIssueCache>> {
+        let mut cache = self.store.inner.cache.lock().await;
+        cache
+            .entry(self.reference.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(GithubIssueCache::default())))
+            .clone()
+    }
+
+    async fn alias_url(&self, url: &str, entry: Arc<Mutex<GithubIssueCache>>) {
+        if url == self.reference {
+            return;
+        }
+        let mut cache = self.store.inner.cache.lock().await;
+        cache.entry(url.to_string()).or_insert(entry);
+    }
+
+    async fn fetch(&self) -> Result<RemoteIssue> {
+        let mut args = vec![
+            "issue".to_string(),
+            "view".to_string(),
+            self.reference.clone(),
+            "--json".to_string(),
+            "number,url,title,body,state,comments".to_string(),
+        ];
+        self.store.push_repo_args(&mut args);
+        let value = self.store.gh_json(args).await?;
+        parse_remote_issue(value)
+    }
+
+    async fn add_comment_raw(&self, body: &str) -> Result<()> {
+        let remote = self.get().await?;
+        let mut args = vec![
+            "issue".to_string(),
+            "comment".to_string(),
+            remote.url,
+            "--body".to_string(),
+            body.to_string(),
+        ];
+        self.store.push_repo_args(&mut args);
+        self.store.gh_status(args).await
+    }
+
+    async fn mutate_cached_remote(
+        &self,
+        f: impl FnOnce(&mut RemoteIssue) -> Result<()>,
+    ) -> Result<()> {
+        let entry = self.entry().await;
+        let mut cache = entry.lock().await;
+        let Some(remote) = cache.remote.as_mut() else {
+            return Err(anyhow!("GitHub issue cache missing {}", self.reference));
+        };
+        f(remote)
+    }
+}
+
+fn block_on_github<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to initialize GitHub async runtime")?
+        .block_on(future)
+}
+
 pub fn link_issue(
     storage: &Storage,
     issue_id: &str,
@@ -111,7 +416,21 @@ pub fn link_issue(
     repo: Option<&str>,
     dry_run: bool,
 ) -> Result<GithubSyncReport> {
-    let remote = gh_issue_view(reference, repo)?;
+    block_on_github(link_issue_async(
+        storage, issue_id, reference, repo, dry_run,
+    ))
+}
+
+async fn link_issue_async(
+    storage: &Storage,
+    issue_id: &str,
+    reference: &str,
+    repo: Option<&str>,
+    dry_run: bool,
+) -> Result<GithubSyncReport> {
+    let store = GithubStore::new(repo);
+    let handle = store.issue(reference);
+    let remote = handle.get().await?;
 
     if !dry_run {
         let mut updates = HashMap::new();
@@ -121,10 +440,10 @@ pub fn link_issue(
         let issue = storage
             .get_issue(issue_id)?
             .ok_or_else(|| anyhow!("Issue not found after link: {}", issue_id))?;
-        ensure_remote_marker(&issue, &remote, repo)?;
-        let remote = gh_issue_view(&remote.url, repo)?;
+        handle.ensure_marker(&issue).await?;
         import_remote_comments(storage, &issue, &remote)?;
         let comments = storage.list_comments(issue_id)?;
+        let remote = handle.snapshot_for_state().await?;
         remember_state(
             storage.get_beads_dir().as_path(),
             &issue,
@@ -155,6 +474,15 @@ pub fn link_issue(
 }
 
 pub fn publish_issue(
+    storage: &Storage,
+    issue_id: &str,
+    repo: Option<&str>,
+    dry_run: bool,
+) -> Result<GithubSyncReport> {
+    block_on_github(publish_issue_async(storage, issue_id, repo, dry_run))
+}
+
+async fn publish_issue_async(
     storage: &Storage,
     issue_id: &str,
     repo: Option<&str>,
@@ -194,20 +522,21 @@ pub fn publish_issue(
         });
     }
 
-    let remote = gh_issue_create(&issue, repo)?;
+    let store = GithubStore::new(repo);
+    let handle_remote = store.create_issue(&issue).await?;
+    let handle = store.issue(&handle_remote.url);
     let mut updates = HashMap::new();
-    updates.insert("external_ref".to_string(), remote.url.clone());
+    updates.insert("external_ref".to_string(), handle_remote.url.clone());
     storage.update_issue(issue_id, updates)?;
 
     let issue = storage
         .get_issue(issue_id)?
         .ok_or_else(|| anyhow!("Issue not found after publish: {}", issue_id))?;
-    ensure_remote_marker(&issue, &remote, repo)?;
-    let remote = gh_issue_view(&remote.url, repo)?;
+    handle.ensure_marker(&issue).await?;
     let local_comments = storage.list_comments(issue_id)?;
     let exported =
-        export_new_local_comments(&issue, &remote, &local_comments, &HashSet::new(), repo)?;
-    let remote = gh_issue_view(&remote.url, repo)?;
+        export_new_local_comments(&issue, &handle, &local_comments, &HashSet::new()).await?;
+    let remote = handle.snapshot_for_state().await?;
     remember_state(
         storage.get_beads_dir().as_path(),
         &issue,
@@ -242,6 +571,16 @@ pub fn sync_linked(
     repo: Option<&str>,
     dry_run: bool,
 ) -> Result<GithubSyncReport> {
+    block_on_github(sync_linked_async(storage, issue_ids, repo, dry_run))
+}
+
+async fn sync_linked_async(
+    storage: &Storage,
+    issue_ids: &[String],
+    repo: Option<&str>,
+    dry_run: bool,
+) -> Result<GithubSyncReport> {
+    let store = GithubStore::new(repo);
     let beads_dir = storage.get_beads_dir();
     let mut state = load_state(&beads_dir)?;
     let mut report = GithubSyncReport {
@@ -269,15 +608,11 @@ pub fn sync_linked(
             continue;
         }
 
-        let remote = gh_issue_view(&url, repo)?;
+        let handle = store.issue(&url);
+        let remote = handle.get().await?;
         if !dry_run {
-            ensure_remote_marker(&issue, &remote, repo)?;
+            handle.ensure_marker(&issue).await?;
         }
-        let remote = if dry_run {
-            remote
-        } else {
-            gh_issue_view(&url, repo)?
-        };
         let local_comments = storage.list_comments(&issue.id)?;
         let old_state = state.issues.get(&url);
         let local_hash = hash_local_issue(&issue);
@@ -299,6 +634,7 @@ pub fn sync_linked(
             details: Vec::new(),
             conflict: None,
         };
+        let mut remote_written = false;
 
         match (
             old_state.is_some(),
@@ -308,12 +644,9 @@ pub fn sync_linked(
         ) {
             (false, _, _, _) => {
                 if !dry_run {
-                    gh_issue_edit(&issue, &remote, repo)?;
-                    if issue.status == Status::Closed {
-                        gh_issue_close(&remote, repo)?;
-                    } else if remote.state.eq_ignore_ascii_case("closed") {
-                        gh_issue_reopen(&remote, repo)?;
-                    }
+                    handle.edit_fields(&issue).await?;
+                    handle.set_state(issue.status.clone()).await?;
+                    remote_written = true;
                 }
                 item.action = if dry_run {
                     "would-initialize-push".to_string()
@@ -327,12 +660,9 @@ pub fn sync_linked(
             (true, true, false, false) => {
                 if local_hash != remote_hash {
                     if !dry_run {
-                        gh_issue_edit(&issue, &remote, repo)?;
-                        if issue.status == Status::Closed {
-                            gh_issue_close(&remote, repo)?;
-                        } else if remote.state.eq_ignore_ascii_case("closed") {
-                            gh_issue_reopen(&remote, repo)?;
-                        }
+                        handle.edit_fields(&issue).await?;
+                        handle.set_state(issue.status.clone()).await?;
+                        remote_written = true;
                     }
                     item.action = if dry_run {
                         "would-repair-divergence".to_string()
@@ -373,12 +703,9 @@ pub fn sync_linked(
             }
             (_, _, true, false) => {
                 if !dry_run {
-                    gh_issue_edit(&issue, &remote, repo)?;
-                    if issue.status == Status::Closed {
-                        gh_issue_close(&remote, repo)?;
-                    } else if remote.state.eq_ignore_ascii_case("closed") {
-                        gh_issue_reopen(&remote, repo)?;
-                    }
+                    handle.edit_fields(&issue).await?;
+                    handle.set_state(issue.status.clone()).await?;
+                    remote_written = true;
                 }
                 item.action = if dry_run {
                     "would-push".to_string()
@@ -431,7 +758,13 @@ pub fn sync_linked(
                 .filter(|c| c.source_id.is_none() && !synced_local_ids.contains(&c.id))
                 .count()
         } else {
-            export_new_local_comments(&issue, &remote, &local_comments, &synced_local_ids, repo)?
+            let exported =
+                export_new_local_comments(&issue, &handle, &local_comments, &synced_local_ids)
+                    .await?;
+            if exported > 0 {
+                remote_written = true;
+            }
+            exported
         };
         let imported = if dry_run {
             remote
@@ -458,7 +791,11 @@ pub fn sync_linked(
         }
 
         if !dry_run {
-            let remote = gh_issue_view(&url, repo)?;
+            let remote = if remote_written {
+                handle.snapshot_for_state().await?
+            } else {
+                remote
+            };
             let comments = storage.list_comments(&issue.id)?;
             update_state_entry(&mut state, &issue, &remote, &comments);
         }
@@ -717,12 +1054,11 @@ fn import_remote_comments(storage: &Storage, issue: &Issue, remote: &RemoteIssue
     storage.upsert_comments(&issue.id, comments)
 }
 
-fn export_new_local_comments(
+async fn export_new_local_comments(
     issue: &Issue,
-    remote: &RemoteIssue,
+    remote: &GithubIssueHandle,
     comments: &[Comment],
     synced_local_ids: &HashSet<String>,
-    repo: Option<&str>,
 ) -> Result<usize> {
     let mut exported = 0;
     for comment in comments {
@@ -734,11 +1070,9 @@ fn export_new_local_comments(
             "_From minibeads {} by {}_\n\n{}",
             issue.id, comment.author, comment.body
         );
-        if remote.comments.iter().any(|remote| remote.body == body) {
-            continue;
+        if remote.add_comment(&body).await? {
+            exported += 1;
         }
-        gh_issue_comment(remote, &body, repo)?;
-        exported += 1;
     }
     Ok(exported)
 }
@@ -839,59 +1173,6 @@ fn gh_issue_view(reference: &str, repo: Option<&str>) -> Result<RemoteIssue> {
     parse_remote_issue(value)
 }
 
-fn gh_issue_create(issue: &Issue, repo: Option<&str>) -> Result<RemoteIssue> {
-    let mut args = vec![
-        "issue",
-        "create",
-        "--title",
-        &issue.title,
-        "--body",
-        &issue.description,
-    ];
-    if let Some(repo) = repo {
-        args.extend(["--repo", repo]);
-    }
-    let output = gh_output(&args)?;
-    let url = output
-        .lines()
-        .find(|line| is_github_issue_url(line.trim()))
-        .map(str::trim)
-        .ok_or_else(|| anyhow!("gh issue create did not return a GitHub issue URL"))?;
-    gh_issue_view(url, repo)
-}
-
-fn gh_issue_edit(issue: &Issue, remote: &RemoteIssue, repo: Option<&str>) -> Result<()> {
-    let mut args = vec![
-        "issue",
-        "edit",
-        &remote.url,
-        "--title",
-        &issue.title,
-        "--body",
-        &issue.description,
-    ];
-    if let Some(repo) = repo {
-        args.extend(["--repo", repo]);
-    }
-    gh_status(&args)
-}
-
-fn gh_issue_close(remote: &RemoteIssue, repo: Option<&str>) -> Result<()> {
-    let mut args = vec!["issue", "close", &remote.url];
-    if let Some(repo) = repo {
-        args.extend(["--repo", repo]);
-    }
-    gh_status(&args)
-}
-
-fn gh_issue_reopen(remote: &RemoteIssue, repo: Option<&str>) -> Result<()> {
-    let mut args = vec!["issue", "reopen", &remote.url];
-    if let Some(repo) = repo {
-        args.extend(["--repo", repo]);
-    }
-    gh_status(&args)
-}
-
 fn gh_issue_comment(remote: &RemoteIssue, body: &str, repo: Option<&str>) -> Result<()> {
     let mut args = vec!["issue", "comment", &remote.url, "--body", body];
     if let Some(repo) = repo {
@@ -900,20 +1181,13 @@ fn gh_issue_comment(remote: &RemoteIssue, body: &str, repo: Option<&str>) -> Res
     gh_status(&args)
 }
 
-fn ensure_remote_marker(issue: &Issue, remote: &RemoteIssue, repo: Option<&str>) -> Result<()> {
-    if remote
-        .comments
-        .iter()
-        .any(|comment| is_marker_comment(comment) && comment.body.contains(&issue.id))
-    {
-        return Ok(());
-    }
-
-    gh_issue_comment(remote, &marker_body(issue), repo)
-}
-
+#[cfg(test)]
 fn marker_body(issue: &Issue) -> String {
     let repo = local_repo_name().unwrap_or_else(|| "unknown repository".to_string());
+    marker_body_for_repo(issue, &repo)
+}
+
+fn marker_body_for_repo(issue: &Issue, repo: &str) -> String {
     format!(
         "{MARKER}\n\nThis GitHub issue is synced to local minibeads issue `{}` in repository `{}` at `.beads/issues/{}.md`.",
         issue.id, repo, issue.id
@@ -995,7 +1269,51 @@ fn gh_output(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+async fn gh_output_async(program: &str, args: Vec<String>) -> Result<String> {
+    let started = Instant::now();
+    let output = tokio::process::Command::new(program)
+        .args(&args)
+        .output()
+        .await
+        .with_context(|| format!("Failed to run {} {}", program, args.join(" ")))?;
+    let elapsed = started.elapsed();
+
+    if TRACE_GH_CALLS.load(Ordering::Relaxed) {
+        let status = if output.status.success() {
+            "ok".to_string()
+        } else {
+            output
+                .status
+                .code()
+                .map(|code| format!("exit {code}"))
+                .unwrap_or_else(|| "terminated".to_string())
+        };
+        eprintln!(
+            "gh {} -> {} in {:.3}s",
+            shell_quote_string_args(&args),
+            status,
+            elapsed.as_secs_f64()
+        );
+    }
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 fn shell_quote_args(args: &[&str]) -> String {
+    args.iter()
+        .map(|arg| shell_quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_string_args(args: &[String]) -> String {
     args.iter()
         .map(|arg| shell_quote_arg(arg))
         .collect::<Vec<_>>()
@@ -1094,6 +1412,33 @@ fn parse_time(value: &Value, field: &str) -> Result<DateTime<Utc>> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn fake_gh(tmp: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = tmp.path().join("gh.log");
+        let json = tmp.path().join("issue.json");
+        let script = tmp.path().join("gh-fake");
+        std::fs::write(
+            &json,
+            r#"{"url":"https://github.com/example/repo/issues/1","title":"Remote title","body":"Remote body","state":"OPEN","comments":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$1 $2\" in\n  'issue view') cat {} ;;\n  'issue comment') exit 0 ;;\n  *) echo \"unexpected gh args: $*\" >&2; exit 99 ;;\nesac\n",
+                shell_quote_arg(&log.to_string_lossy()),
+                shell_quote_arg(&json.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        (script.to_string_lossy().to_string(), log)
+    }
+
     fn remote_comment(id: &str, body: &str) -> RemoteComment {
         RemoteComment {
             id: id.to_string(),
@@ -1166,5 +1511,78 @@ mod tests {
 
         let entry = state.issues.get(&remote.url).unwrap();
         assert_eq!(entry.synced_remote_comment_ids, vec!["regular"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_store_reuses_cached_issue_and_does_not_refetch_for_marker() {
+        let (tmp, _storage, issue) = storage_with_issue();
+        let (program, log) = fake_gh(&tmp);
+
+        block_on_github(async {
+            let store = GithubStore::new_with_program(None, program);
+            let handle = store.issue("https://github.com/example/repo/issues/1");
+
+            handle.get().await?;
+            handle.get().await?;
+            handle.ensure_marker(&issue).await?;
+            handle.snapshot_for_state().await?;
+            Ok(())
+        })
+        .unwrap();
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("issue view "))
+                .count(),
+            1,
+            "{calls}"
+        );
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("issue comment "))
+                .count(),
+            1,
+            "{calls}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_store_refetches_after_exported_comment_for_remote_comment_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (program, log) = fake_gh(&tmp);
+
+        block_on_github(async {
+            let store = GithubStore::new_with_program(None, program);
+            let handle = store.issue("https://github.com/example/repo/issues/1");
+
+            handle.get().await?;
+            assert!(handle.add_comment("real comment").await?);
+            handle.snapshot_for_state().await?;
+            Ok(())
+        })
+        .unwrap();
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("issue view "))
+                .count(),
+            2,
+            "{calls}"
+        );
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("issue comment "))
+                .count(),
+            1,
+            "{calls}"
+        );
     }
 }
