@@ -3,8 +3,9 @@ title: Add targeted search/replace editing for mb update (--search/--replace)
 status: closed
 priority: 3
 issue_type: feature
+external_ref: https://github.com/rrnewton/minibeads/issues/10
 created_at: 2026-06-19T03:41:02.032552672+00:00
-updated_at: 2026-06-19T03:56:13.353585620+00:00
+updated_at: 2026-06-27T13:38:07.516784637+00:00
 closed_at: 2026-06-19T03:56:13.353585004+00:00
 ---
 

@@ -1,10 +1,18 @@
 {
   "issues": {
+    "https://github.com/rrnewton/minibeads/issues/10": {
+      "local_id": "minibeads-30",
+      "local_hash": "07902703d4d89ecac3cd7e90ccadbaeff7645c6a7174aaaf4ae9a4ae5c169deb",
+      "remote_hash": "a53666ac70fc234686490326771ccf998d5c6817a6f84704ba4c01072bc69256",
+      "synced_at": "2026-06-27T13:40:20.451158237Z",
+      "synced_local_comment_ids": [],
+      "synced_remote_comment_ids": []
+    },
     "https://github.com/rrnewton/minibeads/issues/9": {
       "local_id": "minibeads-31",
       "local_hash": "b06fe18ba59cc8d7649ca2a0882fa87e80f4fa3c94d8e77fefcf9f1f268ce495",
       "remote_hash": "b06fe18ba59cc8d7649ca2a0882fa87e80f4fa3c94d8e77fefcf9f1f268ce495",
-      "synced_at": "2026-06-27T02:19:37.794474764Z",
+      "synced_at": "2026-06-27T13:40:22.058858210Z",
       "synced_local_comment_ids": [
         "minibeads-31-cfcd2cf2e4b",
         "gh-IC_kwDOQMFg5M8AAAABHvrrsA"
