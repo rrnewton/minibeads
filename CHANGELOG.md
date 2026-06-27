@@ -6,6 +6,8 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-06-27
+
 ### Added
 
 - Added `mb github import`, which imports matching unlinked GitHub Issues as new
