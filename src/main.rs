@@ -1934,7 +1934,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Version => {
-            println!("mb version 0.12.0");
+            println!("mb version {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
 

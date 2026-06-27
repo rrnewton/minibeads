@@ -4,6 +4,13 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [0.21.1]
+
+### Fixed
+
+- `mb version` now reports the crate version instead of a stale hard-coded
+  value.
+
 ## [0.21.0]
 
 ### Added
