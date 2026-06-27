@@ -654,7 +654,10 @@ fn parse_remote_comment(value: &Value) -> Result<RemoteComment> {
         .unwrap_or("github")
         .to_string();
     let created_at = parse_time(value, "createdAt")?;
-    let updated_at = parse_time(value, "updatedAt")?;
+    let updated_at = match value.get("updatedAt").and_then(Value::as_str) {
+        Some(_) => parse_time(value, "updatedAt")?,
+        None => created_at,
+    };
 
     Ok(RemoteComment {
         id,
