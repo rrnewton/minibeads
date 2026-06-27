@@ -211,6 +211,7 @@ minibeads can sync a subset of issues with GitHub Issues using the authenticated
 issues are ignored.
 
 - `bd github link ISSUE_ID GITHUB_ISSUE [-R owner/repo]` - Link to an existing GitHub issue
+- `bd github list` - Show current minibeads-to-GitHub issue links
 - `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
 - `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
 

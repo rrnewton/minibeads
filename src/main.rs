@@ -605,6 +605,9 @@ enum CommentCommands {
 
 #[derive(Subcommand)]
 enum GithubCommands {
+    /// List minibeads issues currently linked to GitHub Issues
+    List,
+
     /// Link an existing minibeads issue to an existing GitHub issue
     Link {
         issue_id: String,
@@ -645,6 +648,14 @@ enum GithubCommands {
         #[arg(long)]
         verbose: bool,
     },
+}
+
+#[derive(serde::Serialize)]
+struct GithubLinkView {
+    issue_id: String,
+    title: String,
+    status: Status,
+    github_url: String,
 }
 
 fn print_github_summary(report: &github::GithubSyncReport) {
@@ -1066,6 +1077,9 @@ fn run() -> Result<()> {
                     println!("Status: {}", issue.status);
                     println!("Priority: {}", issue.priority);
                     println!("Type: {}", issue.issue_type);
+                    if let Some(external_ref) = &issue.external_ref {
+                        println!("External ref: {}", external_ref);
+                    }
                     if !issue.assignee.is_empty() {
                         println!("Assignee: {}", issue.assignee);
                     }
@@ -1514,6 +1528,38 @@ fn run() -> Result<()> {
             }
 
             let report = match command {
+                GithubCommands::List => {
+                    let links: Vec<GithubLinkView> = storage
+                        .list_issues(None, None, None, None, None)?
+                        .into_iter()
+                        .filter_map(|issue| {
+                            let github_url = issue.external_ref.clone()?;
+                            if !is_github_issue_ref(&github_url) {
+                                return None;
+                            }
+                            Some(GithubLinkView {
+                                issue_id: issue.id,
+                                title: issue.title,
+                                status: issue.status,
+                                github_url,
+                            })
+                        })
+                        .collect();
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&links)?);
+                    } else if links.is_empty() {
+                        println!("No GitHub-linked issues.");
+                    } else {
+                        for link in links {
+                            println!(
+                                "{}: {} [{}] -> {}",
+                                link.issue_id, link.title, link.status, link.github_url
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
                 GithubCommands::Link {
                     issue_id,
                     github_issue,
