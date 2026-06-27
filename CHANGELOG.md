@@ -4,7 +4,7 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
-## [0.20.2]
+## [0.21.0]
 
 ### Added
 
@@ -13,7 +13,8 @@ issue tracker; the binary is named `mb`.
   is excluded from comment sync.
 - Added `mb github stress-test -R owner/repo` for seeded randomized
   real-GitHub sync testing against a disposable repository, with `--steps` and
-  `--seed` controls for aggressive reproducible runs.
+  `--seed` controls for aggressive reproducible runs. Use `--verbose` to print
+  each live mutation and verification step.
 - `mb github sync --verbose` now prints each underlying `gh` CLI call and its
   elapsed time to stderr.
 

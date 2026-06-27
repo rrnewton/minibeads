@@ -214,7 +214,7 @@ issues are ignored.
 - `bd github list` - Show current minibeads-to-GitHub issue links
 - `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
 - `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
-- `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
+- `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
 Synced fields are title, description/body, open/closed state, and append-only
 comments. minibeads keeps `.beads/github-sync-state.json` as the last-synced

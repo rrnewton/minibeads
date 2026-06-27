@@ -817,6 +817,7 @@ pub fn stress_test(
     iterations: usize,
     steps: usize,
     seed: Option<u64>,
+    verbose: bool,
 ) -> Result<GithubStressReport> {
     if iterations == 0 {
         return Err(anyhow!("--iterations must be greater than zero"));
@@ -839,9 +840,22 @@ pub fn stress_test(
         .take(8)
         .map(char::from)
         .collect();
+    if verbose {
+        eprintln!(
+            "GitHub sync stress test: repo={}, iterations={}, steps={}, seed={}, run={}",
+            repo, iterations, steps, seed, run_id
+        );
+    }
 
     let mut urls = Vec::new();
     for i in 0..iterations {
+        if verbose {
+            eprintln!(
+                "stress issue {}/{}: creating local issue",
+                i + 1,
+                iterations
+            );
+        }
         let title = format!("mb gh sync stress {run_id} issue {i}");
         let body = format!("initial local body {run_id} issue {i}");
         let issue = storage.create_issue(
@@ -866,6 +880,9 @@ pub fn stress_test(
             .map(|issue| issue.github_url.clone())
             .ok_or_else(|| anyhow!("publish did not return a GitHub URL"))?;
         urls.push(url.clone());
+        if verbose {
+            eprintln!("stress issue {}/{}: published {}", i + 1, iterations, url);
+        }
 
         let remote = gh_issue_view(&url, Some(repo))?;
         assert_remote_matches(&remote, &title, &body, Status::Open)?;
@@ -879,13 +896,22 @@ pub fn stress_test(
             remote_comment_bodies: Vec::new(),
         };
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
+        if verbose {
+            eprintln!(
+                "stress issue {}/{}: initial convergence verified",
+                i + 1,
+                iterations
+            );
+        }
 
         for step in 0..steps {
             let action = rng.gen_range(0..8);
+            let action_desc;
             match action {
                 0 => {
                     expected.title = format!("local title {run_id} issue {i} step {step}");
                     expected.body = format!("local body {run_id} issue {i} step {step}");
+                    action_desc = "local title/body edit";
                     storage.update_issue(
                         &issue.id,
                         HashMap::from([
@@ -897,6 +923,7 @@ pub fn stress_test(
                 1 => {
                     expected.title = format!("remote title {run_id} issue {i} step {step}");
                     expected.body = format!("remote body {run_id} issue {i} step {step}");
+                    action_desc = "GitHub title/body edit";
                     gh_status(&[
                         "issue",
                         "edit",
@@ -911,24 +938,29 @@ pub fn stress_test(
                 }
                 2 => {
                     let body = format!("local comment {run_id} issue {i} step {step}");
+                    action_desc = "local comment";
                     storage.add_comment(&issue.id, "stress-local", &body)?;
                     expected.local_comment_bodies.push(body);
                 }
                 3 => {
                     let body = format!("remote comment {run_id} issue {i} step {step}");
+                    action_desc = "GitHub comment";
                     let remote_for_comment = gh_issue_view(&url, Some(repo))?;
                     gh_issue_comment(&remote_for_comment, &body, Some(repo))?;
                     expected.remote_comment_bodies.push(body);
                 }
                 4 => {
+                    action_desc = "local close";
                     storage.close_issue(&issue.id, "stress local close")?;
                     expected.status = Status::Closed;
                 }
                 5 => {
+                    action_desc = "local reopen";
                     storage.reopen_issue(&issue.id)?;
                     expected.status = Status::Open;
                 }
                 6 => {
+                    action_desc = "GitHub close";
                     let remote = gh_issue_view(&url, Some(repo))?;
                     if !remote.state.eq_ignore_ascii_case("closed") {
                         gh_status(&["issue", "close", &url, "--repo", repo])?;
@@ -936,6 +968,7 @@ pub fn stress_test(
                     expected.status = Status::Closed;
                 }
                 _ => {
+                    action_desc = "GitHub reopen";
                     let remote = gh_issue_view(&url, Some(repo))?;
                     if remote.state.eq_ignore_ascii_case("closed") {
                         gh_status(&["issue", "reopen", &url, "--repo", repo])?;
@@ -943,11 +976,30 @@ pub fn stress_test(
                     expected.status = Status::Open;
                 }
             }
+            if verbose {
+                eprintln!(
+                    "stress issue {}/{} step {}/{}: {}",
+                    i + 1,
+                    iterations,
+                    step + 1,
+                    steps,
+                    action_desc
+                );
+            }
 
             sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
                 .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
                 .with_context(|| format!("stress convergence failed at step {}", step))?;
+            if verbose {
+                eprintln!(
+                    "stress issue {}/{} step {}/{}: sync convergence verified",
+                    i + 1,
+                    iterations,
+                    step + 1,
+                    steps
+                );
+            }
 
             sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
                 .with_context(|| {
@@ -955,13 +1007,36 @@ pub fn stress_test(
                 })?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
                 .with_context(|| format!("stress no-op convergence failed at step {}", step))?;
+            if verbose {
+                eprintln!(
+                    "stress issue {}/{} step {}/{}: no-op sync verified",
+                    i + 1,
+                    iterations,
+                    step + 1,
+                    steps
+                );
+            }
         }
 
+        if verbose {
+            eprintln!(
+                "stress issue {}/{}: closing temporary issue",
+                i + 1,
+                iterations
+            );
+        }
         storage.close_issue(&issue.id, "stress complete")?;
         expected.status = Status::Closed;
         sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
             .with_context(|| format!("stress close sync failed for {}", issue.id))?;
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
+        if verbose {
+            eprintln!(
+                "stress issue {}/{}: final closed convergence verified",
+                i + 1,
+                iterations
+            );
+        }
     }
 
     Ok(GithubStressReport {
