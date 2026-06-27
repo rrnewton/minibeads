@@ -1598,10 +1598,7 @@ fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print_github_summary(&report);
-                for conflict in report.conflicts {
-                    println!("Conflict: {}", conflict);
-                }
+                print_github_report(&report, false, false);
             }
             Ok(())
         }
