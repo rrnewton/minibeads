@@ -4,6 +4,44 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [0.20.0]
+
+### Added
+
+- **GitHub Issues sync via `gh`** (`mb github link`, `mb github publish`,
+  `mb github sync`). A subset of minibeads issues can now be linked to GitHub
+  Issues by storing the GitHub issue URL in `external_ref`; unlinked issues are
+  ignored by GitHub sync.
+- **Bidirectional field sync** for linked GitHub issues. Sync covers title,
+  description/body, and open/closed state, with `.beads/github-sync-state.json`
+  tracking the last synced local and remote hashes so local-only changes,
+  GitHub-only changes, and both-sides conflicts can be distinguished.
+- **GitHub comment sync** for linked issues. Local `mb comments add` comments
+  are exported to GitHub, and GitHub issue comments are imported back into
+  minibeads comments.
+- **File-backed comments** (`mb comments add`, `mb comments list`) stored under
+  `.beads/comments/`. Comments are timestamped discussion entries, separate from
+  the issue's mutable `notes` field.
+- **Linkage visibility** with `mb github list`, `mb list --github`, and
+  `External ref:` in `mb show`.
+- **More useful GitHub sync output**. `mb github sync` now prints one line per
+  linked issue by default, supports `--quiet` for the previous one-line summary,
+  and supports `--verbose` for per-issue details.
+
+### Fixed
+
+- GitHub comment parsing now tolerates `gh issue view --json comments` output
+  where comments include `createdAt` but omit `updatedAt`.
+- GitHub comment sync avoids duplicate comment export/import on retry after a
+  partial sync failure.
+
+### Verified
+
+- Real manual QA was run against `rrnewton/minibeads` GitHub issue #9:
+  link, local-to-GitHub title/body/comment sync, GitHub-to-local title/body/
+  comment sync, `mb github list`, `mb show` external refs, and close sync.
+  The QA record is stored as closed minibeads issue `minibeads-31`.
+
 ## [0.19.0]
 
 ### Added
