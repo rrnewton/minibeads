@@ -518,6 +518,23 @@ impl Storage {
         Ok(changed)
     }
 
+    /// Remove comments whose body contains the given marker string.
+    pub fn remove_comments_containing(&self, issue_id: &str, marker: &str) -> Result<usize> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+        let comments = self.read_comments_no_lock(issue_id)?;
+        let original_len = comments.len();
+        let comments: Vec<Comment> = comments
+            .into_iter()
+            .filter(|comment| !comment.body.contains(marker))
+            .collect();
+        let removed = original_len.saturating_sub(comments.len());
+
+        if removed > 0 {
+            self.write_comments_no_lock(issue_id, &comments)?;
+        }
+        Ok(removed)
+    }
+
     /// Helper to load all issues without computing dependents (to avoid recursion)
     fn list_all_issues_no_dependents(&self) -> Result<Vec<Issue>> {
         let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;

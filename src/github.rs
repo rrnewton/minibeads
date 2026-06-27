@@ -615,6 +615,11 @@ async fn sync_linked_async(
         if !dry_run {
             handle.ensure_marker(&issue).await?;
         }
+        let removed_marker_comments = if dry_run {
+            0
+        } else {
+            purge_local_marker_comments(storage, &issue.id)?
+        };
         let local_comments = storage.list_comments(&issue.id)?;
         let old_state = state.issues.get(&url);
         let local_hash = hash_local_issue(&issue);
@@ -638,6 +643,12 @@ async fn sync_linked_async(
         };
         let mut remote_written = false;
         let mut field_conflict = false;
+        if removed_marker_comments > 0 {
+            item.details.push(format!(
+                "removed {} local marker comment(s)",
+                removed_marker_comments
+            ));
+        }
 
         match (
             old_state.is_some(),
@@ -759,7 +770,11 @@ async fn sync_linked_async(
         let exported = if dry_run {
             local_comments
                 .iter()
-                .filter(|c| c.source_id.is_none() && !synced_local_ids.contains(&c.id))
+                .filter(|c| {
+                    c.source_id.is_none()
+                        && !is_local_marker_comment(c)
+                        && !synced_local_ids.contains(&c.id)
+                })
                 .count()
         } else {
             let exported =
@@ -1580,6 +1595,7 @@ fn apply_remote_to_local(storage: &Storage, issue: &Issue, remote: &RemoteIssue)
 }
 
 fn import_remote_comments(storage: &Storage, issue: &Issue, remote: &RemoteIssue) -> Result<usize> {
+    purge_local_marker_comments(storage, &issue.id)?;
     let local_comments = storage.list_comments(&issue.id)?;
     let comments = remote
         .comments
@@ -1609,6 +1625,10 @@ fn import_remote_comments(storage: &Storage, issue: &Issue, remote: &RemoteIssue
     storage.upsert_comments(&issue.id, comments)
 }
 
+fn purge_local_marker_comments(storage: &Storage, issue_id: &str) -> Result<usize> {
+    storage.remove_comments_containing(issue_id, MARKER)
+}
+
 async fn export_new_local_comments(
     issue: &Issue,
     remote: &GithubIssueHandle,
@@ -1617,7 +1637,10 @@ async fn export_new_local_comments(
 ) -> Result<usize> {
     let mut exported = 0;
     for comment in comments {
-        if comment.source_id.is_some() || synced_local_ids.contains(&comment.id) {
+        if comment.source_id.is_some()
+            || is_local_marker_comment(comment)
+            || synced_local_ids.contains(&comment.id)
+        {
             continue;
         }
 
@@ -1656,7 +1679,11 @@ fn update_state_entry(
             local_hash: hash_local_issue(issue),
             remote_hash: hash_remote_issue(remote),
             synced_at: Utc::now(),
-            synced_local_comment_ids: comments.iter().map(|c| c.id.clone()).collect(),
+            synced_local_comment_ids: comments
+                .iter()
+                .filter(|c| !is_local_marker_comment(c))
+                .map(|c| c.id.clone())
+                .collect(),
             synced_remote_comment_ids: remote
                 .comments
                 .iter()
@@ -1750,6 +1777,10 @@ fn marker_body_for_repo(issue: &Issue, repo: &str) -> String {
 }
 
 fn is_marker_comment(comment: &RemoteComment) -> bool {
+    comment.body.contains(MARKER)
+}
+
+fn is_local_marker_comment(comment: &Comment) -> bool {
     comment.body.contains(MARKER)
 }
 
@@ -2039,6 +2070,41 @@ mod tests {
     #[test]
     fn marker_comments_are_not_imported() {
         let (_tmp, storage, issue) = storage_with_issue();
+        let remote = remote_issue(vec![
+            remote_comment("marker", &marker_body(&issue)),
+            remote_comment("regular", "real GitHub comment"),
+        ]);
+
+        let imported = import_remote_comments(&storage, &issue, &remote).unwrap();
+        let comments = storage.list_comments(&issue.id).unwrap();
+
+        assert_eq!(imported, 1);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].body, "real GitHub comment");
+        assert!(!comments[0].body.contains(MARKER));
+    }
+
+    #[test]
+    fn stale_local_marker_comments_are_removed_during_import() {
+        let (_tmp, storage, issue) = storage_with_issue();
+        storage
+            .upsert_comments(
+                &issue.id,
+                vec![Comment {
+                    id: "gh-marker".to_string(),
+                    issue_id: issue.id.clone(),
+                    author: "github-user".to_string(),
+                    body: marker_body(&issue),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    source_url: Some(
+                        "https://github.com/example/repo/issues/1#issuecomment-marker".to_string(),
+                    ),
+                    source_id: Some("marker".to_string()),
+                }],
+            )
+            .unwrap();
+
         let remote = remote_issue(vec![
             remote_comment("marker", &marker_body(&issue)),
             remote_comment("regular", "real GitHub comment"),

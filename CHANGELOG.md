@@ -17,6 +17,8 @@ issue tracker; the binary is named `mb`.
 
 - `mb show` now displays notes and comments alongside description/design/
   acceptance content in one markdown-formatted issue view.
+- GitHub sync now removes any previously imported `MB_DO_NOT_SYNC` marker
+  comments from local minibeads comments and keeps them out of sync state.
 - GitHub sync now leaves conflicted field ancestry untouched instead of
   recording divergent local/remote hashes as if they were synced.
 
