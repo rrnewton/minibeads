@@ -127,11 +127,20 @@ assert_contains "$OUTPUT" "test-2: Test issue 2" "Should list test-2"
 
 # Test 5: Show issue details
 echo -e "\n${YELLOW}Test 5: Show issue details${NC}"
+OUTPUT=$("$BD_BIN" update test-1 --notes "Test notes" 2>&1)
+assert_contains "$OUTPUT" "Updated issue: test-1" "Should add notes before show"
+OUTPUT=$("$BD_BIN" comments add test-1 --body "Test comment" 2>&1)
+assert_contains "$OUTPUT" "Added comment:" "Should add comment before show"
 OUTPUT=$("$BD_BIN" show test-1 2>&1)
 assert_contains "$OUTPUT" "ID: test-1" "Should show issue ID"
 assert_contains "$OUTPUT" "Title: Test issue 1" "Should show title"
-assert_contains "$OUTPUT" "Description:" "Should show description section"
+assert_contains "$OUTPUT" "Description" "Should show description section"
+assert_contains "$OUTPUT" "===========" "Should show markdown heading underline"
 assert_contains "$OUTPUT" "Test description" "Should show description content"
+assert_contains "$OUTPUT" "Notes" "Should show notes section"
+assert_contains "$OUTPUT" "Test notes" "Should show notes content"
+assert_contains "$OUTPUT" "Comments" "Should show comments section"
+assert_contains "$OUTPUT" "Test comment" "Should show comment content"
 
 # Test 6: Update issue status
 echo -e "\n${YELLOW}Test 6: Update issue status${NC}"

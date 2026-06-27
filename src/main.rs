@@ -16,9 +16,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::env;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use storage::{is_github_issue_ref, Storage};
-use types::{ClaimDuration, DependencyType, EditField, IssueType, Status};
+use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status};
 
 /// Generate long version string with git info and build date
 fn long_version() -> &'static str {
@@ -736,6 +738,251 @@ fn print_github_report(report: &github::GithubSyncReport, quiet: bool, verbose: 
     print_github_summary(report);
 }
 
+fn should_color_stdout() -> bool {
+    std::io::stdout().is_terminal()
+        && env::var_os("NO_COLOR").is_none()
+        && env::var("CLICOLOR").map(|v| v != "0").unwrap_or(true)
+        && env::var("TERM").map(|v| v != "dumb").unwrap_or(true)
+}
+
+fn print_issue_show(issue: &Issue, comments: &[Comment], color: bool) -> Result<()> {
+    print_issue_metadata(issue, color);
+    let markdown = issue_show_markdown(issue, comments);
+    if markdown.trim().is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    if color && print_markdown_with_external_highlighter(&markdown)? {
+        return Ok(());
+    }
+    print!(
+        "{}",
+        if color {
+            colorize_markdown_fallback(&markdown)
+        } else {
+            markdown
+        }
+    );
+    Ok(())
+}
+
+fn print_issue_metadata(issue: &Issue, color: bool) {
+    println!(
+        "{} {}",
+        style_label("ID:", color),
+        style_value(&issue.id, color)
+    );
+    println!(
+        "{} {}",
+        style_label("Title:", color),
+        style_title(&issue.title, color)
+    );
+    println!(
+        "{} {}",
+        style_label("Status:", color),
+        style_status(issue.status.as_str(), color)
+    );
+    println!("{} {}", style_label("Priority:", color), issue.priority);
+    println!("{} {}", style_label("Type:", color), issue.issue_type);
+    if let Some(external_ref) = &issue.external_ref {
+        println!(
+            "{} {}",
+            style_label("External ref:", color),
+            style_value(external_ref, color)
+        );
+    }
+    if !issue.assignee.is_empty() {
+        println!("{} {}", style_label("Assignee:", color), issue.assignee);
+    }
+    if !issue.labels.is_empty() {
+        println!(
+            "{} {}",
+            style_label("Labels:", color),
+            issue.labels.join(", ")
+        );
+    }
+    if let Some(until) = issue.claimed_until {
+        let state = if issue.is_actively_claimed(chrono::Utc::now()) {
+            "active"
+        } else {
+            "STALE"
+        };
+        println!(
+            "{} {} ({})",
+            style_label("Claimed until:", color),
+            until.to_rfc3339(),
+            state
+        );
+    }
+}
+
+fn issue_show_markdown(issue: &Issue, comments: &[Comment]) -> String {
+    let mut out = String::new();
+    push_markdown_section(
+        &mut out,
+        "Description",
+        if issue.description.trim().is_empty() {
+            "_No description._"
+        } else {
+            &issue.description
+        },
+    );
+    if !issue.design.trim().is_empty() {
+        push_markdown_section(&mut out, "Design", &issue.design);
+    }
+    push_markdown_section(
+        &mut out,
+        "Notes",
+        if issue.notes.trim().is_empty() {
+            "_No notes._"
+        } else {
+            &issue.notes
+        },
+    );
+    if !issue.acceptance_criteria.trim().is_empty() {
+        push_markdown_section(&mut out, "Acceptance Criteria", &issue.acceptance_criteria);
+    }
+    if !issue.depends_on.is_empty() {
+        let mut deps = issue.depends_on.iter().collect::<Vec<_>>();
+        deps.sort_by(|a, b| a.0.cmp(b.0));
+        let body = deps
+            .into_iter()
+            .map(|(dep_id, dep_type)| format!("- `{}` ({})", dep_id, dep_type))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_markdown_section(&mut out, "Dependencies", &body);
+    }
+    push_markdown_section(&mut out, "Comments", &comments_markdown(comments));
+    out
+}
+
+fn push_markdown_section(out: &mut String, heading: &str, body: &str) {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(heading);
+    out.push('\n');
+    out.push_str(&"=".repeat(heading.chars().count()));
+    out.push_str("\n\n");
+    out.push_str(body.trim());
+    out.push('\n');
+}
+
+fn comments_markdown(comments: &[Comment]) -> String {
+    if comments.is_empty() {
+        return "_No comments._".to_string();
+    }
+
+    comments
+        .iter()
+        .map(|comment| {
+            let mut text = format!(
+                "### {} at {}\n\n{}",
+                comment.author,
+                comment.created_at.to_rfc3339(),
+                comment.body.trim()
+            );
+            if let Some(source_url) = &comment.source_url {
+                text.push_str(&format!("\n\n_Source: {}_", source_url));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn print_markdown_with_external_highlighter(markdown: &str) -> Result<bool> {
+    for program in ["batcat", "bat"] {
+        let mut child = match ProcessCommand::new(program)
+            .args([
+                "--language",
+                "markdown",
+                "--style",
+                "plain",
+                "--color",
+                "always",
+                "--paging",
+                "never",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(markdown.as_bytes())
+                .context("Failed to write markdown to highlighter")?;
+        }
+        let status = child
+            .wait()
+            .with_context(|| format!("Failed to wait for {}", program))?;
+        if status.success() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn colorize_markdown_fallback(markdown: &str) -> String {
+    markdown
+        .lines()
+        .map(|line| {
+            if line.chars().all(|c| c == '=') && !line.is_empty() {
+                format!("\x1b[36;1m{}\x1b[0m", line)
+            } else if line.starts_with("### ") {
+                format!("\x1b[35;1m{}\x1b[0m", line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn style_label(text: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[36;1m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+fn style_title(text: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[1m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+fn style_value(text: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[34m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+fn style_status(text: &str, color: bool) -> String {
+    if !color {
+        return text.to_string();
+    }
+    let code = match text {
+        "open" => "32",
+        "in_progress" => "33",
+        "closed" => "90",
+        _ => "37",
+    };
+    format!("\x1b[{}m{}\x1b[0m", code, text)
+}
+
 /// Print a dependency tree in a visual format
 fn print_dependency_tree(node: &types::TreeNode, depth: usize, prefix: &str, is_last: bool) {
     // Print the current node
@@ -1085,40 +1332,14 @@ fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
             } else {
+                let use_color = should_color_stdout();
                 for (idx, issue) in issues.iter().enumerate() {
                     if idx > 0 {
                         println!("\n{}", "=".repeat(70));
                         println!();
                     }
-
-                    println!("ID: {}", issue.id);
-                    println!("Title: {}", issue.title);
-                    println!("Status: {}", issue.status);
-                    println!("Priority: {}", issue.priority);
-                    println!("Type: {}", issue.issue_type);
-                    if let Some(external_ref) = &issue.external_ref {
-                        println!("External ref: {}", external_ref);
-                    }
-                    if !issue.assignee.is_empty() {
-                        println!("Assignee: {}", issue.assignee);
-                    }
-                    if let Some(until) = issue.claimed_until {
-                        let state = if issue.is_actively_claimed(chrono::Utc::now()) {
-                            "active"
-                        } else {
-                            "STALE"
-                        };
-                        println!("Claimed until: {} ({})", until.to_rfc3339(), state);
-                    }
-                    if !issue.description.is_empty() {
-                        println!("\nDescription:\n{}", issue.description);
-                    }
-                    if !issue.depends_on.is_empty() {
-                        println!("\nDependencies:");
-                        for (dep_id, dep_type) in &issue.depends_on {
-                            println!("  {} ({})", dep_id, dep_type);
-                        }
-                    }
+                    let comments = storage.list_comments(&issue.id)?;
+                    print_issue_show(issue, &comments, use_color)?;
                 }
             }
             Ok(())

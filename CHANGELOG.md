@@ -4,6 +4,18 @@ All notable changes to minibeads are recorded here. minibeads is a markdown-base
 drop-in replacement for the [beads](https://github.com/steveyegge/beads) (`bd`)
 issue tracker; the binary is named `mb`.
 
+## [Unreleased]
+
+### Added
+
+- `mb show` now uses TTY-aware color and external markdown highlighting via
+  `batcat`/`bat` when available, while keeping piped output plain.
+
+### Fixed
+
+- `mb show` now displays notes and comments alongside description/design/
+  acceptance content in one markdown-formatted issue view.
+
 ## [0.21.1]
 
 ### Fixed
