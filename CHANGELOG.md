@@ -6,6 +6,8 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-06-27
+
 ### Added
 
 - `mb show` now uses TTY-aware color and external markdown highlighting via
