@@ -425,6 +425,9 @@ fn export_new_local_comments(
             "_From minibeads {} by {}_\n\n{}",
             issue.id, comment.author, comment.body
         );
+        if remote.comments.iter().any(|remote| remote.body == body) {
+            continue;
+        }
         gh_issue_comment(remote, &body, repo)?;
         exported += 1;
     }
