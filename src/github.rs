@@ -2074,7 +2074,7 @@ fn hash_remote_issue(issue: &RemoteIssue) -> String {
 fn hash_fields(fields: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
-        hasher.update(field.as_bytes());
+        hasher.update(field.trim_end_matches(['\r', '\n']).as_bytes());
         hasher.update(b"\0");
     }
     format!("{:x}", hasher.finalize())
@@ -2424,7 +2424,7 @@ mod tests {
         std::fs::write(
             &json,
             format!(
-                r#"{{"url":"https://github.com/example/repo/issues/1","title":"Remote title","body":"Remote body","state":"CLOSED","comments":[{}]}}"#,
+                r#"{{"url":"https://github.com/example/repo/issues/1","title":"Remote title","body":"Remote body\n","state":"CLOSED","comments":[{}]}}"#,
                 comment
             ),
         )
@@ -2687,6 +2687,20 @@ mod tests {
             .synced_local_comment_ids
             .iter()
             .any(|id| id == &local_comment.id));
+        assert_eq!(entry.local_hash, entry.remote_hash);
+
+        let second_report = block_on_github(sync_linked_with_store(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            false,
+            true,
+            &store,
+        ))
+        .unwrap();
+        assert_eq!(second_report.pushed_issues, 0);
+        assert_eq!(second_report.exported_comments, 0);
+        assert_eq!(second_report.pulled_issues, 0);
+        assert_eq!(second_report.imported_comments, 0);
 
         let calls = std::fs::read_to_string(log).unwrap();
         assert_eq!(
