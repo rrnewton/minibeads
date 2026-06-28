@@ -728,6 +728,22 @@ struct GithubLinkView {
     github_url: String,
 }
 
+#[derive(serde::Serialize)]
+struct ShowCommentView<'a> {
+    #[serde(flatten)]
+    stored: &'a Comment,
+    timestamp: String,
+}
+
+impl<'a> From<&'a Comment> for ShowCommentView<'a> {
+    fn from(comment: &'a Comment) -> Self {
+        Self {
+            stored: comment,
+            timestamp: comment.created_at.to_rfc3339(),
+        }
+    }
+}
+
 fn print_github_summary(report: &github::GithubSyncReport) {
     println!(
         "GitHub sync: linked {}, created remote {}, pushed {}, pulled {}, comments exported {}, comments imported {}, conflicts {}",
@@ -1428,9 +1444,14 @@ fn run() -> Result<()> {
                     .map(|issue| {
                         let mut value = serde_json::to_value(issue)?;
                         if let serde_json::Value::Object(ref mut object) = value {
+                            let comments = storage.list_comments(&issue.id)?;
+                            let comment_views = comments
+                                .iter()
+                                .map(ShowCommentView::from)
+                                .collect::<Vec<_>>();
                             object.insert(
                                 "comments".to_string(),
-                                serde_json::to_value(storage.list_comments(&issue.id)?)?,
+                                serde_json::to_value(comment_views)?,
                             );
                         }
                         Ok(value)

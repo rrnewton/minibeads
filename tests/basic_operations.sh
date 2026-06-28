@@ -131,6 +131,16 @@ OUTPUT=$("$BD_BIN" update test-1 --notes "Test notes" 2>&1)
 assert_contains "$OUTPUT" "Updated issue: test-1" "Should add notes before show"
 OUTPUT=$("$BD_BIN" comments add test-1 --body "Test comment" 2>&1)
 assert_contains "$OUTPUT" "Added comment:" "Should add comment before show"
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path(".beads/comments/test-1.json")
+comments = json.loads(path.read_text())
+comments[0]["source_url"] = "https://example.com/source/comment-1"
+comments[0]["source_id"] = "remote-comment-1"
+path.write_text(json.dumps(comments, indent=2))
+PY
 OUTPUT=$("$BD_BIN" show test-1 2>&1)
 assert_contains "$OUTPUT" "ID: test-1" "Should show issue ID"
 assert_contains "$OUTPUT" "Title: Test issue 1" "Should show title"
@@ -141,20 +151,31 @@ assert_contains "$OUTPUT" "Notes" "Should show notes section"
 assert_contains "$OUTPUT" "Test notes" "Should show notes content"
 assert_contains "$OUTPUT" "Comments" "Should show comments section"
 assert_contains "$OUTPUT" "Test comment" "Should show comment content"
+assert_contains "$OUTPUT" "Source: https://example.com/source/comment-1" "Should show comment source URL"
 OUTPUT=$("$BD_BIN" show test-1 --json 2>&1)
-JSON_COMMENT_BODY=$(JSON_OUTPUT="$OUTPUT" python3 - <<'PY'
+JSON_COMMENT_RESULT=$(JSON_OUTPUT="$OUTPUT" python3 - <<'PY'
 import json
 import os
+from datetime import datetime
 
 issues = json.loads(os.environ["JSON_OUTPUT"])
 assert isinstance(issues, list), "show --json should return a list"
 comments = issues[0]["comments"]
 assert isinstance(comments, list), "comments should be a list"
-assert comments[0]["issue_id"] == "test-1"
-print(comments[0]["body"])
+comment = comments[0]
+parse_time = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+assert comment["issue_id"] == "test-1"
+assert comment["id"].startswith("test-1-c")
+assert comment["author"]
+assert parse_time(comment["timestamp"]) == parse_time(comment["created_at"])
+assert comment["updated_at"]
+assert comment["source_url"] == "https://example.com/source/comment-1"
+assert comment["source_id"] == "remote-comment-1"
+assert comment["body"] == "Test comment"
+print("ok")
 PY
 )
-assert_equals "Test comment" "$JSON_COMMENT_BODY" "JSON show should include structured comments"
+assert_equals "ok" "$JSON_COMMENT_RESULT" "JSON show should include structured comments"
 
 # Test 6: Update issue status
 echo -e "\n${YELLOW}Test 6: Update issue status${NC}"
