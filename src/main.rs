@@ -686,6 +686,9 @@ enum GithubCommands {
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
+        /// Pull GitHub title/body/status/comments into minibeads without writing anything to GitHub
+        #[arg(long)]
+        pull_only: bool,
         /// Print only the one-line summary
         #[arg(long, conflicts_with = "verbose")]
         quiet: bool,
@@ -1420,7 +1423,20 @@ fn run() -> Result<()> {
             }
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&issues)?);
+                let issues_with_comments = issues
+                    .iter()
+                    .map(|issue| {
+                        let mut value = serde_json::to_value(issue)?;
+                        if let serde_json::Value::Object(ref mut object) = value {
+                            object.insert(
+                                "comments".to_string(),
+                                serde_json::to_value(storage.list_comments(&issue.id)?)?,
+                            );
+                        }
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                println!("{}", serde_json::to_string_pretty(&issues_with_comments)?);
             } else {
                 let use_color = should_color_stdout();
                 for (idx, issue) in issues.iter().enumerate() {
@@ -1948,12 +1964,18 @@ fn run() -> Result<()> {
                     issue_ids,
                     repo,
                     dry_run,
+                    pull_only,
                     quiet,
                     verbose,
                 } => {
                     let _gh_trace = github::trace_gh_calls(verbose);
-                    let report =
-                        github::sync_linked(&storage, &issue_ids, repo.as_deref(), dry_run)?;
+                    let report = github::sync_linked(
+                        &storage,
+                        &issue_ids,
+                        repo.as_deref(),
+                        dry_run,
+                        pull_only,
+                    )?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {

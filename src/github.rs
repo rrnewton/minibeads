@@ -607,8 +607,11 @@ pub fn sync_linked(
     issue_ids: &[String],
     repo: Option<&str>,
     dry_run: bool,
+    pull_only: bool,
 ) -> Result<GithubSyncReport> {
-    block_on_github(sync_linked_async(storage, issue_ids, repo, dry_run))
+    block_on_github(sync_linked_async(
+        storage, issue_ids, repo, dry_run, pull_only,
+    ))
 }
 
 pub fn import_issues(
@@ -791,8 +794,19 @@ async fn sync_linked_async(
     issue_ids: &[String],
     repo: Option<&str>,
     dry_run: bool,
+    pull_only: bool,
 ) -> Result<GithubSyncReport> {
     let store = GithubStore::new(repo);
+    sync_linked_with_store(storage, issue_ids, dry_run, pull_only, &store).await
+}
+
+async fn sync_linked_with_store(
+    storage: &Storage,
+    issue_ids: &[String],
+    dry_run: bool,
+    pull_only: bool,
+    store: &GithubStore,
+) -> Result<GithubSyncReport> {
     let beads_dir = storage.get_beads_dir();
     let mut state = load_state(&beads_dir)?;
     let mut report = GithubSyncReport {
@@ -822,7 +836,7 @@ async fn sync_linked_async(
 
         let handle = store.issue(&url);
         let remote = handle.get().await?;
-        if !dry_run {
+        if !dry_run && !pull_only {
             handle.ensure_marker(&issue).await?;
         }
         let removed_marker_comments = if dry_run {
@@ -860,43 +874,126 @@ async fn sync_linked_async(
             ));
         }
 
-        match (
-            old_state.is_some(),
-            inherited_divergence,
-            local_changed,
-            remote_changed,
-        ) {
-            (false, _, _, _) => {
+        if pull_only {
+            if local_hash != remote_hash {
                 if !dry_run {
-                    handle.edit_fields(&issue).await?;
-                    handle.set_state(issue.status).await?;
-                    remote_written = true;
+                    apply_remote_to_local(storage, &issue, &remote)?;
+                    issue = storage.get_issue(&issue.id)?.ok_or_else(|| {
+                        anyhow!("Issue not found after pull-only sync: {}", issue.id)
+                    })?;
                 }
                 item.action = if dry_run {
-                    "would-initialize-push".to_string()
+                    "would-pull".to_string()
                 } else {
-                    "initialized-pushed".to_string()
+                    "pulled".to_string()
                 };
+                item.details.push(
+                    "pull-only: pulled title/body/state from GitHub into minibeads".to_string(),
+                );
+                if old_state.is_none() {
+                    item.details.push(
+                        "pull-only: no previous GitHub sync state; used GitHub as the initial common base"
+                            .to_string(),
+                    );
+                }
+                report.pulled_issues += 1;
+            } else if old_state.is_none() {
+                item.action = if dry_run {
+                    "would-initialize-pull-only".to_string()
+                } else {
+                    "initialized-pull-only".to_string()
+                };
+                item.details.push(
+                    "pull-only: local and GitHub issue fields already match; recorded initial common base"
+                        .to_string(),
+                );
+            } else {
                 item.details
-                    .push("no previous GitHub sync state; pushed local issue fields to GitHub as initial common base".to_string());
-                report.pushed_issues += 1;
+                    .push("pull-only: issue fields already match GitHub".to_string());
             }
-            (true, true, false, false) => {
-                if local_hash != remote_hash {
+        } else {
+            match (
+                old_state.is_some(),
+                inherited_divergence,
+                local_changed,
+                remote_changed,
+            ) {
+                (false, _, _, _) => {
                     if !dry_run {
                         handle.edit_fields(&issue).await?;
                         handle.set_state(issue.status).await?;
                         remote_written = true;
                     }
                     item.action = if dry_run {
-                        "would-repair-divergence".to_string()
+                        "would-initialize-push".to_string()
                     } else {
-                        "repaired-divergence".to_string()
+                        "initialized-pushed".to_string()
                     };
                     item.details.push(
-                        "previous sync state recorded divergent local/remote hashes; pushed local issue fields to establish a common base"
+                        "no previous GitHub sync state; pushed local issue fields to GitHub as initial common base"
                             .to_string(),
                     );
+                    report.pushed_issues += 1;
+                }
+                (true, true, false, false) => {
+                    if local_hash != remote_hash {
+                        if !dry_run {
+                            handle.edit_fields(&issue).await?;
+                            handle.set_state(issue.status).await?;
+                            remote_written = true;
+                        }
+                        item.action = if dry_run {
+                            "would-repair-divergence".to_string()
+                        } else {
+                            "repaired-divergence".to_string()
+                        };
+                        item.details.push(
+                            "previous sync state recorded divergent local/remote hashes; pushed local issue fields to establish a common base"
+                                .to_string(),
+                        );
+                        if issue.status == Status::Closed
+                            && !remote.state.eq_ignore_ascii_case("closed")
+                        {
+                            item.details.push("closed GitHub issue".to_string());
+                        } else if issue.status != Status::Closed
+                            && remote.state.eq_ignore_ascii_case("closed")
+                        {
+                            item.details.push("reopened GitHub issue".to_string());
+                        }
+                        report.pushed_issues += 1;
+                    } else {
+                        item.details.push(
+                            "previous divergent sync state has already converged; recording common base"
+                                .to_string(),
+                        );
+                    }
+                }
+                (true, _, true, true) if local_hash != remote_hash => {
+                    let conflict = format!(
+                        "{} / {} changed on both sides; leaving issue fields unchanged",
+                        issue.id, url
+                    );
+                    item.action = "conflict".to_string();
+                    item.conflict = Some(conflict.clone());
+                    item.details.push(
+                        "local and GitHub issue fields both changed since last sync".to_string(),
+                    );
+                    report.conflicts.push(conflict);
+                    field_conflict = true;
+                }
+                (_, _, true, false) => {
+                    if !dry_run {
+                        handle.edit_fields(&issue).await?;
+                        handle.set_state(issue.status).await?;
+                        remote_written = true;
+                    }
+                    item.action = if dry_run {
+                        "would-push".to_string()
+                    } else {
+                        "pushed".to_string()
+                    };
+                    item.details
+                        .push("pushed title/body from minibeads to GitHub".to_string());
                     if issue.status == Status::Closed
                         && !remote.state.eq_ignore_ascii_case("closed")
                     {
@@ -907,66 +1004,27 @@ async fn sync_linked_async(
                         item.details.push("reopened GitHub issue".to_string());
                     }
                     report.pushed_issues += 1;
-                } else {
-                    item.details.push(
-                        "previous divergent sync state has already converged; recording common base"
-                            .to_string(),
-                    );
                 }
-            }
-            (true, _, true, true) if local_hash != remote_hash => {
-                let conflict = format!(
-                    "{} / {} changed on both sides; leaving issue fields unchanged",
-                    issue.id, url
-                );
-                item.action = "conflict".to_string();
-                item.conflict = Some(conflict.clone());
-                item.details
-                    .push("local and GitHub issue fields both changed since last sync".to_string());
-                report.conflicts.push(conflict);
-                field_conflict = true;
-            }
-            (_, _, true, false) => {
-                if !dry_run {
-                    handle.edit_fields(&issue).await?;
-                    handle.set_state(issue.status).await?;
-                    remote_written = true;
+                (_, _, false, true) => {
+                    if !dry_run {
+                        apply_remote_to_local(storage, &issue, &remote)?;
+                        issue = storage
+                            .get_issue(&issue.id)?
+                            .ok_or_else(|| anyhow!("Issue not found after pull: {}", issue.id))?;
+                    }
+                    item.action = if dry_run {
+                        "would-pull".to_string()
+                    } else {
+                        "pulled".to_string()
+                    };
+                    item.details
+                        .push("pulled title/body/state from GitHub into minibeads".to_string());
+                    report.pulled_issues += 1;
                 }
-                item.action = if dry_run {
-                    "would-push".to_string()
-                } else {
-                    "pushed".to_string()
-                };
-                item.details
-                    .push("pushed title/body from minibeads to GitHub".to_string());
-                if issue.status == Status::Closed && !remote.state.eq_ignore_ascii_case("closed") {
-                    item.details.push("closed GitHub issue".to_string());
-                } else if issue.status != Status::Closed
-                    && remote.state.eq_ignore_ascii_case("closed")
-                {
-                    item.details.push("reopened GitHub issue".to_string());
+                _ => {
+                    item.details
+                        .push("issue fields already match last synced state".to_string());
                 }
-                report.pushed_issues += 1;
-            }
-            (_, _, false, true) => {
-                if !dry_run {
-                    apply_remote_to_local(storage, &issue, &remote)?;
-                    issue = storage
-                        .get_issue(&issue.id)?
-                        .ok_or_else(|| anyhow!("Issue not found after pull: {}", issue.id))?;
-                }
-                item.action = if dry_run {
-                    "would-pull".to_string()
-                } else {
-                    "pulled".to_string()
-                };
-                item.details
-                    .push("pulled title/body/state from GitHub into minibeads".to_string());
-                report.pulled_issues += 1;
-            }
-            _ => {
-                item.details
-                    .push("issue fields already match last synced state".to_string());
             }
         }
 
@@ -977,7 +1035,9 @@ async fn sync_linked_async(
             .map(|s| s.synced_remote_comment_ids.iter().cloned().collect())
             .unwrap_or_default();
 
-        let exported = if dry_run {
+        let exported = if pull_only {
+            0
+        } else if dry_run {
             local_comments
                 .iter()
                 .filter(|c| {
@@ -1026,7 +1086,17 @@ async fn sync_linked_async(
                 remote
             };
             let comments = storage.list_comments(&issue.id)?;
-            update_state_entry(&mut state, &issue, &remote, &comments);
+            if pull_only {
+                let synced_comments = comments
+                    .into_iter()
+                    .filter(|comment| {
+                        comment.source_id.is_some() || synced_local_ids.contains(&comment.id)
+                    })
+                    .collect::<Vec<_>>();
+                update_state_entry(&mut state, &issue, &remote, &synced_comments);
+            } else {
+                update_state_entry(&mut state, &issue, &remote, &comments);
+            }
         } else if field_conflict {
             item.details.push(
                 "left GitHub sync ancestry unchanged until the conflict is resolved".to_string(),
@@ -1240,8 +1310,14 @@ pub fn stress_test(
                 );
             }
 
-            sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-                .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
+            sync_linked(
+                &storage,
+                std::slice::from_ref(&issue.id),
+                Some(repo),
+                false,
+                false,
+            )
+            .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
                 .with_context(|| format!("stress convergence failed at step {}", step))?;
             if verbose {
@@ -1254,10 +1330,16 @@ pub fn stress_test(
                 );
             }
 
-            sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-                .with_context(|| {
-                    format!("stress no-op sync failed for {} at step {}", issue.id, step)
-                })?;
+            sync_linked(
+                &storage,
+                std::slice::from_ref(&issue.id),
+                Some(repo),
+                false,
+                false,
+            )
+            .with_context(|| {
+                format!("stress no-op sync failed for {} at step {}", issue.id, step)
+            })?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
                 .with_context(|| format!("stress no-op convergence failed at step {}", step))?;
             if verbose {
@@ -1280,8 +1362,14 @@ pub fn stress_test(
         }
         storage.close_issue(&issue.id, "stress complete")?;
         expected.status = Status::Closed;
-        sync_linked(&storage, std::slice::from_ref(&issue.id), Some(repo), false)
-            .with_context(|| format!("stress close sync failed for {}", issue.id))?;
+        sync_linked(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            Some(repo),
+            false,
+            false,
+        )
+        .with_context(|| format!("stress close sync failed for {}", issue.id))?;
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
         if verbose {
             eprintln!(
@@ -1403,12 +1491,12 @@ fn stress_test_adversarial(
             apply_adversarial_mutation(storage, context, step, idx, model, rng)?;
         }
 
-        let report = sync_linked(storage, &issue_ids, Some(context.repo), false)
+        let report = sync_linked(storage, &issue_ids, Some(context.repo), false, false)
             .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
             .with_context(|| format!("adversarial convergence failed at round {}", step))?;
 
-        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false)
+        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false, false)
             .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
             .with_context(|| format!("adversarial no-op check failed at round {}", step))?;
@@ -2325,6 +2413,37 @@ mod tests {
         (script.to_string_lossy().to_string(), log)
     }
 
+    #[cfg(unix)]
+    fn fake_gh_read_only(tmp: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = tmp.path().join("gh-read-only.log");
+        let json = tmp.path().join("issue-read-only.json");
+        let script = tmp.path().join("gh-read-only-fake");
+        let comment = r#"{"id":"comment-1","url":"https://github.com/example/repo/issues/1#issuecomment-1","author":{"login":"octo"},"body":"remote pull-only comment","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(
+            &json,
+            format!(
+                r#"{{"url":"https://github.com/example/repo/issues/1","title":"Remote title","body":"Remote body","state":"CLOSED","comments":[{}]}}"#,
+                comment
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$1 $2\" in\n  'issue view') cat {} ;;\n  *) echo \"unexpected write or command: $*\" >&2; exit 99 ;;\nesac\n",
+                shell_quote_arg(&log.to_string_lossy()),
+                shell_quote_arg(&json.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        (script.to_string_lossy().to_string(), log)
+    }
+
     fn remote_comment(id: &str, body: &str) -> RemoteComment {
         RemoteComment {
             id: id.to_string(),
@@ -2501,6 +2620,90 @@ mod tests {
         );
         assert!(
             calls.contains("issue comment https://github.com/example/repo/issues/2 --body"),
+            "{calls}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_sync_pull_only_imports_without_writing_to_github() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::init(tmp.path().join(".beads"), None, false).unwrap();
+        let issue = storage
+            .create_issue(
+                "Local title".to_string(),
+                "Local body".to_string(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                Some("https://github.com/example/repo/issues/1".to_string()),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let local_comment = storage
+            .add_comment(&issue.id, "local-user", "local-only comment")
+            .unwrap();
+        let (program, log) = fake_gh_read_only(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+
+        let report = block_on_github(sync_linked_with_store(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            false,
+            true,
+            &store,
+        ))
+        .unwrap();
+
+        assert_eq!(report.pushed_issues, 0);
+        assert_eq!(report.exported_comments, 0);
+        assert_eq!(report.pulled_issues, 1);
+        assert_eq!(report.imported_comments, 1);
+
+        let updated = storage.get_issue(&issue.id).unwrap().unwrap();
+        assert_eq!(updated.title, "Remote title");
+        assert_eq!(updated.description, "Remote body");
+        assert_eq!(updated.status, Status::Closed);
+
+        let comments = storage.list_comments(&issue.id).unwrap();
+        assert!(comments
+            .iter()
+            .any(|comment| comment.body == "local-only comment"));
+        assert!(comments
+            .iter()
+            .any(|comment| comment.body == "remote pull-only comment"));
+
+        let state = load_state(&storage.get_beads_dir()).unwrap();
+        let entry = state
+            .issues
+            .get("https://github.com/example/repo/issues/1")
+            .unwrap();
+        assert_eq!(entry.synced_remote_comment_ids, vec!["comment-1"]);
+        assert!(!entry
+            .synced_local_comment_ids
+            .iter()
+            .any(|id| id == &local_comment.id));
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("issue view "))
+                .count(),
+            1,
+            "{calls}"
+        );
+        assert!(
+            !calls.lines().any(|line| {
+                line.starts_with("issue comment ")
+                    || line.starts_with("issue edit ")
+                    || line.starts_with("issue close ")
+                    || line.starts_with("issue reopen ")
+            }),
             "{calls}"
         );
     }

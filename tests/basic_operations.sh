@@ -141,6 +141,20 @@ assert_contains "$OUTPUT" "Notes" "Should show notes section"
 assert_contains "$OUTPUT" "Test notes" "Should show notes content"
 assert_contains "$OUTPUT" "Comments" "Should show comments section"
 assert_contains "$OUTPUT" "Test comment" "Should show comment content"
+OUTPUT=$("$BD_BIN" show test-1 --json 2>&1)
+JSON_COMMENT_BODY=$(JSON_OUTPUT="$OUTPUT" python3 - <<'PY'
+import json
+import os
+
+issues = json.loads(os.environ["JSON_OUTPUT"])
+assert isinstance(issues, list), "show --json should return a list"
+comments = issues[0]["comments"]
+assert isinstance(comments, list), "comments should be a list"
+assert comments[0]["issue_id"] == "test-1"
+print(comments[0]["body"])
+PY
+)
+assert_equals "Test comment" "$JSON_COMMENT_BODY" "JSON show should include structured comments"
 
 # Test 6: Update issue status
 echo -e "\n${YELLOW}Test 6: Update issue status${NC}"
