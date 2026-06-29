@@ -8,7 +8,7 @@ use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::process::Command;
@@ -110,10 +110,10 @@ pub struct GithubImportedIssueReport {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct GithubSyncState {
     #[serde(default)]
-    issues: HashMap<String, GithubIssueState>,
+    issues: BTreeMap<String, GithubIssueState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct GithubIssueState {
     local_id: String,
     local_hash: String,
@@ -2016,26 +2016,40 @@ fn update_state_entry(
     remote: &RemoteIssue,
     comments: &[Comment],
 ) {
-    state.issues.insert(
-        remote.url.clone(),
-        GithubIssueState {
-            local_id: issue.id.clone(),
-            local_hash: hash_local_issue(issue),
-            remote_hash: hash_remote_issue(remote),
-            synced_at: Utc::now(),
-            synced_local_comment_ids: comments
-                .iter()
-                .filter(|c| !is_local_marker_comment(c))
-                .map(|c| c.id.clone())
-                .collect(),
-            synced_remote_comment_ids: remote
-                .comments
-                .iter()
-                .filter(|c| !is_marker_comment(c))
-                .map(|c| c.id.clone())
-                .collect(),
-        },
-    );
+    let existing = state.issues.get(&remote.url);
+    let synced_local_comment_ids = comments
+        .iter()
+        .filter(|c| !is_local_marker_comment(c))
+        .map(|c| c.id.clone())
+        .collect();
+    let synced_remote_comment_ids = remote
+        .comments
+        .iter()
+        .filter(|c| !is_marker_comment(c))
+        .map(|c| c.id.clone())
+        .collect();
+    let mut next = GithubIssueState {
+        local_id: issue.id.clone(),
+        local_hash: hash_local_issue(issue),
+        remote_hash: hash_remote_issue(remote),
+        synced_at: Utc::now(),
+        synced_local_comment_ids,
+        synced_remote_comment_ids,
+    };
+    if let Some(previous) = existing {
+        let only_synced_at_would_change = previous.local_id == next.local_id
+            && previous.local_hash == next.local_hash
+            && previous.remote_hash == next.remote_hash
+            && previous.synced_local_comment_ids == next.synced_local_comment_ids
+            && previous.synced_remote_comment_ids == next.synced_remote_comment_ids;
+        if only_synced_at_would_change {
+            next.synced_at = previous.synced_at;
+        }
+        if previous == &next {
+            return;
+        }
+    }
+    state.issues.insert(remote.url.clone(), next);
 }
 
 fn load_state(beads_dir: &Path) -> Result<GithubSyncState> {
@@ -2688,6 +2702,8 @@ mod tests {
             .iter()
             .any(|id| id == &local_comment.id));
         assert_eq!(entry.local_hash, entry.remote_hash);
+        let state_path = storage.get_beads_dir().join("github-sync-state.json");
+        let state_before_second_sync = std::fs::read_to_string(&state_path).unwrap();
 
         let second_report = block_on_github(sync_linked_with_store(
             &storage,
@@ -2701,6 +2717,10 @@ mod tests {
         assert_eq!(second_report.exported_comments, 0);
         assert_eq!(second_report.pulled_issues, 0);
         assert_eq!(second_report.imported_comments, 0);
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            state_before_second_sync
+        );
 
         let calls = std::fs::read_to_string(log).unwrap();
         assert_eq!(
