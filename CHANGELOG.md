@@ -6,6 +6,21 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-07-01
+
+### Added
+
+- Expanded upstream `bd` compatibility with additional accepted global/init
+  flags, `children`, `label`, `config`, dependency listing, and no-op
+  compatibility `migrate` commands.
+- `mb show --json` now includes structured comment data.
+- GitHub sync now supports pull-only behavior for pulling GitHub
+  title/body/status/comments into minibeads without writing to GitHub.
+
+### Fixed
+
+- GitHub pull-only and no-op sync paths are now idempotent.
+
 ## [0.21.3] - 2026-06-27
 
 ### Added
