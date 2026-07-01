@@ -7,7 +7,7 @@ use crate::types::{
 use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -95,6 +95,10 @@ impl Storage {
     pub fn get_beads_dir(&self) -> PathBuf {
         self.beads_dir.clone()
     }
+
+    fn config_path(&self) -> PathBuf {
+        self.beads_dir.join("config.yaml")
+    }
 }
 
 impl Storage {
@@ -175,7 +179,7 @@ impl Storage {
 
     /// Get the issue prefix from config
     pub fn get_prefix(&self) -> Result<String> {
-        let config_path = self.beads_dir.join("config.yaml");
+        let config_path = self.config_path();
 
         if !config_path.exists() {
             // Try to infer from existing issues
@@ -193,6 +197,52 @@ impl Storage {
             Some(prefix) => Ok(prefix.clone()),
             None => self.infer_prefix_from_issues(),
         }
+    }
+
+    /// Get a compatibility config value from config.yaml.
+    pub fn get_config_value(&self, key: &str) -> Result<Option<String>> {
+        let key = normalize_config_key(key);
+        let config_path = self.config_path();
+
+        if !config_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
+        let config: HashMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
+
+        Ok(config.get(&key).map(yaml_value_to_string))
+    }
+
+    /// Set a compatibility config value in config.yaml.
+    pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
+        let key = normalize_config_key(key);
+        let config_path = self.config_path();
+
+        if !config_path.exists() {
+            fs::write(&config_path, "").context("Failed to create config.yaml")?;
+        }
+
+        upsert_yaml_key_value(&config_path, &key, value)
+    }
+
+    /// Return all config.yaml scalar values for `mb config list`.
+    pub fn list_config_values(&self) -> Result<HashMap<String, String>> {
+        let config_path = self.config_path();
+
+        if !config_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let content = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
+        let config: HashMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(&content).context("Failed to parse config.yaml")?;
+
+        Ok(config
+            .into_iter()
+            .map(|(key, value)| (key, yaml_value_to_string(&value)))
+            .collect())
     }
 
     /// Check if hash-based IDs are enabled in config-minibeads.yaml
@@ -615,6 +665,84 @@ impl Storage {
         fs::write(&issue_path, markdown).context("Failed to write issue file")?;
 
         Ok(issue)
+    }
+
+    /// Add a label to an issue, returning the updated issue.
+    pub fn add_label(&self, id: &str, label: &str) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        if !issue.labels.iter().any(|existing| existing == label) {
+            issue.labels.push(label.to_string());
+            issue.labels.sort();
+        }
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
+    /// Remove a label from an issue, returning the updated issue.
+    pub fn remove_label(&self, id: &str, label: &str) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        issue.labels.retain(|existing| existing != label);
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
+    /// Replace all labels on an issue.
+    pub fn set_labels(&self, id: &str, labels: Vec<String>) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        issue.labels = normalize_labels(labels);
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
+    /// List all unique labels across issues.
+    pub fn list_all_labels(&self) -> Result<Vec<String>> {
+        let issues = self.list_issues(None, None, None, None, None)?;
+        let labels = issues
+            .into_iter()
+            .flat_map(|issue| issue.labels)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(labels)
     }
 
     /// Apply a targeted search/replace edit to one free-text field of an issue.
@@ -1170,6 +1298,41 @@ impl Storage {
     }
 }
 
+fn normalize_config_key(key: &str) -> String {
+    match key {
+        "issue_prefix" => "issue-prefix".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn yaml_value_to_string(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Null => String::new(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    }
+}
+
+fn normalize_labels(labels: Vec<String>) -> Vec<String> {
+    labels
+        .into_iter()
+        .flat_map(|label| {
+            label
+                .split(',')
+                .map(|part| part.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|label| !label.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Recursively build a tree node
 fn build_tree_node(
     issue: &Issue,
@@ -1379,7 +1542,9 @@ impl Storage {
 
         // Apply limit
         if let Some(limit) = limit {
-            issues.truncate(limit);
+            if limit > 0 {
+                issues.truncate(limit);
+            }
         }
 
         // Populate dependents
@@ -1512,7 +1677,9 @@ impl Storage {
         }
 
         // Apply limit after sorting
-        ready.truncate(limit);
+        if limit > 0 {
+            ready.truncate(limit);
+        }
 
         Ok(ready)
     }
@@ -2670,6 +2837,52 @@ fn update_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result
 
     // Write back all lines
     let content = lines.join("\n") + "\n"; // Ensure file ends with newline
+    fs::write(file_path, content)
+        .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
+
+    Ok(())
+}
+
+fn upsert_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+
+    if !file_path.exists() {
+        fs::write(file_path, "")
+            .with_context(|| format!("Failed to create config file: {}", file_path.display()))?;
+    }
+
+    let file = fs::File::open(file_path)
+        .with_context(|| format!("Failed to open config file: {}", file_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("Failed to read config file: {}", file_path.display()))?;
+
+    let key_prefix = format!("{}:", key);
+    let rendered_value = serde_yaml::to_string(new_value)
+        .unwrap_or_else(|_| format!("{:?}\n", new_value))
+        .trim()
+        .trim_start_matches("---")
+        .trim()
+        .to_string();
+    let mut found = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&key_prefix) {
+            let indent = line.len() - line.trim_start().len();
+            *line = format!("{}{}: {}", " ".repeat(indent), key, rendered_value);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        lines.push(format!("{}: {}", key, rendered_value));
+    }
+
+    let content = lines.join("\n") + "\n";
     fs::write(file_path, content)
         .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
 

@@ -14,7 +14,7 @@ mod built_info {
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -77,9 +77,49 @@ struct GlobalOpts {
     #[arg(long, global = true)]
     actor: Option<String>,
 
+    /// Change working directory before running the command (upstream bd compatibility)
+    #[arg(short = 'C', long = "directory", global = true, hide = true)]
+    directory: Option<PathBuf>,
+
     /// Output JSON format
     #[arg(long, global = true)]
     json: bool,
+
+    /// Suppress non-essential output (accepted for upstream bd compatibility)
+    #[arg(short = 'q', long, global = true, hide = true)]
+    quiet: bool,
+
+    /// Enable verbose/debug output (accepted for upstream bd compatibility)
+    #[arg(short = 'v', long, global = true, hide = true)]
+    verbose: bool,
+
+    /// Generate CPU profile (ignored for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    profile: bool,
+
+    /// Read-only mode (accepted for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    readonly: bool,
+
+    /// Sandbox mode (accepted for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    sandbox: bool,
+
+    /// Ignore schema skew (ignored for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    ignore_schema_skew: bool,
+
+    /// Dolt auto-commit policy (ignored for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    dolt_auto_commit: Option<String>,
+
+    /// Proceed with stale data (ignored for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    allow_stale: bool,
+
+    /// Flat output mode (ignored for upstream bd compatibility)
+    #[arg(long, global = true, hide = true)]
+    flat: bool,
 
     /// Validation mode for parsing issues (minibeads-specific)
     #[arg(
@@ -137,6 +177,34 @@ enum Commands {
         /// Use hash-based issue IDs instead of sequential numbers (minibeads-specific)
         #[arg(long = "mb-hash-ids")]
         mb_hash_ids: bool,
+
+        /// Use external Dolt server (ignored for upstream bd compatibility)
+        #[arg(long, hide = true)]
+        server: bool,
+
+        /// Dolt server port (ignored for upstream bd compatibility)
+        #[arg(long = "server-port", hide = true)]
+        server_port: Option<u16>,
+
+        /// Database name (ignored for upstream bd compatibility)
+        #[arg(long, hide = true)]
+        database: Option<String>,
+
+        /// Storage backend (ignored for upstream bd compatibility)
+        #[arg(long, hide = true)]
+        backend: Option<String>,
+
+        /// Suppress init output (upstream bd compatibility)
+        #[arg(short = 'q', long, hide = true)]
+        quiet: bool,
+
+        /// Skip agent instruction generation (ignored for upstream bd compatibility)
+        #[arg(long = "skip-agents", hide = true)]
+        skip_agents: bool,
+
+        /// Skip git hook setup (ignored for upstream bd compatibility)
+        #[arg(long = "skip-hooks", hide = true)]
+        skip_hooks: bool,
     },
 
     /// Create a new issue
@@ -153,7 +221,12 @@ enum Commands {
         priority: i32,
 
         /// Issue type
-        #[arg(short = 't', long, default_value = "task")]
+        #[arg(
+            short = 't',
+            long = "issue-type",
+            visible_alias = "type",
+            default_value = "task"
+        )]
         issue_type: IssueType,
 
         /// Description
@@ -175,6 +248,10 @@ enum Commands {
         /// Labels (can be specified multiple times)
         #[arg(short, long)]
         label: Vec<String>,
+
+        /// Comma-separated labels (upstream bd compatibility)
+        #[arg(long = "labels")]
+        labels: Vec<String>,
 
         /// External reference
         #[arg(long)]
@@ -201,13 +278,21 @@ enum Commands {
         /// Create multiple issues from markdown file
         #[arg(short = 'f', long)]
         file: Option<PathBuf>,
+
+        /// Mark issue as ephemeral (ignored for upstream bd compatibility)
+        #[arg(long, hide = true)]
+        ephemeral: bool,
+
+        /// Suppress non-JSON output (upstream bd compatibility)
+        #[arg(long, hide = true)]
+        silent: bool,
     },
 
     /// List issues
     List {
         /// Filter by status
         #[arg(short = 's', long)]
-        status: Option<Status>,
+        status: Option<String>,
 
         /// Filter by priority (comma-separated list, e.g., "1,2,3")
         #[arg(short = 'p', long)]
@@ -237,6 +322,10 @@ enum Commands {
         #[arg(long)]
         title: Option<String>,
 
+        /// Filter to direct children of a parent issue
+        #[arg(long)]
+        parent: Option<String>,
+
         /// Maximum number of issues to return
         #[arg(long)]
         limit: Option<usize>,
@@ -244,12 +333,26 @@ enum Commands {
         /// Group issues by priority with headers
         #[arg(long)]
         group_priority: bool,
+
+        /// Include infrastructure issues (accepted for upstream bd compatibility)
+        #[arg(long = "include-infra", hide = true)]
+        include_infra: bool,
+
+        /// Disable pager output (accepted for upstream bd compatibility)
+        #[arg(long = "no-pager", hide = true)]
+        no_pager: bool,
     },
 
     /// Show issue details
     Show {
         /// Issue IDs (supports shorthand: "14" expands to "prefix-14")
         issue_ids: Vec<String>,
+    },
+
+    /// List direct child issues
+    Children {
+        /// Parent issue ID
+        parent_id: String,
     },
 
     /// Update one or more issues
@@ -268,6 +371,10 @@ enum Commands {
         /// New assignee
         #[arg(short = 'a', long)]
         assignee: Option<String>,
+
+        /// Clear assignee (upstream bd compatibility)
+        #[arg(long)]
+        unassign: bool,
 
         /// New title
         #[arg(long, allow_hyphen_values = true)]
@@ -318,6 +425,18 @@ enum Commands {
         /// New external reference
         #[arg(long)]
         external_ref: Option<String>,
+
+        /// Add a label. May be provided multiple times.
+        #[arg(long = "add-label")]
+        add_label: Vec<String>,
+
+        /// Remove a label. May be provided multiple times.
+        #[arg(long = "remove-label")]
+        remove_label: Vec<String>,
+
+        /// Replace labels with a comma-separated set.
+        #[arg(long = "set-labels")]
+        set_labels: Option<String>,
 
         /// Atomically claim the issue: sets you as assignee and status to
         /// in_progress, recording claimed_at/claimed_until. Fails if another
@@ -431,6 +550,41 @@ enum Commands {
     Dep {
         #[command(subcommand)]
         command: DepCommands,
+    },
+
+    /// Manage issue labels
+    Label {
+        #[command(subcommand)]
+        command: LabelCommands,
+    },
+
+    /// Manage compatibility configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
+    /// Compatibility migration command. Plain `migrate` is a no-op for minibeads.
+    Migrate {
+        /// Show what would be done without changing data
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Auto-confirm prompts
+        #[arg(long)]
+        yes: bool,
+
+        /// Output migration stats as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Show migration plan
+        #[arg(long)]
+        inspect: bool,
+
+        /// Update repository ID (ignored)
+        #[arg(long = "update-repo-id")]
+        update_repo_id: bool,
     },
 
     /// Manage issue comments (minibeads-specific)
@@ -572,6 +726,20 @@ enum DepCommands {
         depends_on_id: String,
     },
 
+    /// List dependencies or dependents
+    List {
+        /// Issue IDs to inspect
+        issue_ids: Vec<String>,
+
+        /// Direction: down (dependencies) or up (dependents)
+        #[arg(long, default_value = "down")]
+        direction: String,
+
+        /// Filter by dependency type
+        #[arg(short = 't', long = "type")]
+        r#type: Option<DependencyType>,
+    },
+
     /// Show dependency tree
     Tree {
         /// Issue ID to show tree for (supports shorthand: "14" expands to "prefix-14")
@@ -588,6 +756,44 @@ enum DepCommands {
 
     /// Detect dependency cycles
     Cycles,
+}
+
+#[derive(Subcommand)]
+enum LabelCommands {
+    /// Add a label to one or more issues
+    Add {
+        /// Issue IDs followed by the label to add
+        #[arg(required = true, num_args = 2..)]
+        args: Vec<String>,
+    },
+
+    /// Remove a label from one or more issues
+    Remove {
+        /// Issue IDs followed by the label to remove
+        #[arg(required = true, num_args = 2..)]
+        args: Vec<String>,
+    },
+
+    /// List labels for an issue
+    List { issue_id: String },
+
+    /// List all unique labels
+    ListAll,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a configuration value
+    Get { key: String },
+
+    /// Set a configuration value
+    Set { key: String, value: String },
+
+    /// Delete a configuration value (currently sets it empty for compatibility)
+    Unset { key: String },
+
+    /// List all configuration values
+    List,
 }
 
 #[derive(Subcommand)]
@@ -733,6 +939,16 @@ struct ShowCommentView<'a> {
     #[serde(flatten)]
     stored: &'a Comment,
     timestamp: String,
+}
+
+#[derive(serde::Serialize)]
+struct DepListRow {
+    id: String,
+    issue_id: String,
+    depends_on_id: String,
+    dependency_type: String,
+    #[serde(rename = "type")]
+    dep_type: String,
 }
 
 impl<'a> From<&'a Comment> for ShowCommentView<'a> {
@@ -1001,6 +1217,32 @@ fn comments_markdown(comments: &[Comment]) -> String {
         .join("\n\n")
 }
 
+fn split_label_args(labels: Vec<String>) -> Vec<String> {
+    labels
+        .into_iter()
+        .flat_map(|label| split_label_csv(&label))
+        .collect()
+}
+
+fn split_label_csv(labels: &str) -> Vec<String> {
+    labels
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn split_label_command_args(mut args: Vec<String>) -> Result<(Vec<String>, String)> {
+    let label = args
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("Label command requires issue IDs and a label"))?;
+    if args.is_empty() {
+        anyhow::bail!("Label command requires at least one issue ID");
+    }
+    Ok((args, label))
+}
+
 fn print_markdown_with_external_highlighter(markdown: &str) -> Result<bool> {
     for program in ["batcat", "bat"] {
         let mut child = match ProcessCommand::new(program)
@@ -1152,6 +1394,11 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Some(directory) = &cli.global_opts.directory {
+        env::set_current_dir(directory)
+            .with_context(|| format!("Failed to change directory to {}", directory.display()))?;
+    }
+
     // Extract fields needed for get_storage before matching on cli.command
     // This avoids borrowing issues when we try to call get_storage(mb_beads_dir, db) inside match arms
     let mb_beads_dir = &cli.global_opts.mb_beads_dir;
@@ -1164,6 +1411,13 @@ fn run() -> Result<()> {
         Commands::Init {
             prefix,
             mb_hash_ids,
+            server: _,
+            server_port: _,
+            database: _,
+            backend: _,
+            quiet,
+            skip_agents: _,
+            skip_hooks: _,
         } => {
             // IMPORTANT: init always creates .beads in current directory
             // It does NOT use find_beads_dir() or respect --db/--mb-beads-dir flags
@@ -1181,7 +1435,7 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            if !json {
+            if !json && !quiet {
                 println!(
                     "Initialized beads database with prefix: {}",
                     storage.get_prefix()?
@@ -1200,12 +1454,15 @@ fn run() -> Result<()> {
             acceptance,
             assignee,
             label,
+            labels,
             external_ref,
             id,
             deps,
             parent,
             force: _force,
             file,
+            ephemeral: _,
+            silent,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -1277,6 +1534,9 @@ fn run() -> Result<()> {
                 parsed_deps.push((parent_id, DependencyType::ParentChild));
             }
 
+            let mut all_labels = label;
+            all_labels.extend(split_label_args(labels));
+
             let issue = storage.create_issue(
                 actual_title,
                 description,
@@ -1285,7 +1545,7 @@ fn run() -> Result<()> {
                 priority,
                 issue_type,
                 assignee,
-                label,
+                all_labels,
                 external_ref,
                 id,
                 parsed_deps,
@@ -1293,7 +1553,7 @@ fn run() -> Result<()> {
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&issue)?);
-            } else {
+            } else if !silent {
                 println!("Created issue: {}", issue.id);
             }
             Ok(())
@@ -1308,8 +1568,11 @@ fn run() -> Result<()> {
             github,
             id,
             title,
+            parent,
             limit,
             group_priority,
+            include_infra: _,
+            no_pager: _,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
@@ -1329,8 +1592,18 @@ fn run() -> Result<()> {
                 None
             };
 
-            let mut issues =
-                storage.list_issues(status, priority_list, r#type, assignee.as_deref(), None)?;
+            let status_filter = match status.as_deref() {
+                None | Some("all") => None,
+                Some(value) => Some(value.parse::<Status>()?),
+            };
+
+            let mut issues = storage.list_issues(
+                status_filter,
+                priority_list,
+                r#type,
+                assignee.as_deref(),
+                None,
+            )?;
 
             // Apply label filter (must have ALL specified labels)
             if !labels.is_empty() {
@@ -1359,9 +1632,21 @@ fn run() -> Result<()> {
                 issues.retain(|issue| issue.title.to_lowercase().contains(&title_lower));
             }
 
+            // Apply parent-child filter
+            if let Some(parent_id) = parent {
+                issues.retain(|issue| {
+                    issue
+                        .depends_on
+                        .get(&parent_id)
+                        .is_some_and(|dep_type| *dep_type == DependencyType::ParentChild)
+                });
+            }
+
             // Apply limit if specified
             if let Some(limit_val) = limit {
-                issues.truncate(limit_val);
+                if limit_val > 0 {
+                    issues.truncate(limit_val);
+                }
             }
 
             if json {
@@ -1472,11 +1757,37 @@ fn run() -> Result<()> {
             Ok(())
         }
 
+        Commands::Children { parent_id } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            let mut children = storage.list_issues(None, None, None, None, None)?;
+            children.retain(|issue| {
+                issue
+                    .depends_on
+                    .get(&parent_id)
+                    .is_some_and(|dep_type| *dep_type == DependencyType::ParentChild)
+            });
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&children)?);
+            } else {
+                for child in children {
+                    println!("{}: {} [{}]", child.id, child.title, child.status);
+                }
+            }
+            Ok(())
+        }
+
         Commands::Update {
             issue_ids,
             status,
             priority,
             assignee,
+            unassign,
             title,
             description,
             search,
@@ -1487,6 +1798,9 @@ fn run() -> Result<()> {
             acceptance,
             notes,
             external_ref,
+            add_label,
+            remove_label,
+            set_labels,
             claim,
             team,
             claim_for,
@@ -1535,6 +1849,9 @@ fn run() -> Result<()> {
             if let Some(a) = assignee {
                 updates.insert("assignee".to_string(), a);
             }
+            if unassign {
+                updates.insert("assignee".to_string(), String::new());
+            }
             if let Some(t) = title {
                 updates.insert("title".to_string(), t);
             }
@@ -1557,13 +1874,23 @@ fn run() -> Result<()> {
             // Update all specified issues
             let mut updated_issues = Vec::new();
             for issue_id in &issue_ids {
-                let issue = if claim {
+                let mut issue = if claim {
                     let actor = resolve_actor(team.as_deref(), claim_as.as_deref());
                     let until = claim_deadline(claim_for);
                     storage.claim_issue(issue_id, &actor, until, &updates)?
                 } else {
                     storage.update_issue(issue_id, updates.clone())?
                 };
+
+                if let Some(labels) = &set_labels {
+                    issue = storage.set_labels(issue_id, split_label_csv(labels))?;
+                }
+                for label in split_label_args(add_label.clone()) {
+                    issue = storage.add_label(issue_id, &label)?;
+                }
+                for label in split_label_args(remove_label.clone()) {
+                    issue = storage.remove_label(issue_id, &label)?;
+                }
                 updated_issues.push(issue);
             }
 
@@ -1808,6 +2135,70 @@ fn run() -> Result<()> {
                         );
                     }
                 }
+                DepCommands::List {
+                    issue_ids,
+                    direction,
+                    r#type,
+                } => {
+                    let mut rows = Vec::new();
+                    for issue_id in issue_ids {
+                        let issue = storage
+                            .get_issue(&issue_id)?
+                            .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", issue_id))?;
+
+                        match direction.as_str() {
+                            "down" => {
+                                for (target_id, dep_type) in issue.depends_on {
+                                    if r#type.is_none_or(|filter| filter == dep_type) {
+                                        let dep_type = dep_type.to_string();
+                                        rows.push(DepListRow {
+                                            id: target_id.clone(),
+                                            issue_id: issue.id.clone(),
+                                            depends_on_id: target_id,
+                                            dependency_type: dep_type.clone(),
+                                            dep_type,
+                                        });
+                                    }
+                                }
+                            }
+                            "up" => {
+                                for dependent in issue.dependents {
+                                    let dep_type = dependent
+                                        .dep_type
+                                        .parse::<DependencyType>()
+                                        .unwrap_or(DependencyType::Blocks);
+                                    if r#type.is_none_or(|filter| filter == dep_type) {
+                                        let dep_type = dependent.dep_type;
+                                        rows.push(DepListRow {
+                                            id: dependent.id.clone(),
+                                            issue_id: dependent.id,
+                                            depends_on_id: issue.id.clone(),
+                                            dependency_type: dep_type.clone(),
+                                            dep_type,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {
+                                anyhow::bail!(
+                                    "Invalid direction '{}'. Use 'down' or 'up'",
+                                    direction
+                                );
+                            }
+                        }
+                    }
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        for row in rows {
+                            println!(
+                                "{} depends on {} ({})",
+                                row.issue_id, row.depends_on_id, row.dep_type
+                            );
+                        }
+                    }
+                }
                 DepCommands::Tree {
                     issue_id,
                     max_depth,
@@ -1843,6 +2234,135 @@ fn run() -> Result<()> {
                         }
                     }
                 }
+            }
+            Ok(())
+        }
+
+        Commands::Label { command } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            match command {
+                LabelCommands::Add { args } => {
+                    let (issue_ids, label) = split_label_command_args(args)?;
+                    let mut updated = Vec::new();
+                    for issue_id in issue_ids {
+                        updated.push(storage.add_label(&issue_id, &label)?);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&updated)?);
+                    } else {
+                        for issue in updated {
+                            println!("Added label '{}' to {}", label, issue.id);
+                        }
+                    }
+                }
+                LabelCommands::Remove { args } => {
+                    let (issue_ids, label) = split_label_command_args(args)?;
+                    let mut updated = Vec::new();
+                    for issue_id in issue_ids {
+                        updated.push(storage.remove_label(&issue_id, &label)?);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&updated)?);
+                    } else {
+                        for issue in updated {
+                            println!("Removed label '{}' from {}", label, issue.id);
+                        }
+                    }
+                }
+                LabelCommands::List { issue_id } => {
+                    let issue = storage
+                        .get_issue(&issue_id)?
+                        .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", issue_id))?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&issue.labels)?);
+                    } else {
+                        for label in issue.labels {
+                            println!("{}", label);
+                        }
+                    }
+                }
+                LabelCommands::ListAll => {
+                    let labels = storage.list_all_labels()?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&labels)?);
+                    } else {
+                        for label in labels {
+                            println!("{}", label);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Config { command } => {
+            let storage = get_storage(mb_beads_dir, db)?;
+
+            if !mb_no_cmd_logging {
+                let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            match command {
+                ConfigCommands::Get { key } => {
+                    if let Some(value) = storage.get_config_value(&key)? {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&value)?);
+                        } else {
+                            println!("{}", value);
+                        }
+                    }
+                }
+                ConfigCommands::Set { key, value } => {
+                    storage.set_config_value(&key, &value)?;
+                    if !json {
+                        println!("Set {}={}", key, value);
+                    }
+                }
+                ConfigCommands::Unset { key } => {
+                    storage.set_config_value(&key, "")?;
+                    if !json {
+                        println!("Unset {}", key);
+                    }
+                }
+                ConfigCommands::List => {
+                    let config = storage
+                        .list_config_values()?
+                        .into_iter()
+                        .collect::<BTreeMap<_, _>>();
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&config)?);
+                    } else {
+                        for (key, value) in config {
+                            println!("{}={}", key, value);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Migrate {
+            dry_run: _,
+            yes: _,
+            json: migrate_json,
+            inspect: _,
+            update_repo_id: _,
+        } => {
+            if migrate_json || json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "ok",
+                        "message": "minibeads markdown storage has no Beads schema migrations"
+                    })
+                );
+            } else {
+                println!("No migrations needed for minibeads markdown storage.");
             }
             Ok(())
         }
@@ -2470,8 +2990,9 @@ fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<S
     // 1. --mb-beads-dir flag (preferred, minibeads-specific)
     // 2. --db flag (for upstream compatibility, treated as syntactic sugar for BEADS_DIR)
     // 3. MB_BEADS_DIR environment variable (minibeads-specific)
-    // 4. BEADS_DB environment variable (for upstream compatibility)
-    // 5. Search for .beads in current directory and ancestors
+    // 4. BEADS_DIR environment variable (upstream compatibility)
+    // 5. BEADS_DB environment variable (for upstream compatibility)
+    // 6. Search for .beads in current directory and ancestors
 
     let beads_dir = if let Some(dir) = mb_beads_dir {
         // --mb-beads-dir: use directly
@@ -2488,6 +3009,8 @@ fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<S
             db_path.clone()
         }
     } else if let Ok(beads_dir) = env::var("MB_BEADS_DIR") {
+        PathBuf::from(beads_dir)
+    } else if let Ok(beads_dir) = env::var("BEADS_DIR") {
         PathBuf::from(beads_dir)
     } else if let Ok(beads_db) = env::var("BEADS_DB") {
         let db_path = PathBuf::from(beads_db);

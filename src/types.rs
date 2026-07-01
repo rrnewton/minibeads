@@ -71,6 +71,11 @@ pub enum Status {
     Open,
     InProgress,
     Blocked,
+    Deferred,
+    Hooked,
+    Pinned,
+    StagedReady,
+    StagedWarnings,
     Closed,
 }
 
@@ -81,6 +86,11 @@ impl Status {
             Status::Open => "open",
             Status::InProgress => "in_progress",
             Status::Blocked => "blocked",
+            Status::Deferred => "deferred",
+            Status::Hooked => "hooked",
+            Status::Pinned => "pinned",
+            Status::StagedReady => "staged_ready",
+            Status::StagedWarnings => "staged_warnings",
             Status::Closed => "closed",
         }
     }
@@ -100,9 +110,14 @@ impl std::str::FromStr for Status {
             "open" => Ok(Status::Open),
             "in_progress" => Ok(Status::InProgress),
             "blocked" => Ok(Status::Blocked),
+            "deferred" => Ok(Status::Deferred),
+            "hooked" => Ok(Status::Hooked),
+            "pinned" => Ok(Status::Pinned),
+            "staged_ready" => Ok(Status::StagedReady),
+            "staged_warnings" => Ok(Status::StagedWarnings),
             "closed" => Ok(Status::Closed),
             _ => Err(anyhow::anyhow!(
-                "Invalid status: '{}'. Valid values are: open, in_progress, blocked, closed",
+                "Invalid status: '{}'. Valid values are: open, in_progress, blocked, deferred, hooked, pinned, staged_ready, staged_warnings, closed",
                 s
             )),
         }
@@ -118,6 +133,20 @@ pub enum IssueType {
     Task,
     Epic,
     Chore,
+    Agent,
+    Role,
+    Rig,
+    Convoy,
+    Slot,
+    Queue,
+    Event,
+    Message,
+    Molecule,
+    Gate,
+    #[serde(rename = "merge-request")]
+    MergeRequest,
+    Workflow,
+    Patrol,
 }
 
 impl IssueType {
@@ -129,6 +158,19 @@ impl IssueType {
             IssueType::Task => "task",
             IssueType::Epic => "epic",
             IssueType::Chore => "chore",
+            IssueType::Agent => "agent",
+            IssueType::Role => "role",
+            IssueType::Rig => "rig",
+            IssueType::Convoy => "convoy",
+            IssueType::Slot => "slot",
+            IssueType::Queue => "queue",
+            IssueType::Event => "event",
+            IssueType::Message => "message",
+            IssueType::Molecule => "molecule",
+            IssueType::Gate => "gate",
+            IssueType::MergeRequest => "merge-request",
+            IssueType::Workflow => "workflow",
+            IssueType::Patrol => "patrol",
         }
     }
 }
@@ -149,8 +191,21 @@ impl std::str::FromStr for IssueType {
             "task" => Ok(IssueType::Task),
             "epic" => Ok(IssueType::Epic),
             "chore" => Ok(IssueType::Chore),
+            "agent" => Ok(IssueType::Agent),
+            "role" => Ok(IssueType::Role),
+            "rig" => Ok(IssueType::Rig),
+            "convoy" => Ok(IssueType::Convoy),
+            "slot" => Ok(IssueType::Slot),
+            "queue" => Ok(IssueType::Queue),
+            "event" => Ok(IssueType::Event),
+            "message" => Ok(IssueType::Message),
+            "molecule" => Ok(IssueType::Molecule),
+            "gate" => Ok(IssueType::Gate),
+            "merge-request" => Ok(IssueType::MergeRequest),
+            "workflow" => Ok(IssueType::Workflow),
+            "patrol" => Ok(IssueType::Patrol),
             _ => Err(anyhow::anyhow!(
-                "Invalid issue type: '{}'. Valid values are: bug, feature, task, epic, chore",
+                "Invalid issue type: '{}'. Valid values are: bug, feature, task, epic, chore, agent, role, rig, convoy, slot, queue, event, message, molecule, gate, merge-request, workflow, patrol",
                 s
             )),
         }
@@ -218,6 +273,7 @@ pub enum DependencyType {
     Related,
     ParentChild,
     DiscoveredFrom,
+    Tracks,
 }
 
 impl DependencyType {
@@ -228,6 +284,7 @@ impl DependencyType {
             DependencyType::Related => "related",
             DependencyType::ParentChild => "parent-child",
             DependencyType::DiscoveredFrom => "discovered-from",
+            DependencyType::Tracks => "tracks",
         }
     }
 }
@@ -247,8 +304,9 @@ impl std::str::FromStr for DependencyType {
             "related" => Ok(DependencyType::Related),
             "parent-child" => Ok(DependencyType::ParentChild),
             "discovered-from" => Ok(DependencyType::DiscoveredFrom),
+            "tracks" => Ok(DependencyType::Tracks),
             _ => Err(anyhow::anyhow!(
-                "Invalid dependency type: '{}'. Valid values are: blocks, related, parent-child, discovered-from",
+                "Invalid dependency type: '{}'. Valid values are: blocks, related, parent-child, discovered-from, tracks",
                 s
             )),
         }
