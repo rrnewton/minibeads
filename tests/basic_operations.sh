@@ -101,14 +101,14 @@ cd "$TEST_DIR"
 echo -e "\n${YELLOW}Test 1: Initialize database${NC}"
 OUTPUT=$("$BD_BIN" init --prefix test 2>&1)
 assert_contains "$OUTPUT" "Initialized beads database with prefix: test" "Initialize should report prefix"
-assert_equals "true" "$([ -d .beads/issues ] && echo true || echo false)" "Issues directory should exist"
-assert_equals "true" "$([ -f .beads/config.yaml ] && echo true || echo false)" "Config file should exist"
+assert_equals "true" "$([ -d .minibeads/issues ] && echo true || echo false)" "Issues directory should exist"
+assert_equals "true" "$([ -f .minibeads/config.yaml ] && echo true || echo false)" "Config file should exist"
 
 # Test 2: Create an issue
 echo -e "\n${YELLOW}Test 2: Create an issue${NC}"
 OUTPUT=$("$BD_BIN" create "Test issue 1" -p 1 -t task -d "Test description" 2>&1)
 assert_contains "$OUTPUT" "Created issue: test-1" "Should create test-1"
-assert_equals "true" "$([ -f .beads/issues/test-1.md ] && echo true || echo false)" "Issue file should exist"
+assert_equals "true" "$([ -f .minibeads/issues/test-1.md ] && echo true || echo false)" "Issue file should exist"
 
 # Test 3: Create another issue with dependency
 echo -e "\n${YELLOW}Test 3: Create issue with dependency${NC}"
@@ -116,7 +116,7 @@ OUTPUT=$("$BD_BIN" create "Test issue 2" -p 2 -t bug --deps test-1 2>&1)
 assert_contains "$OUTPUT" "Created issue: test-2" "Should create test-2"
 
 # Verify dependency in file
-DEP_COUNT=$(grep -c "test-1: blocks" .beads/issues/test-2.md || true)
+DEP_COUNT=$(grep -c "test-1: blocks" .minibeads/issues/test-2.md || true)
 assert_equals "1" "$DEP_COUNT" "Dependency should be recorded"
 
 # Test 4: List issues
@@ -135,7 +135,7 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 
-path = Path(".beads/comments/test-1.json")
+path = Path(".minibeads/comments/test-1.json")
 comments = json.loads(path.read_text())
 comments[0]["source_url"] = "https://example.com/source/comment-1"
 comments[0]["source_id"] = "remote-comment-1"
@@ -183,7 +183,7 @@ OUTPUT=$("$BD_BIN" update test-1 --status in_progress 2>&1)
 assert_contains "$OUTPUT" "Updated issue: test-1" "Should confirm update"
 
 # Verify status in file
-STATUS=$(grep "^status:" .beads/issues/test-1.md | awk '{print $2}')
+STATUS=$(grep "^status:" .minibeads/issues/test-1.md | awk '{print $2}')
 assert_equals "in_progress" "$STATUS" "Status should be in_progress"
 
 # Test 7: Get statistics
@@ -212,7 +212,7 @@ OUTPUT=$("$BD_BIN" close test-1 --reason "Test completed" 2>&1)
 assert_contains "$OUTPUT" "Closed issue: test-1" "Should confirm closure"
 
 # Verify closed status
-STATUS=$(grep "^status:" .beads/issues/test-1.md | awk '{print $2}')
+STATUS=$(grep "^status:" .minibeads/issues/test-1.md | awk '{print $2}')
 assert_equals "closed" "$STATUS" "Status should be closed"
 
 # Test 11: Reopen an issue
@@ -220,7 +220,7 @@ echo -e "\n${YELLOW}Test 11: Reopen an issue${NC}"
 OUTPUT=$("$BD_BIN" reopen test-1 2>&1)
 assert_contains "$OUTPUT" "Reopened issue: test-1" "Should confirm reopen"
 
-STATUS=$(grep "^status:" .beads/issues/test-1.md | awk '{print $2}')
+STATUS=$(grep "^status:" .minibeads/issues/test-1.md | awk '{print $2}')
 assert_equals "open" "$STATUS" "Status should be open"
 
 # Test 12: JSON output
@@ -257,6 +257,18 @@ echo -e "\n${YELLOW}Test 16: Mixed format for bd show${NC}"
 OUTPUT=$("$BD_BIN" show test-1 2 2>&1)
 assert_contains "$OUTPUT" "ID: test-1" "Should show test-1"
 assert_contains "$OUTPUT" "ID: test-2" "Should show test-2 from shorthand"
+
+# Test 17: Legacy .beads fallback
+echo -e "\n${YELLOW}Test 17: Legacy .beads fallback${NC}"
+LEGACY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mb_legacy_fallback_XXXXXX")
+cd "$LEGACY_DIR"
+"$BD_BIN" init --prefix legacy >/dev/null 2>&1
+mv .minibeads .beads
+OUTPUT=$("$BD_BIN" create "Legacy issue" 2>&1)
+assert_contains "$OUTPUT" "Created issue: legacy-1" "Should create using legacy .beads fallback"
+assert_equals "true" "$([ -f .beads/issues/legacy-1.md ] && echo true || echo false)" "Legacy issue file should exist"
+rm -rf "$LEGACY_DIR"
+cd "$TEST_DIR"
 
 # Print summary
 echo ""

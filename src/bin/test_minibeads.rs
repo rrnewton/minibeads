@@ -1465,13 +1465,16 @@ fn verify_consistency(
         "\n🔍 Deep verification: comparing actual state with reference interpreter...".to_string(),
     );
 
-    // Check that .beads directory exists
-    let beads_dir = PathBuf::from(work_dir).join(".beads");
+    // Check that the implementation's storage directory exists.
+    let beads_dir = PathBuf::from(work_dir).join(if is_upstream { ".beads" } else { ".minibeads" });
     if !beads_dir.exists() {
-        return Err(anyhow::anyhow!(".beads directory does not exist"));
+        return Err(anyhow::anyhow!(
+            "{} directory does not exist",
+            beads_dir.display()
+        ));
     }
 
-    // Step 1: Recursively walk .beads directory and report files
+    // Step 1: Recursively walk storage directory and report files
     let (files, total_size) = walk_beads_directory(&beads_dir, logger)?;
 
     logger.verbose(format!(
@@ -1508,7 +1511,7 @@ struct FileInfo {
     size: u64,
 }
 
-/// Recursively walk .beads directory and collect file info
+/// Recursively walk storage directory and collect file info
 fn walk_beads_directory(
     beads_dir: &std::path::Path,
     logger: &Logger,
@@ -2114,7 +2117,7 @@ fn test_jsonl_import(
 
     // Verify minibeads imported correctly
     logger.verbose("   Verifying minibeads imported state...".to_string());
-    let import_beads_dir = PathBuf::from(import_work_dir).join(".beads");
+    let import_beads_dir = PathBuf::from(import_work_dir).join(".minibeads");
     verify_minibeads_state(&import_beads_dir, reference, logger)?;
 
     logger.log("✅ JSONL import test passed".to_string());
@@ -2264,7 +2267,7 @@ fn verify_sync_consistency(
     reference: &ReferenceInterpreter,
     logger: &Logger,
 ) -> Result<()> {
-    let beads_dir = work_dir.join(".beads");
+    let beads_dir = work_dir.join(".minibeads");
 
     // Verify minibeads markdown state
     logger.verbose("Verifying minibeads markdown state...".to_string());
@@ -2281,18 +2284,18 @@ fn verify_sync_consistency(
     )?;
     logger.verbose("✅ Upstream state matches reference".to_string());
 
-    // Verify .beads/issues.jsonl exists and matches (created by both implementations)
+    // Verify .minibeads/issues.jsonl exists and matches.
     let jsonl_path = beads_dir.join("issues.jsonl");
     if !jsonl_path.exists() {
         return Err(anyhow::anyhow!(
-            ".beads/issues.jsonl does not exist after sync"
+            ".minibeads/issues.jsonl does not exist after sync"
         ));
     }
 
-    logger.verbose("Verifying .beads/issues.jsonl...".to_string());
+    logger.verbose("Verifying .minibeads/issues.jsonl...".to_string());
     let jsonl_issues = parse_jsonl_file(&jsonl_path)?;
     compare_issue_states(&jsonl_issues, reference.get_final_state(), logger)?;
-    logger.verbose("✅ .beads/issues.jsonl matches reference".to_string());
+    logger.verbose("✅ .minibeads/issues.jsonl matches reference".to_string());
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Bidirectional sync between markdown and JSONL formats
 //!
 //! This module implements bidirectional synchronization between:
-//! - Markdown files (.beads/issues/*.md) - human-friendly, git-mergeable
+//! - Markdown files (.minibeads/issues/*.md) - human-friendly, git-mergeable
 //! - JSONL file (issues.jsonl) - machine-friendly, upstream bd compatible
 //!
 //! ## Architecture

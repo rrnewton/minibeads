@@ -29,7 +29,7 @@ pub fn is_interactive_tty() -> bool {
 
 /// Search for references to an issue ID in code using git grep
 ///
-/// Excludes the .beads directory and uses word boundaries to match issue IDs.
+/// Excludes minibeads metadata directories and uses word boundaries to match issue IDs.
 /// Returns a mapping from file paths to matching lines with their line numbers.
 pub fn find_code_references(issue_id: &str) -> Result<CodeReferences> {
     // Build the grep pattern with word boundaries
@@ -40,7 +40,7 @@ pub fn find_code_references(issue_id: &str) -> Result<CodeReferences> {
     // -n: show line numbers
     // -I: ignore binary files
     // --no-color: don't colorize output
-    // -- ':(exclude).beads': exclude .beads directory
+    // -- ':(exclude).minibeads'/' :(exclude).beads': exclude metadata directories
     let output = Command::new("git")
         .args([
             "grep",
@@ -49,6 +49,7 @@ pub fn find_code_references(issue_id: &str) -> Result<CodeReferences> {
             "--no-color",
             &pattern,
             "--",
+            ":(exclude).minibeads/*",
             ":(exclude).beads/*",
         ])
         .stdout(Stdio::piped())

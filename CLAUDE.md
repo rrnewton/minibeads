@@ -39,7 +39,7 @@ The beads database is our primary tracking mechanism, so if we lose conversation
 
 ### Beads CONVENTIONS for this project
 
-Do NOT read or modify files inside the `./.beads/` private database, except when fixing merge conflicts in markdown files that you can read.
+Do NOT read or modify files inside the `./.minibeads/` or legacy `./.beads/` private database, except when fixing merge conflicts in markdown files that you can read.
 
 Prefer the MCP client to the CLI tool. ALWAYS `bd update` existing issues, never introduce duplicates with spurious `bd create`.
 

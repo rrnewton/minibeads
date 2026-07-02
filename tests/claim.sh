@@ -108,15 +108,15 @@ cd "$TEST_DIR"
 echo -e "\n${YELLOW}Test 1: Claim an issue${NC}"
 OUTPUT=$("$BD_BIN" claim test-1 --as boxA 2>&1)
 assert_contains "$OUTPUT" "Claimed test-1 as 'boxA'" "Claim should report holder"
-assert_equals "in_progress" "$(grep '^status:' .beads/issues/test-1.md | awk '{print $2}')" "Status should be in_progress"
-assert_equals "boxA" "$(grep '^assignee:' .beads/issues/test-1.md | awk '{print $2}')" "Assignee should be boxA"
-assert_equals "true" "$(grep -q '^claimed_at:' .beads/issues/test-1.md && echo true || echo false)" "claimed_at should be recorded"
-assert_equals "true" "$(grep -q '^claimed_until:' .beads/issues/test-1.md && echo true || echo false)" "claimed_until should be recorded"
+assert_equals "in_progress" "$(grep '^status:' .minibeads/issues/test-1.md | awk '{print $2}')" "Status should be in_progress"
+assert_equals "boxA" "$(grep '^assignee:' .minibeads/issues/test-1.md | awk '{print $2}')" "Assignee should be boxA"
+assert_equals "true" "$(grep -q '^claimed_at:' .minibeads/issues/test-1.md && echo true || echo false)" "claimed_at should be recorded"
+assert_equals "true" "$(grep -q '^claimed_until:' .minibeads/issues/test-1.md && echo true || echo false)" "claimed_until should be recorded"
 
 # Test 2: a different worker cannot steal an active claim
 echo -e "\n${YELLOW}Test 2: Active claim is protected${NC}"
 assert_fails "Claim by another worker should fail" "$BD_BIN" claim test-1 --as boxB
-assert_equals "boxA" "$(grep '^assignee:' .beads/issues/test-1.md | awk '{print $2}')" "Holder should be unchanged after failed claim"
+assert_equals "boxA" "$(grep '^assignee:' .minibeads/issues/test-1.md | awk '{print $2}')" "Holder should be unchanged after failed claim"
 
 # Test 3: claimed issue drops out of ready
 echo -e "\n${YELLOW}Test 3: Claimed work leaves the ready queue${NC}"
@@ -132,15 +132,15 @@ TESTS_RUN=$((TESTS_RUN + 1))
 echo -e "\n${YELLOW}Test 4: host/team identity via 'mb update --claim'${NC}"
 OUTPUT=$("$BD_BIN" update test-2 --claim --as boxA --team backend --for 4h 2>&1)
 assert_contains "$OUTPUT" "Claimed test-2 as 'boxA/backend'" "update --claim should support host/team"
-assert_equals "boxA/backend" "$(grep '^assignee:' .beads/issues/test-2.md | awk '{print $2}')" "Assignee should be boxA/backend"
+assert_equals "boxA/backend" "$(grep '^assignee:' .minibeads/issues/test-2.md | awk '{print $2}')" "Assignee should be boxA/backend"
 
 # Test 5: release returns the issue to the backlog
 echo -e "\n${YELLOW}Test 5: Release a claim${NC}"
 OUTPUT=$("$BD_BIN" claim test-1 --release --as boxA 2>&1)
 assert_contains "$OUTPUT" "Released test-1" "Release should be confirmed"
-assert_equals "open" "$(grep '^status:' .beads/issues/test-1.md | awk '{print $2}')" "Status should be open after release"
-assert_equals "false" "$(grep -q '^assignee:' .beads/issues/test-1.md && echo true || echo false)" "Assignee should be cleared after release"
-assert_equals "false" "$(grep -q '^claimed_until:' .beads/issues/test-1.md && echo true || echo false)" "claimed_until should be cleared after release"
+assert_equals "open" "$(grep '^status:' .minibeads/issues/test-1.md | awk '{print $2}')" "Status should be open after release"
+assert_equals "false" "$(grep -q '^assignee:' .minibeads/issues/test-1.md && echo true || echo false)" "Assignee should be cleared after release"
+assert_equals "false" "$(grep -q '^claimed_until:' .minibeads/issues/test-1.md && echo true || echo false)" "claimed_until should be cleared after release"
 OUTPUT=$("$BD_BIN" ready 2>&1)
 assert_contains "$OUTPUT" "test-1:" "test-1 should return to ready after release"
 
@@ -154,11 +154,11 @@ assert_contains "$OUTPUT" "Released test-1" "Force release should succeed"
 # Test 7: claim window survives JSONL round-trip
 echo -e "\n${YELLOW}Test 7: Claim survives JSONL sync round-trip${NC}"
 "$BD_BIN" claim test-1 --as boxA --for 2d >/dev/null 2>&1
-BEFORE=$(cat .beads/issues/test-1.md)
+BEFORE=$(cat .minibeads/issues/test-1.md)
 "$BD_BIN" export --mb-output-default >/dev/null 2>&1
-rm .beads/issues/test-1.md
+rm .minibeads/issues/test-1.md
 "$BD_BIN" sync >/dev/null 2>&1
-AFTER=$(cat .beads/issues/test-1.md)
+AFTER=$(cat .minibeads/issues/test-1.md)
 assert_equals "$BEFORE" "$AFTER" "Claimed issue should round-trip identically through JSONL"
 
 # Print summary

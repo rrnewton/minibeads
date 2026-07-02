@@ -102,7 +102,7 @@ impl Storage {
 }
 
 impl Storage {
-    /// Open storage at the given .beads directory
+    /// Open storage at the given minibeads directory
     pub fn open(beads_dir: PathBuf) -> Result<Self> {
         let issues_dir = beads_dir.join("issues");
 
@@ -144,10 +144,10 @@ impl Storage {
         })
     }
 
-    /// Initialize a new beads database
+    /// Initialize a new minibeads database
     pub fn init(beads_dir: PathBuf, prefix: Option<String>, mb_hash_ids: bool) -> Result<Self> {
-        // Create .beads directory
-        fs::create_dir_all(&beads_dir).context("Failed to create .beads directory")?;
+        // Create minibeads directory
+        fs::create_dir_all(&beads_dir).context("Failed to create minibeads directory")?;
 
         // Create issues directory
         let issues_dir = beads_dir.join("issues");

@@ -105,7 +105,7 @@ cd "$TEST_DIR"
 
 # Read back the description body of test-1 (everything after the "# Description" heading).
 desc_body() {
-    sed -n '/^# Description/,/^# /p' .beads/issues/test-1.md | grep -v '^# ' | sed '/^$/d'
+    sed -n '/^# Description/,/^# /p' .minibeads/issues/test-1.md | grep -v '^# ' | sed '/^$/d'
 }
 
 # Test 1: a uniquely-matching search is replaced in place
@@ -113,13 +113,13 @@ echo -e "\n${YELLOW}Test 1: Unique search/replace edits the description${NC}"
 OUTPUT=$("$BD_BIN" update test-1 --search "clumsy to edit" --replace "edited via search/replace" 2>&1)
 assert_contains "$OUTPUT" "Updated issue: test-1 (description field)" "Should confirm targeted edit"
 assert_contains "$(desc_body)" "edited via search/replace" "Replacement text should be present"
-assert_fails "Old text should be gone" grep -qF "clumsy to edit" .beads/issues/test-1.md
+assert_fails "Old text should be gone" grep -qF "clumsy to edit" .minibeads/issues/test-1.md
 
 # Test 2: a search that does not match fails and changes nothing
 echo -e "\n${YELLOW}Test 2: Missing search text is an error${NC}"
-BEFORE=$(cat .beads/issues/test-1.md)
+BEFORE=$(cat .minibeads/issues/test-1.md)
 assert_fails "Non-matching search should fail" "$BD_BIN" update test-1 --search "no such text" --replace "x"
-assert_equals "$BEFORE" "$(cat .beads/issues/test-1.md)" "File must be untouched after a failed search"
+assert_equals "$BEFORE" "$(cat .minibeads/issues/test-1.md)" "File must be untouched after a failed search"
 
 # Test 3: an ambiguous (multi-match) search is rejected by default
 echo -e "\n${YELLOW}Test 3: Ambiguous search is rejected without --replace-all${NC}"
@@ -130,7 +130,7 @@ assert_contains "$OUTPUT" "2 times" "Error should report the match count"
 # Test 4: --replace-all rewrites every occurrence
 echo -e "\n${YELLOW}Test 4: --replace-all rewrites every occurrence${NC}"
 "$BD_BIN" update test-1 --search "CLI" --replace "tool" --replace-all >/dev/null 2>&1
-assert_fails "No CLI should remain" grep -qF "CLI" .beads/issues/test-1.md
+assert_fails "No CLI should remain" grep -qF "CLI" .minibeads/issues/test-1.md
 assert_contains "$(desc_body)" "tool" "Replacement should be present after replace-all"
 
 # Test 5: --field targets a non-default field
@@ -138,7 +138,7 @@ echo -e "\n${YELLOW}Test 5: --field targets another text field${NC}"
 "$BD_BIN" update test-1 --design "alpha beta gamma" >/dev/null 2>&1
 OUTPUT=$("$BD_BIN" update test-1 --field design --search "beta" --replace "BETA" 2>&1)
 assert_contains "$OUTPUT" "Updated issue: test-1 (design field)" "Should report the design field"
-assert_contains "$(sed -n '/^# Design/,/^# /p' .beads/issues/test-1.md)" "alpha BETA gamma" "Design field should be edited"
+assert_contains "$(sed -n '/^# Design/,/^# /p' .minibeads/issues/test-1.md)" "alpha BETA gamma" "Design field should be edited"
 
 # Test 6: --search requires --replace, and conflicts with wholesale --description
 echo -e "\n${YELLOW}Test 6: Argument guards${NC}"

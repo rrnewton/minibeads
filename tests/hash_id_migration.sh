@@ -130,7 +130,7 @@ echo -e "\n${YELLOW}Test 1: Initialize database (default: numeric IDs)${NC}"
 OUTPUT=$("$BD_BIN" init --prefix test 2>&1)
 assert_contains "$OUTPUT" "Initialized beads database with prefix: test" "Initialize should succeed"
 # Check config-minibeads.yaml has mb-hash-ids: false
-CONFIG_VALUE=$(grep "mb-hash-ids:" .beads/config-minibeads.yaml | awk '{print $2}' | tr -d "'\"")
+CONFIG_VALUE=$(grep "mb-hash-ids:" .minibeads/config-minibeads.yaml | awk '{print $2}' | tr -d "'\"")
 assert_equals "false" "$CONFIG_VALUE" "mb-hash-ids should default to false"
 
 # Test 2: Create issues with numeric IDs
@@ -140,9 +140,9 @@ echo -e "\n${YELLOW}Test 2: Create issues with numeric IDs${NC}"
 "$BD_BIN" create "Third issue" -d "This also depends on the first" --deps test-1 >/dev/null 2>&1
 
 # Verify numeric IDs were created
-assert_file_exists ".beads/issues/test-1.md" "test-1.md should exist"
-assert_file_exists ".beads/issues/test-2.md" "test-2.md should exist"
-assert_file_exists ".beads/issues/test-3.md" "test-3.md should exist"
+assert_file_exists ".minibeads/issues/test-1.md" "test-1.md should exist"
+assert_file_exists ".minibeads/issues/test-2.md" "test-2.md should exist"
+assert_file_exists ".minibeads/issues/test-3.md" "test-3.md should exist"
 
 # Test 3: Dry-run migration
 echo -e "\n${YELLOW}Test 3: Dry-run migration${NC}"
@@ -155,9 +155,9 @@ assert_contains "$OUTPUT" "Rename file: test-3.md ->" "Should rename test-3"
 assert_contains "$OUTPUT" "Update dependency" "Should update dependencies"
 
 # Verify files haven't changed (dry-run)
-assert_file_exists ".beads/issues/test-1.md" "test-1.md should still exist after dry-run"
-assert_file_exists ".beads/issues/test-2.md" "test-2.md should still exist after dry-run"
-assert_file_exists ".beads/issues/test-3.md" "test-3.md should still exist after dry-run"
+assert_file_exists ".minibeads/issues/test-1.md" "test-1.md should still exist after dry-run"
+assert_file_exists ".minibeads/issues/test-2.md" "test-2.md should still exist after dry-run"
+assert_file_exists ".minibeads/issues/test-3.md" "test-3.md should still exist after dry-run"
 
 # Test 4: Actual migration
 echo -e "\n${YELLOW}Test 4: Actual migration${NC}"
@@ -166,12 +166,12 @@ assert_contains "$OUTPUT" "Successfully migrated 3 issue(s) to hash-based IDs" "
 assert_contains "$OUTPUT" "Updated config-minibeads.yaml: mb-hash-ids: true" "Should confirm config update"
 
 # Verify old files are gone
-assert_file_not_exists ".beads/issues/test-1.md" "test-1.md should be removed"
-assert_file_not_exists ".beads/issues/test-2.md" "test-2.md should be removed"
-assert_file_not_exists ".beads/issues/test-3.md" "test-3.md should be removed"
+assert_file_not_exists ".minibeads/issues/test-1.md" "test-1.md should be removed"
+assert_file_not_exists ".minibeads/issues/test-2.md" "test-2.md should be removed"
+assert_file_not_exists ".minibeads/issues/test-3.md" "test-3.md should be removed"
 
 # Verify config was updated
-CONFIG_VALUE=$(grep "mb-hash-ids:" .beads/config-minibeads.yaml | awk '{print $2}' | tr -d "'\"")
+CONFIG_VALUE=$(grep "mb-hash-ids:" .minibeads/config-minibeads.yaml | awk '{print $2}' | tr -d "'\"")
 assert_equals "true" "$CONFIG_VALUE" "mb-hash-ids should now be true"
 
 # Test 5: List issues after migration

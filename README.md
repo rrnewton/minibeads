@@ -4,7 +4,7 @@ A minimal, markdown-based drop-in replacement for [steveyegge/beads](https://git
 
 ## Overview
 
-minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workflows. Issues are stored as markdown files with YAML frontmatter, making them both human-readable and git-friendly. The tool emphasizes simplicity, with no database required—just markdown files in `.beads/issues/`.
+minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workflows. Issues are stored as markdown files with YAML frontmatter, making them both human-readable and git-friendly. The tool emphasizes simplicity, with no database required—just markdown files in `.minibeads/issues/`.
 
 ### Key Features
 
@@ -67,10 +67,12 @@ Run `bd quickstart` for a comprehensive guide.
 
 ## Storage Format
 
-minibeads stores all data in `.beads/issues/` as markdown files:
+minibeads stores all data in `.minibeads/issues/` as markdown files. Existing
+projects with `.beads/` continue to work as a legacy fallback until you move the
+directory.
 
 ```
-.beads/
+.minibeads/
 ├── config.yaml           # Contains issue-prefix
 ├── .gitignore           # Auto-managed (minibeads.lock, command_history.log)
 ├── issues/
@@ -120,7 +122,7 @@ minibeads works seamlessly with AI agents via the beads MCP server. Agents can:
 - Query dependencies and find ready work
 - Track progress across sessions using the markdown history
 
-Set `BEADS_DB` or `MB_BEADS_DIR` environment variables, or let the MCP server auto-discover `.beads/` in your project.
+Set `BEADS_DB` or `MB_BEADS_DIR` environment variables, or let the MCP server auto-discover `.minibeads/` in your project.
 
 ## Development
 
@@ -162,7 +164,7 @@ tests/
 - **Human-readable**: Issues are plain text files you can read, edit, and grep
 - **Git-friendly**: Diffs, merges, and history work naturally
 - **Simple**: No schema migrations, no database corruption, no SQL
-- **Portable**: Copy `.beads/` anywhere, it just works
+- **Portable**: Copy `.minibeads/` anywhere, it just works
 
 ### Why Rust?
 
@@ -173,7 +175,7 @@ tests/
 
 ### Locking Strategy
 
-minibeads uses coarse-grained locking with `.beads/minibeads.lock` containing the process PID. Operations use exponential backoff (up to 5 seconds) when lock is held. This is simpler than upstream's per-issue locking and sufficient for AI agent workflows.
+minibeads uses coarse-grained locking with `.minibeads/minibeads.lock` containing the process PID. Operations use exponential backoff (up to 5 seconds) when lock is held. This is simpler than upstream's per-issue locking and sufficient for AI agent workflows.
 
 ## Command Reference
 
@@ -221,7 +223,7 @@ issues are ignored.
 - `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
 Synced fields are title, description/body, open/closed state, and append-only
-comments. minibeads keeps `.beads/github-sync-state.json` as the last-synced
+comments. minibeads keeps `.minibeads/github-sync-state.json` as the last-synced
 ancestry record so it can distinguish local-only changes, GitHub-only changes,
 and both-sides conflicts. Labels, priority, assignee, dependencies, and other
 minibeads-specific metadata remain local for now.
@@ -247,7 +249,7 @@ issue fields.
 
 ### Options
 
-- `--db PATH` - Path to .beads directory
+- `--db PATH` - Path to .minibeads directory
 - `--json` - Output JSON format
 - `--mb-validation MODE` - Validation mode: silent, warn, error (default) [minibeads-specific]
 - `--mb-no-cmd-logging` - Disable command history logging [minibeads-specific]
@@ -274,7 +276,7 @@ To export for upstream beads compatibility, use `bd export` (planned in minibead
 
 ## Roadmap
 
-See `.beads/issues/` for tracking:
+See `.minibeads/issues/` for tracking:
 
 - **minibeads-9**: Comments data model
 - **minibeads-10**: Events/audit trail
@@ -284,7 +286,7 @@ See `.beads/issues/` for tracking:
 
 ## Environment Variables
 
-- `MB_BEADS_DIR` - Path to .beads directory [minibeads-specific]
+- `MB_BEADS_DIR` - Path to .minibeads directory [minibeads-specific]
 - `BEADS_DB` - Path to .beads database (supports `.db` extension for compatibility)
 - `BEADS_WORKING_DIR` - Working directory for MCP operations
 

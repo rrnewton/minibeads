@@ -164,9 +164,9 @@ echo -e "\n${YELLOW}Test 2: Create test issues${NC}"
 "$BD_BIN" close exp-1 --reason "Fixed" >/dev/null 2>&1
 
 # Verify issues were created
-assert_file_exists ".beads/issues/exp-1.md" "exp-1 file should exist"
-assert_file_exists ".beads/issues/exp-2.md" "exp-2 file should exist"
-assert_file_exists ".beads/issues/exp-3.md" "exp-3 file should exist"
+assert_file_exists ".minibeads/issues/exp-1.md" "exp-1 file should exist"
+assert_file_exists ".minibeads/issues/exp-2.md" "exp-2 file should exist"
+assert_file_exists ".minibeads/issues/exp-3.md" "exp-3 file should exist"
 
 # Test 3: Export to stdout
 echo -e "\n${YELLOW}Test 3: Export to stdout (default)${NC}"
@@ -193,9 +193,9 @@ assert_equals "3" "$FILE_LINES" "Custom export should have 3 lines"
 echo -e "\n${YELLOW}Test 5: Export with --mb-output-default flag${NC}"
 OUTPUT=$("$BD_BIN" export --mb-output-default 2>&1)
 assert_contains "$OUTPUT" "Exported 3 issues to" "Should report export"
-assert_file_exists ".beads/issues.jsonl" "Default export file should exist"
+assert_file_exists ".minibeads/issues.jsonl" "Default export file should exist"
 
-JSONL_FILE="$TEST_DIR/.beads/issues.jsonl"
+JSONL_FILE="$TEST_DIR/.minibeads/issues.jsonl"
 JSONL_LINES=$(wc -l < "$JSONL_FILE" | tr -d ' ')
 assert_equals "3" "$JSONL_LINES" "Export should have 3 lines"
 

@@ -1130,7 +1130,7 @@ pub fn stress_test(
 
     let tmp = tempfile::tempdir().context("Failed to create temporary stress workspace")?;
     let storage = Storage::init(
-        tmp.path().join(".beads"),
+        tmp.path().join(".minibeads"),
         Some("ghstress".to_string()),
         false,
     )
@@ -2129,7 +2129,7 @@ fn marker_body(issue: &Issue) -> String {
 
 fn marker_body_for_repo(issue: &Issue, repo: &str) -> String {
     format!(
-        "{MARKER}\n\nThis GitHub issue is synced to local minibeads issue `{}` in repository `{}` at `.beads/issues/{}.md`.",
+        "{MARKER}\n\nThis GitHub issue is synced to local minibeads issue `{}` in repository `{}` at `.minibeads/issues/{}.md`.",
         issue.id, repo, issue.id
     )
 }

@@ -22,6 +22,9 @@ use std::process::{Command as ProcessCommand, Stdio};
 use storage::{is_github_issue_ref, Storage};
 use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status};
 
+const PRIMARY_STORAGE_DIR: &str = ".minibeads";
+const LEGACY_STORAGE_DIR: &str = ".beads";
+
 /// Generate long version string with git info and build date
 fn long_version() -> &'static str {
     // Allocate version string at runtime, leak it to get 'static lifetime
@@ -63,12 +66,12 @@ struct Cli {
 #[derive(clap::Args)]
 #[command(next_help_heading = "Global Options")]
 struct GlobalOpts {
-    /// Path to .beads directory (minibeads-specific, preferred over --db)
+    /// Path to minibeads directory (minibeads-specific, preferred over --db)
     #[arg(long = "mb-beads-dir", global = true)]
     mb_beads_dir: Option<PathBuf>,
 
     /// Path to database (for upstream compatibility - use --mb-beads-dir instead)
-    /// Treated as syntactic sugar for specifying the .beads directory.
+    /// Treated as syntactic sugar for specifying the minibeads directory.
     /// When path ends with .db, the parent directory is used.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
@@ -130,7 +133,7 @@ struct GlobalOpts {
     )]
     mb_validation: ValidationMode,
 
-    /// Disable command logging to .beads/command_history.log (minibeads-specific)
+    /// Disable command logging to the minibeads command_history.log (minibeads-specific)
     #[arg(long = "mb-no-cmd-logging", global = true)]
     mb_no_cmd_logging: bool,
 
@@ -611,7 +614,7 @@ enum Commands {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
 
-        /// Use default file output (.beads/issues.jsonl) instead of stdout
+        /// Use default file output (storage/issues.jsonl) instead of stdout
         #[arg(long = "mb-output-default")]
         mb_output_default: bool,
 
@@ -634,7 +637,7 @@ enum Commands {
 
     /// Bidirectional sync between markdown and JSONL formats
     Sync {
-        /// Path to JSONL file (defaults to .beads/issues.jsonl)
+        /// Path to JSONL file (defaults to storage/issues.jsonl)
         #[arg(long)]
         jsonl: Option<PathBuf>,
 
@@ -1419,15 +1422,18 @@ fn run() -> Result<()> {
             skip_agents: _,
             skip_hooks: _,
         } => {
-            // IMPORTANT: init always creates .beads in current directory
+            // IMPORTANT: init always creates the primary storage dir in current directory
             // It does NOT use find_beads_dir() or respect --db/--mb-beads-dir flags
             // This ensures init always initializes in CWD, never in ancestor directories
             if mb_beads_dir.is_some() || db.is_some() {
-                eprintln!("Note: 'mb init' always creates .beads/ in current directory");
+                eprintln!(
+                    "Note: 'mb init' always creates {}/ in current directory",
+                    PRIMARY_STORAGE_DIR
+                );
                 eprintln!("      --db and --mb-beads-dir flags are ignored for 'init'");
             }
 
-            let beads_dir = PathBuf::from(".beads");
+            let beads_dir = PathBuf::from(PRIMARY_STORAGE_DIR);
             let storage = Storage::init(beads_dir, prefix, mb_hash_ids)?;
 
             // Log command after successful init
@@ -2640,7 +2646,7 @@ fn run() -> Result<()> {
                 )?;
                 eprintln!("Exported {} issues to {}", count, path.display());
             } else if mb_output_default {
-                // --mb-output-default: write to .beads/issues.jsonl
+                // --mb-output-default: write to storage/issues.jsonl
                 let path = storage.get_beads_dir().join("issues.jsonl");
                 let count = storage.export_to_jsonl(
                     &path,
@@ -2986,13 +2992,13 @@ fn run() -> Result<()> {
 }
 
 fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<Storage> {
-    // Priority order for determining .beads directory:
+    // Priority order for determining minibeads directory:
     // 1. --mb-beads-dir flag (preferred, minibeads-specific)
     // 2. --db flag (for upstream compatibility, treated as syntactic sugar for BEADS_DIR)
     // 3. MB_BEADS_DIR environment variable (minibeads-specific)
     // 4. BEADS_DIR environment variable (upstream compatibility)
     // 5. BEADS_DB environment variable (for upstream compatibility)
-    // 6. Search for .beads in current directory and ancestors
+    // 6. Search for .minibeads first, then .beads, in current directory and ancestors
 
     let beads_dir = if let Some(dir) = mb_beads_dir {
         // --mb-beads-dir: use directly
@@ -3023,7 +3029,7 @@ fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<S
             db_path
         }
     } else {
-        // Search for .beads directory
+        // Search for the primary directory first, then legacy .beads
         find_beads_dir()?
     };
 
@@ -3031,16 +3037,31 @@ fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<S
 }
 
 fn find_beads_dir() -> Result<PathBuf> {
-    let mut current = env::current_dir()?;
+    let start = env::current_dir()?;
+    if let Some(dir) = find_storage_dir_named(&start, PRIMARY_STORAGE_DIR)? {
+        return Ok(dir);
+    }
+    if let Some(dir) = find_storage_dir_named(&start, LEGACY_STORAGE_DIR)? {
+        return Ok(dir);
+    }
 
+    anyhow::bail!(
+        "No {} or {} directory found. Run 'mb init' to initialize a new database.",
+        PRIMARY_STORAGE_DIR,
+        LEGACY_STORAGE_DIR
+    );
+}
+
+fn find_storage_dir_named(start: &Path, dir_name: &str) -> Result<Option<PathBuf>> {
+    let mut current = start.to_path_buf();
     loop {
-        let beads_dir = current.join(".beads");
-        if beads_dir.exists() && beads_dir.is_dir() {
-            return Ok(beads_dir);
+        let candidate = current.join(dir_name);
+        if candidate.exists() && candidate.is_dir() {
+            return Ok(Some(candidate));
         }
 
         if !current.pop() {
-            anyhow::bail!("No .beads directory found. Run 'mb init' to initialize a new database.");
+            return Ok(None);
         }
     }
 }
@@ -3153,7 +3174,7 @@ Issues chained together like beads (minibeads).
 
 GETTING STARTED
   mb init   Initialize mb in your project
-            Creates .beads/ directory with project-specific database
+            Creates .minibeads/ directory with project-specific database
             Auto-detects prefix from directory name (e.g., myapp-1, myapp-2)
 
   mb init --prefix api   Initialize with custom prefix
@@ -3207,7 +3228,7 @@ UPDATING ISSUES
   mb update myapp-1 --priority 0
   mb update myapp-1 --assignee bob
 
-EDITING DESCRIPTIONS (do NOT hand-edit the .beads/*.md files!)
+EDITING DESCRIPTIONS (do NOT hand-edit the .minibeads/*.md files!)
   Always go through 'mb' to change an issue. To revise long text, use a
   targeted search/replace edit instead of overwriting the whole field with
   --description (which is error-prone and drops content):
@@ -3229,11 +3250,12 @@ CLOSING ISSUES
 
 DATABASE LOCATION
   mb automatically discovers your database in this priority order:
-    1. --mb-beads-dir /path/to/.beads   (minibeads-specific, preferred)
-    2. --db /path/to/.beads             (upstream compatibility)
+    1. --mb-beads-dir /path/to/.minibeads   (minibeads-specific, preferred)
+    2. --db /path/to/.minibeads             (upstream compatibility)
     3. $MB_BEADS_DIR environment variable
     4. $BEADS_DB environment variable   (upstream compatibility)
-    5. .beads/ in current directory or ancestors
+    5. .minibeads/ in current directory or ancestors
+    6. .beads/ in current directory or ancestors (legacy fallback)
 
   Note: --db is treated as syntactic sugar for specifying BEADS_DIR.
         When path ends with .db, the parent directory is used.

@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 exclude = [
     ".devcontainer",
     ".claude_template",
+    ".minibeads",
     ".beads",
     "beads",
     "scratch",

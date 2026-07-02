@@ -454,9 +454,14 @@ impl ActionExecutor {
         let mut cmd = Command::new(&self.binary_path);
         cmd.current_dir(&self.work_dir);
 
-        // Set MB_BEADS_DIR to force using .beads in working directory
-        // This prevents minibeads from walking up and finding ancestor .beads directories
-        let beads_dir = std::path::PathBuf::from(&self.work_dir).join(".beads");
+        // Set MB_BEADS_DIR to force using storage in the working directory.
+        // This prevents minibeads from walking up and finding ancestor databases.
+        let storage_dir = if self.binary_path.contains("upstream") {
+            ".beads"
+        } else {
+            ".minibeads"
+        };
+        let beads_dir = std::path::PathBuf::from(&self.work_dir).join(storage_dir);
         cmd.env("MB_BEADS_DIR", beads_dir);
 
         if self.use_no_db {
@@ -544,7 +549,7 @@ impl ActionExecutor {
                                 error_msg.push_str("Possible causes:\n");
                                 error_msg.push_str("  - Init command failed to set prefix\n");
                                 error_msg.push_str(
-                                    "  - Found existing .beads directory with different prefix\n",
+                                    "  - Found existing minibeads directory with different prefix\n",
                                 );
                                 error_msg.push_str("  - Working in wrong directory\n");
                             }

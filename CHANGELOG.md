@@ -6,6 +6,12 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Changed
+
+- `mb init` now creates `.minibeads/` for new projects. Existing `.beads/`
+  directories remain supported as a legacy fallback when no `.minibeads/`
+  directory is found.
+
 ## [0.21.4] - 2026-07-01
 
 ### Added
