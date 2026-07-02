@@ -6,7 +6,7 @@ issue_type: feature
 depends_on:
   minibeads-10: related
 created_at: 2025-10-30T14:00:08.401740698+00:00
-updated_at: 2025-10-30T14:00:08.776545666+00:00
+updated_at: 2026-07-02T22:57:45.095401671+00:00
 ---
 
 # Description
@@ -41,7 +41,7 @@ Add a `# Comments` section at the end of each issue markdown file:
 ### CLI Commands
 - `bd comment add <issue-id> <text>` - Add a comment
 - `bd comment list <issue-id>` - List comments for an issue
-- `bd comment delete <issue-id> <comment-id>` - Delete a comment (marks as deleted, keeps for audit)
+- `mb comments delete <issue-id> <comment-id>...` - Delete comment(s) by ID (IMPLEMENTED in minibeads-34; hard delete of the JSON entry, not a soft/audit tombstone)
 - `bd show <issue-id>` - Include comments in output
 
 ### Storage Implementation

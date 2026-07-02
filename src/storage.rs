@@ -536,6 +536,31 @@ impl Storage {
         self.read_comments_no_lock(issue_id)
     }
 
+    /// Delete a single comment from an issue by its comment ID.
+    ///
+    /// Returns the removed [`Comment`]. Errors (leaving the store untouched) when
+    /// no comment on `issue_id` has the given `comment_id`, so a typo or stale ID
+    /// never silently succeeds.
+    pub fn delete_comment(&self, issue_id: &str, comment_id: &str) -> Result<Comment> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let mut comments = self.read_comments_no_lock(issue_id)?;
+        let pos = comments
+            .iter()
+            .position(|c| c.id == comment_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Comment not found: {} (on issue {}). Run `mb comments list {}` to see valid comment IDs.",
+                    comment_id,
+                    issue_id,
+                    issue_id
+                )
+            })?;
+        let removed = comments.remove(pos);
+        self.write_comments_no_lock(issue_id, &comments)?;
+        Ok(removed)
+    }
+
     /// Upsert comments imported from an external source.
     pub fn upsert_comments(&self, issue_id: &str, incoming: Vec<Comment>) -> Result<usize> {
         let _lock = Lock::acquire(&self.beads_dir)?;
@@ -3219,6 +3244,67 @@ mod github_metadata_tests {
         assert_eq!(comments[0].body, "first comment");
         assert_eq!(comments[1].id, second.id);
         assert_eq!(comments[1].body, "second comment");
+    }
+
+    #[test]
+    fn delete_comment_removes_only_the_targeted_comment() {
+        let (_tmp, storage) = storage();
+        let issue = storage
+            .create_issue(
+                "commented".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        let first = storage.add_comment(&issue.id, "alice", "first").unwrap();
+        let second = storage.add_comment(&issue.id, "bob", "second").unwrap();
+
+        let removed = storage.delete_comment(&issue.id, &first.id).unwrap();
+        assert_eq!(removed.id, first.id);
+
+        let comments = storage.list_comments(&issue.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, second.id);
+    }
+
+    #[test]
+    fn delete_missing_comment_errors_and_leaves_others() {
+        let (_tmp, storage) = storage();
+        let issue = storage
+            .create_issue(
+                "commented".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let only = storage.add_comment(&issue.id, "alice", "keep me").unwrap();
+
+        let err = storage
+            .delete_comment(&issue.id, "does-not-exist")
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"), "unexpected: {err}");
+
+        // The real comment is untouched.
+        let comments = storage.list_comments(&issue.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, only.id);
     }
 }
 

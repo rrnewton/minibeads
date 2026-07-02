@@ -6,6 +6,15 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Added
+
+- **`mb comments delete ISSUE_ID COMMENT_ID...`** - delete one or more local
+  comments from an issue by comment ID (as shown by `mb comments list`). A
+  missing or unknown comment ID is an error and the comment store is left
+  untouched, so a typo never silently succeeds. Completes the comment CRUD
+  surface alongside `add`/`list`. (minibeads-specific — upstream `bd` has no
+  comment deletion.)
+
 ## [0.21.5] - 2026-07-02
 
 ### Changed

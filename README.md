@@ -196,6 +196,7 @@ minibeads uses coarse-grained locking with `.minibeads/minibeads.lock` containin
 - `bd reopen ISSUE_ID...` - Reopen closed issues
 - `bd comments add ISSUE_ID --body TEXT` - Add a local issue comment
 - `bd comments list ISSUE_ID` - List local issue comments
+- `bd comments delete ISSUE_ID COMMENT_ID...` - Delete local issue comment(s) by ID (minibeads-specific)
 
 ### Dependencies
 

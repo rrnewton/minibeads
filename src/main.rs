@@ -812,6 +812,14 @@ enum CommentCommands {
 
     /// List comments for an issue
     List { issue_id: String },
+
+    /// Delete one or more comments from an issue by comment ID
+    Delete {
+        issue_id: String,
+
+        /// Comment ID(s) to delete, as shown by `mb comments list`
+        comment_ids: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2406,6 +2414,25 @@ fn run() -> Result<()> {
                                 comment.id,
                                 comment.body
                             );
+                        }
+                    }
+                }
+                CommentCommands::Delete {
+                    issue_id,
+                    comment_ids,
+                } => {
+                    if comment_ids.is_empty() {
+                        anyhow::bail!("No comment IDs given to delete");
+                    }
+                    let mut deleted = Vec::new();
+                    for comment_id in &comment_ids {
+                        deleted.push(storage.delete_comment(&issue_id, comment_id)?);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&deleted)?);
+                    } else {
+                        for comment in &deleted {
+                            println!("Deleted comment: {}", comment.id);
                         }
                     }
                 }

@@ -76,6 +76,19 @@ assert_contains() {
     fi
 }
 
+# Assert a command fails (non-zero exit)
+assert_fails() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    local message="${1:-Command should fail}"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        fail "$message (command unexpectedly succeeded)"
+        return 1
+    else
+        success "$message"
+    fi
+}
+
 # Set up error handling
 trap 'error_handler $LINENO' ERR
 
@@ -176,6 +189,19 @@ print("ok")
 PY
 )
 assert_equals "ok" "$JSON_COMMENT_RESULT" "JSON show should include structured comments"
+
+# Test 5b: Delete a comment by ID
+echo -e "\n${YELLOW}Test 5b: Delete a comment${NC}"
+# Add a second comment so we can confirm delete is targeted, not wholesale.
+SECOND_ID=$("$BD_BIN" comments add test-1 --body "Second comment" --json 2>&1 | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+FIRST_ID=$("$BD_BIN" comments list test-1 --json 2>&1 | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')
+OUTPUT=$("$BD_BIN" comments delete test-1 "$FIRST_ID" 2>&1)
+assert_contains "$OUTPUT" "Deleted comment: $FIRST_ID" "Should confirm deletion"
+REMAINING=$("$BD_BIN" comments list test-1 --json 2>&1 | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d), d[0]["id"] if d else "")')
+assert_equals "1 $SECOND_ID" "$REMAINING" "Only the targeted comment should be removed"
+# Deleting a non-existent comment fails and does not touch the survivor.
+assert_fails "Deleting an unknown comment ID should fail" "$BD_BIN" comments delete test-1 no-such-comment
+assert_equals "1" "$("$BD_BIN" comments list test-1 --json 2>&1 | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')" "Survivor remains after a failed delete"
 
 # Test 6: Update issue status
 echo -e "\n${YELLOW}Test 6: Update issue status${NC}"
