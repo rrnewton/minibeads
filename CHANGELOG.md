@@ -6,6 +6,8 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.21.5] - 2026-07-02
+
 ### Changed
 
 - `mb init` now creates `.minibeads/` for new projects. Existing `.beads/`
