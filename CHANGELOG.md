@@ -6,6 +6,25 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Added
+
+- **Comment deletion now propagates through GitHub sync.** Deleting a synced
+  comment on one side is mirrored to the other instead of being resurrected by
+  the append-only import/export logic. `mb github sync` records a `synced_comments`
+  ancestry (a local-id ↔ GitHub-comment-id pairing) in `github-sync-state.json`;
+  a later sync uses it to tell a genuine deletion apart from a never-synced
+  comment. A comment deleted locally (e.g. via `mb comments delete`) is deleted
+  on GitHub; a comment deleted on GitHub is deleted locally. `mb github sync
+  --dry-run` previews the deletions, and the per-issue/summary output reports
+  them. Pull-only sync (`--pull-only`) never deletes on GitHub, only locally.
+  (minibeads-specific.)
+
+### Fixed
+
+- A GitHub-imported comment that was deleted locally is no longer re-imported on
+  the next `mb github sync` (previously it silently reappeared because nothing
+  recorded the deletion).
+
 ## [0.21.6] - 2026-07-03
 
 ### Added

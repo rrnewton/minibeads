@@ -43,6 +43,10 @@ pub struct GithubSyncReport {
     pub pulled_issues: usize,
     pub imported_comments: usize,
     pub exported_comments: usize,
+    #[serde(default)]
+    pub deleted_remote_comments: usize,
+    #[serde(default)]
+    pub deleted_local_comments: usize,
     pub conflicts: Vec<String>,
     #[serde(default)]
     pub issues: Vec<GithubIssueSyncReport>,
@@ -56,6 +60,10 @@ pub struct GithubIssueSyncReport {
     pub action: String,
     pub comments_imported: usize,
     pub comments_exported: usize,
+    #[serde(default)]
+    pub comments_deleted_remote: usize,
+    #[serde(default)]
+    pub comments_deleted_local: usize,
     #[serde(default)]
     pub details: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +131,19 @@ struct GithubIssueState {
     synced_local_comment_ids: Vec<String>,
     #[serde(default)]
     synced_remote_comment_ids: Vec<String>,
+    /// Pairing between a local comment id and its GitHub comment id, recorded for
+    /// every comment that existed on *both* sides at the last sync. This is the
+    /// ancestry that lets a later sync tell a genuine deletion (a pair whose local
+    /// or remote side has since disappeared) apart from a comment that was simply
+    /// never synced, so deletions can be propagated instead of resurrected.
+    #[serde(default)]
+    synced_comments: Vec<SyncedComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SyncedComment {
+    local_id: String,
+    remote_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -425,6 +446,25 @@ impl GithubIssueHandle {
         self.store.gh_status(args).await
     }
 
+    /// Delete a GitHub issue comment via the REST API and drop it from the cache.
+    async fn delete_comment(&self, comment_url: &str, comment_id: &str) -> Result<()> {
+        let path = comment_delete_api_path(self.store.inner.repo.as_deref(), comment_url)?;
+        let args = vec![
+            "api".to_string(),
+            "--method".to_string(),
+            "DELETE".to_string(),
+            path,
+        ];
+        self.store.gh_status(args).await?;
+        let entry = self.entry().await;
+        let mut cache = entry.lock().await;
+        if let Some(remote) = cache.remote.as_mut() {
+            remote.comments.retain(|comment| comment.id != comment_id);
+        }
+        cache.comments_dirty = true;
+        Ok(())
+    }
+
     async fn mutate_cached_remote(
         &self,
         f: impl FnOnce(&mut RemoteIssue) -> Result<()>,
@@ -496,6 +536,8 @@ async fn link_issue_async(
         pulled_issues: 0,
         imported_comments: if dry_run { 0 } else { remote.comments.len() },
         exported_comments: 0,
+        deleted_remote_comments: 0,
+        deleted_local_comments: 0,
         conflicts: Vec::new(),
         issues: vec![GithubIssueSyncReport {
             issue_id: issue_id.to_string(),
@@ -504,6 +546,8 @@ async fn link_issue_async(
             action: if dry_run { "would-link" } else { "linked" }.to_string(),
             comments_imported: if dry_run { 0 } else { remote.comments.len() },
             comments_exported: 0,
+            comments_deleted_remote: 0,
+            comments_deleted_local: 0,
             details: vec!["stored GitHub URL in external_ref".to_string()],
             conflict: None,
         }],
@@ -545,6 +589,8 @@ async fn publish_issue_async(
             pulled_issues: 0,
             imported_comments: 0,
             exported_comments: 0,
+            deleted_remote_comments: 0,
+            deleted_local_comments: 0,
             conflicts: Vec::new(),
             issues: vec![GithubIssueSyncReport {
                 issue_id: issue.id.clone(),
@@ -553,6 +599,8 @@ async fn publish_issue_async(
                 action: "would-publish".to_string(),
                 comments_imported: 0,
                 comments_exported: 0,
+                comments_deleted_remote: 0,
+                comments_deleted_local: 0,
                 details: vec!["would create GitHub issue and store external_ref".to_string()],
                 conflict: None,
             }],
@@ -588,6 +636,8 @@ async fn publish_issue_async(
         pulled_issues: 0,
         imported_comments: 0,
         exported_comments: exported,
+        deleted_remote_comments: 0,
+        deleted_local_comments: 0,
         conflicts: Vec::new(),
         issues: vec![GithubIssueSyncReport {
             issue_id: issue.id,
@@ -596,6 +646,8 @@ async fn publish_issue_async(
             action: "published".to_string(),
             comments_imported: 0,
             comments_exported: exported,
+            comments_deleted_remote: 0,
+            comments_deleted_local: 0,
             details: vec!["created GitHub issue and stored external_ref".to_string()],
             conflict: None,
         }],
@@ -816,6 +868,8 @@ async fn sync_linked_with_store(
         pulled_issues: 0,
         imported_comments: 0,
         exported_comments: 0,
+        deleted_remote_comments: 0,
+        deleted_local_comments: 0,
         conflicts: Vec::new(),
         issues: Vec::new(),
     };
@@ -835,7 +889,7 @@ async fn sync_linked_with_store(
         }
 
         let handle = store.issue(&url);
-        let remote = handle.get().await?;
+        let mut remote = handle.get().await?;
         if !dry_run && !pull_only {
             handle.ensure_marker(&issue).await?;
         }
@@ -862,6 +916,8 @@ async fn sync_linked_with_store(
             action: "unchanged".to_string(),
             comments_imported: 0,
             comments_exported: 0,
+            comments_deleted_remote: 0,
+            comments_deleted_local: 0,
             details: Vec::new(),
             conflict: None,
         };
@@ -1026,6 +1082,41 @@ async fn sync_linked_with_store(
                         .push("issue fields already match last synced state".to_string());
                 }
             }
+        }
+
+        let deletions = reconcile_deleted_comments(
+            storage,
+            &issue,
+            &handle,
+            &mut remote,
+            old_state,
+            dry_run,
+            pull_only,
+        )
+        .await?;
+        if deletions.remote_written {
+            remote_written = true;
+        }
+        let local_comments = if deletions.deleted_local > 0 && !dry_run {
+            storage.list_comments(&issue.id)?
+        } else {
+            local_comments
+        };
+        report.deleted_remote_comments += deletions.deleted_remote;
+        report.deleted_local_comments += deletions.deleted_local;
+        item.comments_deleted_remote = deletions.deleted_remote;
+        item.comments_deleted_local = deletions.deleted_local;
+        if deletions.deleted_remote > 0 {
+            item.details.push(format!(
+                "deleted {} comment(s) on GitHub after local deletion",
+                deletions.deleted_remote
+            ));
+        }
+        if deletions.deleted_local > 0 {
+            item.details.push(format!(
+                "deleted {} local comment(s) after GitHub deletion",
+                deletions.deleted_local
+            ));
         }
 
         let synced_local_ids: HashSet<String> = old_state
@@ -1948,11 +2039,7 @@ fn import_remote_comments(storage: &Storage, issue: &Issue, remote: &RemoteIssue
         .filter(|remote_comment| {
             !local_comments.iter().any(|local| {
                 local.source_id.is_none()
-                    && remote_comment.body
-                        == format!(
-                            "_From minibeads {} by {}_\n\n{}",
-                            issue.id, local.author, local.body
-                        )
+                    && remote_comment.body == exported_comment_body(issue, local)
             })
         })
         .map(|c| Comment {
@@ -1988,15 +2075,107 @@ async fn export_new_local_comments(
             continue;
         }
 
-        let body = format!(
-            "_From minibeads {} by {}_\n\n{}",
-            issue.id, comment.author, comment.body
-        );
+        let body = exported_comment_body(issue, comment);
         if remote.add_comment(&body).await? {
             exported += 1;
         }
     }
     Ok(exported)
+}
+
+#[derive(Debug, Default)]
+struct CommentDeletionOutcome {
+    /// Comments deleted on GitHub because they were deleted locally.
+    deleted_remote: usize,
+    /// Local comments deleted because they were deleted on GitHub.
+    deleted_local: usize,
+    /// Whether we mutated GitHub (so the caller re-snapshots for state).
+    remote_written: bool,
+}
+
+/// Reconcile comment deletions using the last-synced ancestry pairs.
+///
+/// A pair `{local_id, remote_id}` recorded at the previous sync means the comment
+/// existed on both sides then. If only one side is now missing, the user deleted
+/// it there, so we propagate the deletion to the other side instead of letting the
+/// append-only import/export logic resurrect it:
+///
+/// - deleted locally  -> delete the GitHub comment (a push; skipped in pull-only)
+/// - deleted on GitHub -> delete the local comment (a pull; always applied)
+///
+/// `remote` is updated in place so the subsequent import step does not re-import a
+/// comment we just deleted on GitHub.
+async fn reconcile_deleted_comments(
+    storage: &Storage,
+    issue: &Issue,
+    handle: &GithubIssueHandle,
+    remote: &mut RemoteIssue,
+    old_state: Option<&GithubIssueState>,
+    dry_run: bool,
+    pull_only: bool,
+) -> Result<CommentDeletionOutcome> {
+    let mut outcome = CommentDeletionOutcome::default();
+    let Some(state) = old_state else {
+        return Ok(outcome);
+    };
+    if state.synced_comments.is_empty() {
+        return Ok(outcome);
+    }
+
+    let local_comments = storage.list_comments(&issue.id)?;
+    let local_ids: HashSet<&str> = local_comments.iter().map(|c| c.id.as_str()).collect();
+    let remote_ids: HashSet<&str> = remote
+        .comments
+        .iter()
+        .filter(|c| !is_marker_comment(c))
+        .map(|c| c.id.as_str())
+        .collect();
+
+    let mut delete_remote: Vec<String> = Vec::new();
+    let mut delete_local: Vec<String> = Vec::new();
+    for pair in &state.synced_comments {
+        match (
+            local_ids.contains(pair.local_id.as_str()),
+            remote_ids.contains(pair.remote_id.as_str()),
+        ) {
+            (false, true) => delete_remote.push(pair.remote_id.clone()),
+            (true, false) => delete_local.push(pair.local_id.clone()),
+            _ => {}
+        }
+    }
+
+    // Deleted locally -> propagate to GitHub. This is a push, so honor pull-only.
+    if !pull_only && !delete_remote.is_empty() {
+        for remote_id in &delete_remote {
+            let Some(url) = remote
+                .comments
+                .iter()
+                .find(|c| &c.id == remote_id)
+                .map(|c| c.url.clone())
+            else {
+                continue;
+            };
+            if !dry_run {
+                handle.delete_comment(&url, remote_id).await?;
+                outcome.remote_written = true;
+            }
+            outcome.deleted_remote += 1;
+        }
+        if !dry_run {
+            let deleted: HashSet<&str> = delete_remote.iter().map(String::as_str).collect();
+            remote.comments.retain(|c| !deleted.contains(c.id.as_str()));
+        }
+    }
+
+    // Deleted on GitHub -> mirror the deletion locally. This is a pull, always safe.
+    for local_id in &delete_local {
+        if !dry_run {
+            storage.delete_comment(&issue.id, local_id)?;
+        }
+        outcome.deleted_local += 1;
+    }
+
+    Ok(outcome)
 }
 
 fn remember_state(
@@ -2028,6 +2207,16 @@ fn update_state_entry(
         .filter(|c| !is_marker_comment(c))
         .map(|c| c.id.clone())
         .collect();
+    let synced_comments = comments
+        .iter()
+        .filter(|c| !is_local_marker_comment(c))
+        .filter_map(|c| {
+            remote_id_for_local_comment(issue, c, remote).map(|remote_id| SyncedComment {
+                local_id: c.id.clone(),
+                remote_id,
+            })
+        })
+        .collect();
     let mut next = GithubIssueState {
         local_id: issue.id.clone(),
         local_hash: hash_local_issue(issue),
@@ -2035,13 +2224,15 @@ fn update_state_entry(
         synced_at: Utc::now(),
         synced_local_comment_ids,
         synced_remote_comment_ids,
+        synced_comments,
     };
     if let Some(previous) = existing {
         let only_synced_at_would_change = previous.local_id == next.local_id
             && previous.local_hash == next.local_hash
             && previous.remote_hash == next.remote_hash
             && previous.synced_local_comment_ids == next.synced_local_comment_ids
-            && previous.synced_remote_comment_ids == next.synced_remote_comment_ids;
+            && previous.synced_remote_comment_ids == next.synced_remote_comment_ids
+            && previous.synced_comments == next.synced_comments;
         if only_synced_at_would_change {
             next.synced_at = previous.synced_at;
         }
@@ -2140,6 +2331,69 @@ fn is_marker_comment(comment: &RemoteComment) -> bool {
 
 fn is_local_marker_comment(comment: &Comment) -> bool {
     comment.body.contains(MARKER)
+}
+
+/// The GitHub comment id that a local comment is currently paired with, or `None`
+/// when the local comment has no live counterpart on `remote`.
+///
+/// An imported comment carries the GitHub id in `source_id`; a locally-authored
+/// comment is matched by the `_From minibeads ..._` body we export for it.
+fn remote_id_for_local_comment(
+    issue: &Issue,
+    comment: &Comment,
+    remote: &RemoteIssue,
+) -> Option<String> {
+    if let Some(source_id) = &comment.source_id {
+        return remote
+            .comments
+            .iter()
+            .find(|rc| !is_marker_comment(rc) && &rc.id == source_id)
+            .map(|rc| rc.id.clone());
+    }
+    let exported = exported_comment_body(issue, comment);
+    remote
+        .comments
+        .iter()
+        .find(|rc| !is_marker_comment(rc) && rc.body == exported)
+        .map(|rc| rc.id.clone())
+}
+
+/// The body minibeads exports to GitHub for a locally-authored comment.
+fn exported_comment_body(issue: &Issue, comment: &Comment) -> String {
+    format!(
+        "_From minibeads {} by {}_\n\n{}",
+        issue.id, comment.author, comment.body
+    )
+}
+
+/// Build the `gh api` REST path for deleting a GitHub issue comment.
+///
+/// The numeric REST comment id lives in the comment URL after `#issuecomment-`;
+/// the node id returned by `gh issue view` is not accepted by the REST endpoint.
+fn comment_delete_api_path(repo: Option<&str>, comment_url: &str) -> Result<String> {
+    let repo = match repo {
+        Some(repo) => repo.to_string(),
+        None => owner_repo_from_url(comment_url).ok_or_else(|| {
+            anyhow!("Cannot determine owner/repo to delete GitHub comment {comment_url}")
+        })?,
+    };
+    let numeric = comment_url
+        .rsplit("#issuecomment-")
+        .next()
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| {
+            anyhow!("Cannot extract a numeric comment id from GitHub comment URL {comment_url}")
+        })?;
+    Ok(format!("/repos/{repo}/issues/comments/{numeric}"))
+}
+
+/// Extract `owner/repo` from a `https://github.com/owner/repo/...` URL.
+fn owner_repo_from_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let mut parts = rest.split('/');
+    let owner = parts.next().filter(|s| !s.is_empty())?;
+    let repo = parts.next().filter(|s| !s.is_empty())?;
+    Some(format!("{owner}/{repo}"))
 }
 
 fn local_repo_name() -> Option<String> {
@@ -2458,6 +2712,64 @@ mod tests {
         (script.to_string_lossy().to_string(), log)
     }
 
+    /// A fake `gh` that succeeds on every call and appends its args to a log.
+    /// Useful for exercising code paths (like comment deletion) where we only
+    /// care that the right `gh` invocation was made.
+    #[cfg(unix)]
+    fn fake_gh_recording(tmp: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = tmp.path().join("gh-recording.log");
+        let script = tmp.path().join("gh-recording-fake");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                shell_quote_arg(&log.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        (script.to_string_lossy().to_string(), log)
+    }
+
+    fn imported_comment(issue: &Issue, remote_id: &str, body: &str) -> Comment {
+        Comment {
+            id: format!("gh-{remote_id}"),
+            issue_id: issue.id.clone(),
+            author: "octo".to_string(),
+            body: body.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_url: Some(format!(
+                "https://github.com/example/repo/issues/1#issuecomment-{remote_id}"
+            )),
+            source_id: Some(remote_id.to_string()),
+        }
+    }
+
+    fn state_with_pair(
+        issue: &Issue,
+        remote: &RemoteIssue,
+        local_id: &str,
+        remote_id: &str,
+    ) -> GithubIssueState {
+        GithubIssueState {
+            local_id: issue.id.clone(),
+            local_hash: hash_local_issue(issue),
+            remote_hash: hash_remote_issue(remote),
+            synced_at: Utc::now(),
+            synced_local_comment_ids: vec![local_id.to_string()],
+            synced_remote_comment_ids: vec![remote_id.to_string()],
+            synced_comments: vec![SyncedComment {
+                local_id: local_id.to_string(),
+                remote_id: remote_id.to_string(),
+            }],
+        }
+    }
+
     fn remote_comment(id: &str, body: &str) -> RemoteComment {
         RemoteComment {
             id: id.to_string(),
@@ -2565,6 +2877,200 @@ mod tests {
 
         let entry = state.issues.get(&remote.url).unwrap();
         assert_eq!(entry.synced_remote_comment_ids, vec!["regular"]);
+    }
+
+    #[test]
+    fn comment_delete_api_path_uses_numeric_id_from_url() {
+        let path = comment_delete_api_path(
+            Some("example/repo"),
+            "https://github.com/example/repo/issues/1#issuecomment-987",
+        )
+        .unwrap();
+        assert_eq!(path, "/repos/example/repo/issues/comments/987");
+
+        // Falls back to parsing owner/repo from the URL when no repo is configured.
+        let path = comment_delete_api_path(
+            None,
+            "https://github.com/owner/name/issues/4#issuecomment-12345",
+        )
+        .unwrap();
+        assert_eq!(path, "/repos/owner/name/issues/comments/12345");
+
+        // A URL without a comment fragment is rejected rather than guessed.
+        assert!(comment_delete_api_path(
+            Some("example/repo"),
+            "https://github.com/example/repo/issues/1"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn remote_id_pairs_imported_and_locally_authored_comments() {
+        let (_tmp, _storage, issue) = storage_with_issue();
+        let authored = Comment {
+            id: "local-1".to_string(),
+            issue_id: issue.id.clone(),
+            author: "alice".to_string(),
+            body: "hello".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_url: None,
+            source_id: None,
+        };
+        let imported = imported_comment(&issue, "77", "imported body");
+        let remote = remote_issue(vec![
+            remote_comment("55", &exported_comment_body(&issue, &authored)),
+            remote_comment("77", "imported body"),
+        ]);
+
+        assert_eq!(
+            remote_id_for_local_comment(&issue, &authored, &remote).as_deref(),
+            Some("55")
+        );
+        assert_eq!(
+            remote_id_for_local_comment(&issue, &imported, &remote).as_deref(),
+            Some("77")
+        );
+
+        // No live counterpart on GitHub -> no pair.
+        let empty = remote_issue(vec![]);
+        assert!(remote_id_for_local_comment(&issue, &imported, &empty).is_none());
+    }
+
+    #[test]
+    fn update_state_entry_records_local_to_remote_comment_pairs() {
+        let (_tmp, _storage, issue) = storage_with_issue();
+        let remote = remote_issue(vec![remote_comment("regular", "real GitHub comment")]);
+        let local = vec![imported_comment(&issue, "regular", "real GitHub comment")];
+        let mut state = GithubSyncState::default();
+
+        update_state_entry(&mut state, &issue, &remote, &local);
+
+        let entry = state.issues.get(&remote.url).unwrap();
+        assert_eq!(
+            entry.synced_comments,
+            vec![SyncedComment {
+                local_id: "gh-regular".to_string(),
+                remote_id: "regular".to_string(),
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locally_deleted_comment_is_deleted_on_github() {
+        let (tmp, storage, issue) = storage_with_issue();
+        storage
+            .upsert_comments(
+                &issue.id,
+                vec![imported_comment(&issue, "42", "imported body")],
+            )
+            .unwrap();
+        let mut remote = remote_issue(vec![remote_comment("42", "imported body")]);
+        let old_state = state_with_pair(&issue, &remote, "gh-42", "42");
+
+        // The user deletes the imported comment locally.
+        storage.delete_comment(&issue.id, "gh-42").unwrap();
+
+        let (program, log) = fake_gh_recording(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+        let handle = store.issue(&remote.url);
+
+        let outcome = block_on_github(reconcile_deleted_comments(
+            &storage,
+            &issue,
+            &handle,
+            &mut remote,
+            Some(&old_state),
+            false,
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(outcome.deleted_remote, 1);
+        assert_eq!(outcome.deleted_local, 0);
+        assert!(outcome.remote_written);
+        // The deleted comment is removed from the in-memory remote so a later
+        // import in the same run cannot resurrect it.
+        assert!(remote.comments.is_empty());
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(
+            calls.contains("api --method DELETE /repos/example/repo/issues/comments/42"),
+            "{calls}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_deleted_comment_is_deleted_locally() {
+        let (tmp, storage, issue) = storage_with_issue();
+        storage
+            .upsert_comments(
+                &issue.id,
+                vec![imported_comment(&issue, "42", "imported body")],
+            )
+            .unwrap();
+        // Remote no longer has the comment (deleted on GitHub).
+        let mut remote = remote_issue(vec![]);
+        let old_state = state_with_pair(&issue, &remote, "gh-42", "42");
+
+        let (program, _log) = fake_gh_recording(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+        let handle = store.issue("https://github.com/example/repo/issues/1");
+
+        let outcome = block_on_github(reconcile_deleted_comments(
+            &storage,
+            &issue,
+            &handle,
+            &mut remote,
+            Some(&old_state),
+            false,
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(outcome.deleted_local, 1);
+        assert_eq!(outcome.deleted_remote, 0);
+        assert!(storage.list_comments(&issue.id).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_only_does_not_delete_comments_on_github() {
+        let (tmp, storage, issue) = storage_with_issue();
+        storage
+            .upsert_comments(
+                &issue.id,
+                vec![imported_comment(&issue, "42", "imported body")],
+            )
+            .unwrap();
+        let mut remote = remote_issue(vec![remote_comment("42", "imported body")]);
+        let old_state = state_with_pair(&issue, &remote, "gh-42", "42");
+        storage.delete_comment(&issue.id, "gh-42").unwrap();
+
+        let (program, log) = fake_gh_recording(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+        let handle = store.issue(&remote.url);
+
+        let outcome = block_on_github(reconcile_deleted_comments(
+            &storage,
+            &issue,
+            &handle,
+            &mut remote,
+            Some(&old_state),
+            false,
+            true,
+        ))
+        .unwrap();
+
+        assert_eq!(outcome.deleted_remote, 0);
+        assert!(!outcome.remote_written);
+        // Pull-only never pushes, so the GitHub comment (and our record) survive.
+        assert_eq!(remote.comments.len(), 1);
+        assert!(std::fs::read_to_string(log)
+            .map(|calls| !calls.contains("--method DELETE"))
+            .unwrap_or(true));
     }
 
     #[cfg(unix)]

@@ -223,11 +223,18 @@ issues are ignored.
 - `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
 - `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
-Synced fields are title, description/body, open/closed state, and append-only
-comments. minibeads keeps `.minibeads/github-sync-state.json` as the last-synced
-ancestry record so it can distinguish local-only changes, GitHub-only changes,
-and both-sides conflicts. Labels, priority, assignee, dependencies, and other
+Synced fields are title, description/body, open/closed state, and comments.
+minibeads keeps `.minibeads/github-sync-state.json` as the last-synced ancestry
+record so it can distinguish local-only changes, GitHub-only changes, and
+both-sides conflicts. Labels, priority, assignee, dependencies, and other
 minibeads-specific metadata remain local for now.
+
+Comment sync propagates deletions in both directions. The sync state pairs each
+synced local comment with its GitHub comment id, so deleting a comment on one
+side (for example with `bd comments delete`) deletes its counterpart on the
+other side on the next sync, rather than re-importing it. Pull-only sync
+(`--pull-only`) applies GitHub-side deletions locally but never deletes on
+GitHub.
 
 Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
 viewing the GitHub issue can see which local minibeads issue owns the sync. That

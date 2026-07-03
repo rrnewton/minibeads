@@ -6,7 +6,7 @@ issue_type: feature
 depends_on:
   minibeads-10: related
 created_at: 2025-10-30T14:00:08.401740698+00:00
-updated_at: 2026-07-02T22:57:45.095401671+00:00
+updated_at: 2026-07-03T13:36:47.260982857+00:00
 ---
 
 # Description
@@ -42,6 +42,9 @@ Add a `# Comments` section at the end of each issue markdown file:
 - `bd comment add <issue-id> <text>` - Add a comment
 - `bd comment list <issue-id>` - List comments for an issue
 - `mb comments delete <issue-id> <comment-id>...` - Delete comment(s) by ID (IMPLEMENTED in minibeads-34; hard delete of the JSON entry, not a soft/audit tombstone)
+
+### GitHub comment-deletion propagation (IMPLEMENTED)
+Deleting a synced comment now propagates through `mb github sync` instead of being resurrected by append-only import/export. The sync state records a `synced_comments` ancestry (local-id <-> GitHub-comment-id pairs) in github-sync-state.json; a later sync uses it to distinguish a real deletion from a never-synced comment. Local deletion -> delete on GitHub (REST `gh api --method DELETE`); GitHub deletion -> delete locally. Pull-only sync only deletes locally, never on GitHub. Also fixes the resurrection bug where a locally-deleted imported comment reappeared on the next sync.
 - `bd show <issue-id>` - Include comments in output
 
 ### Storage Implementation

@@ -973,13 +973,15 @@ impl<'a> From<&'a Comment> for ShowCommentView<'a> {
 
 fn print_github_summary(report: &github::GithubSyncReport) {
     println!(
-        "GitHub sync: linked {}, created remote {}, pushed {}, pulled {}, comments exported {}, comments imported {}, conflicts {}",
+        "GitHub sync: linked {}, created remote {}, pushed {}, pulled {}, comments exported {}, comments imported {}, comments deleted remote {}, comments deleted local {}, conflicts {}",
         report.linked,
         report.created_remote,
         report.pushed_issues,
         report.pulled_issues,
         report.exported_comments,
         report.imported_comments,
+        report.deleted_remote_comments,
+        report.deleted_local_comments,
         report.conflicts.len()
     );
 }
@@ -1000,6 +1002,18 @@ fn print_github_report(report: &github::GithubSyncReport, quiet: bool, verbose: 
             }
             if issue.comments_imported > 0 {
                 extras.push(format!("{} comment(s) imported", issue.comments_imported));
+            }
+            if issue.comments_deleted_remote > 0 {
+                extras.push(format!(
+                    "{} comment(s) deleted on GitHub",
+                    issue.comments_deleted_remote
+                ));
+            }
+            if issue.comments_deleted_local > 0 {
+                extras.push(format!(
+                    "{} local comment(s) deleted",
+                    issue.comments_deleted_local
+                ));
             }
             if issue.conflict.is_some() {
                 extras.push("conflict".to_string());
