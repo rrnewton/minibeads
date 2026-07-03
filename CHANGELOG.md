@@ -6,6 +6,8 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.21.6] - 2026-07-03
+
 ### Added
 
 - **`mb comments delete ISSUE_ID COMMENT_ID...`** - delete one or more local
