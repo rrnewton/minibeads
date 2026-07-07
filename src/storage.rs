@@ -836,6 +836,43 @@ impl Storage {
         Ok(issue)
     }
 
+    /// Append `text` to a text field, inserting a blank line before it when the
+    /// field already has content so the appended text becomes its own paragraph.
+    ///
+    /// A safer alternative to overwriting a whole field with `--description` when
+    /// you only want to add to the end, and simpler than a search/replace that
+    /// has to reproduce the field's trailing lines exactly.
+    pub fn append_to_issue(&self, id: &str, field: EditField, text: &str) -> Result<Issue> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        if text.is_empty() {
+            anyhow::bail!("--append text must not be empty");
+        }
+
+        let issue_path = self.issues_dir.join(format!("{}.md", id));
+        if !issue_path.exists() {
+            anyhow::bail!("Issue not found: {}", id);
+        }
+
+        let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
+        let mut issue = markdown_to_issue(id, &content)?;
+
+        let target = issue.text_field_mut(field);
+        let existing = target.trim_end();
+        *target = if existing.is_empty() {
+            text.to_string()
+        } else {
+            format!("{existing}\n\n{text}")
+        };
+
+        issue.updated_at = chrono::Utc::now();
+
+        let markdown = issue_to_markdown(&issue)?;
+        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+
+        Ok(issue)
+    }
+
     /// Atomically claim an issue for `actor`.
     ///
     /// This is the local half of minibeads' git-as-coordination model: the claim
@@ -3409,6 +3446,49 @@ mod search_replace_tests {
             .unwrap();
         assert_eq!(issue.design, "line one\nline two only");
         // The description field is untouched by a design-targeted edit.
+        assert_eq!(issue.description, "body");
+    }
+
+    #[test]
+    fn append_adds_a_paragraph_after_existing_content() {
+        let (_tmp, storage, id) = storage_with_description("First paragraph.");
+        let issue = storage
+            .append_to_issue(&id, EditField::Description, "Second paragraph.")
+            .unwrap();
+        assert_eq!(issue.description, "First paragraph.\n\nSecond paragraph.");
+    }
+
+    #[test]
+    fn append_normalizes_trailing_whitespace_before_the_blank_line() {
+        let (_tmp, storage, id) = storage_with_description("First paragraph.\n\n");
+        let issue = storage
+            .append_to_issue(&id, EditField::Description, "Second paragraph.")
+            .unwrap();
+        // Exactly one blank line separates the two, regardless of prior trailing
+        // newlines.
+        assert_eq!(issue.description, "First paragraph.\n\nSecond paragraph.");
+    }
+
+    #[test]
+    fn append_to_empty_field_has_no_leading_blank_line() {
+        let (_tmp, storage, id) = storage_with_description("");
+        let issue = storage
+            .append_to_issue(&id, EditField::Design, "Design note.")
+            .unwrap();
+        assert_eq!(issue.design, "Design note.");
+        // The default (description) field stays empty.
+        assert_eq!(issue.description, "");
+    }
+
+    #[test]
+    fn append_empty_text_is_rejected() {
+        let (_tmp, storage, id) = storage_with_description("body");
+        let err = storage
+            .append_to_issue(&id, EditField::Description, "")
+            .unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected: {err}");
+        // Nothing was written.
+        let issue = storage.get_issue(&id).unwrap().unwrap();
         assert_eq!(issue.description, "body");
     }
 }

@@ -145,6 +145,21 @@ echo -e "\n${YELLOW}Test 6: Argument guards${NC}"
 assert_fails "--search without --replace should fail" "$BD_BIN" update test-1 --search "tool"
 assert_fails "--search with --description should conflict" "$BD_BIN" update test-1 --search "tool" --replace "x" --description "whole new body"
 
+# Test 7: --append tacks a new paragraph onto a field
+echo -e "\n${YELLOW}Test 7: --append adds to the end of a field${NC}"
+OUTPUT=$("$BD_BIN" update test-1 --append "An appended closing paragraph." 2>&1)
+assert_contains "$OUTPUT" "Appended to issue: test-1 (description field)" "Should confirm the append"
+assert_contains "$(desc_body)" "An appended closing paragraph." "Appended text should be present"
+# The pre-existing description content must still be there.
+assert_contains "$(desc_body)" "edited via search/replace" "Original description must be preserved"
+
+# Test 8: --append honors --field and conflicts with the wholesale setters
+echo -e "\n${YELLOW}Test 8: --append field selection and guards${NC}"
+"$BD_BIN" update test-1 --field design --append "An appended design note." >/dev/null 2>&1
+assert_contains "$(sed -n '/^# Design/,/^# /p' .minibeads/issues/test-1.md)" "An appended design note." "Append should target the design field"
+assert_fails "--append with --description should conflict" "$BD_BIN" update test-1 --append "x" --description "whole new body"
+assert_fails "--append with --search should conflict" "$BD_BIN" update test-1 --append "x" --search "y" --replace "z"
+
 # Print summary
 echo ""
 echo "=========================================="

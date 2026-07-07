@@ -403,8 +403,9 @@ enum Commands {
         #[arg(long, allow_hyphen_values = true, requires = "search")]
         replace: Option<String>,
 
-        /// Which field --search/--replace edits: title, description, design,
-        /// notes, or acceptance (default: description). (minibeads-specific)
+        /// Which field --search/--replace/--append edits: title, description,
+        /// design, notes, or acceptance (default: description).
+        /// (minibeads-specific)
         #[arg(long = "field", default_value = "description")]
         search_field: EditField,
 
@@ -412,6 +413,18 @@ enum Commands {
         /// search text to match exactly once. (minibeads-specific)
         #[arg(long, requires = "search")]
         replace_all: bool,
+
+        /// Append this text to a field (default description; use --field to pick
+        /// another). A blank line is inserted before it when the field already
+        /// has content, so the appended text becomes its own paragraph. Saves
+        /// having to pass the trailing text as --search/--replace when you just
+        /// want to add to the end. (minibeads-specific)
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            conflicts_with_all = ["search", "replace", "replace_all", "description", "title", "design", "acceptance", "notes", "claim"]
+        )]
+        append: Option<String>,
 
         /// New design notes
         #[arg(long, allow_hyphen_values = true)]
@@ -1822,6 +1835,7 @@ fn run() -> Result<()> {
             replace,
             search_field,
             replace_all,
+            append,
             design,
             acceptance,
             notes,
@@ -1862,6 +1876,25 @@ fn run() -> Result<()> {
                 } else {
                     for issue in &updated_issues {
                         println!("Updated issue: {} ({} field)", issue.id, search_field);
+                    }
+                }
+                return Ok(());
+            }
+
+            // Targeted append edit. clap guarantees --append is mutually
+            // exclusive with --search/--replace, the wholesale field setters, and
+            // --claim, so this is a self-contained mode like search/replace.
+            if let Some(append) = append {
+                let mut updated_issues = Vec::new();
+                for issue_id in &issue_ids {
+                    let issue = storage.append_to_issue(issue_id, search_field, &append)?;
+                    updated_issues.push(issue);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&updated_issues)?);
+                } else {
+                    for issue in &updated_issues {
+                        println!("Appended to issue: {} ({} field)", issue.id, search_field);
                     }
                 }
                 return Ok(());
@@ -3284,6 +3317,15 @@ EDITING DESCRIPTIONS (do NOT hand-edit the .minibeads/*.md files!)
             and the issue is left untouched, so the edit is safe to retry.
             --field selects the text field (title, description, design, notes,
             acceptance; default description).
+
+  To simply add to the end of a field, use --append instead of reproducing
+  the trailing text as a search/replace:
+
+  mb update myapp-1 --append "A new closing paragraph."
+  mb update myapp-1 --field design --append "An extra design note."
+
+            --append inserts a blank line before the new text when the field is
+            non-empty, so it lands as its own paragraph.
 
 CLOSING ISSUES
   mb close myapp-1

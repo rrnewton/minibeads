@@ -192,6 +192,10 @@ minibeads uses coarse-grained locking with `.minibeads/minibeads.lock` containin
     a missing or ambiguous match is an error and the issue is left untouched.
     This is the recommended way for agents to revise a long description — far
     safer than rewriting the whole field. (minibeads-specific)
+  - `--append TEXT [--field FIELD]` - append `TEXT` to the end of a text field
+    (default `description`), inserting a blank line before it when the field is
+    non-empty so it becomes its own paragraph. Simpler than a search/replace when
+    you only want to add to the end. (minibeads-specific)
 - `bd close ISSUE_ID [--reason REASON]` - Close (complete) an issue
 - `bd reopen ISSUE_ID...` - Reopen closed issues
 - `bd comments add ISSUE_ID --body TEXT` - Add a local issue comment

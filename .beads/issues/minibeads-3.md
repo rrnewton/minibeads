@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2025-10-30T13:56:02.945405078+00:00
+updated_at: 2026-07-07T01:37:55.667558527+00:00
 ---
 
 # Description
@@ -110,3 +110,6 @@ Track testing improvements for minibeads.
 - minibeads-5: Fixed serialization bug and validation (CLOSED)
 - minibeads-14: Test porting plan - adapting upstream beads tests for minibeads
 - minibeads-20: Deep verification with reference interpreter (CLOSED)
+
+## minibeads-35: bidirectional upstream sync stress test failing (pre-existing)
+make stress-test's test_sync_stress fails deterministically (seed 12345) with an issue-count mismatch (expected 45, got 30). Confirmed pre-existing as of af00710. Not caught by make validate. See minibeads-35.

@@ -6,7 +6,17 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-06
+
 ### Added
+
+- **`mb update --append TEXT`** - append text to the end of a field (default
+  `description`; use `--field` to choose title/design/notes/acceptance). A blank
+  line is inserted before the new text when the field is non-empty, so it lands
+  as its own paragraph. Simpler than a search/replace when you only want to add
+  to the end without reproducing the field's trailing lines. Mutually exclusive
+  with `--search`/`--replace`, the wholesale field setters, and `--claim`.
+  (minibeads-specific.)
 
 - **Comment deletion now propagates through GitHub sync.** Deleting a synced
   comment on one side is mirrored to the other instead of being resurrected by
