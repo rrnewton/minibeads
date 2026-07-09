@@ -19,7 +19,7 @@ use std::env;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use storage::{is_github_issue_ref, Storage};
+use storage::{is_github_issue_ref, IssueStorageLayout, Storage};
 use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status};
 
 const PRIMARY_STORAGE_DIR: &str = ".minibeads";
@@ -180,6 +180,10 @@ enum Commands {
         /// Use hash-based issue IDs instead of sequential numbers (minibeads-specific)
         #[arg(long = "mb-hash-ids")]
         mb_hash_ids: bool,
+
+        /// Issue file layout for new repos: flat or sharded (minibeads-specific)
+        #[arg(long = "mb-issue-layout", default_value = "flat")]
+        mb_issue_layout: String,
 
         /// Use external Dolt server (ignored for upstream bd compatibility)
         #[arg(long, hide = true)]
@@ -719,7 +723,7 @@ enum Commands {
 
     /// Migrate between numeric and hash-based IDs (minibeads-specific)
     MbMigrate {
-        /// Migration direction: 'hash' (numeric -> hash) or 'numeric' (hash/mixed -> numeric)
+        /// Migration direction: 'hash', 'numeric', 'sharded', or 'flat'
         #[arg(long, default_value = "hash")]
         to: String,
 
@@ -1581,6 +1585,7 @@ fn run() -> Result<()> {
         Commands::Init {
             prefix,
             mb_hash_ids,
+            mb_issue_layout,
             server: _,
             server_port: _,
             database: _,
@@ -1601,7 +1606,15 @@ fn run() -> Result<()> {
             }
 
             let beads_dir = PathBuf::from(PRIMARY_STORAGE_DIR);
-            let storage = Storage::init(beads_dir, prefix, mb_hash_ids)?;
+            let issue_layout = match mb_issue_layout.as_str() {
+                "flat" => IssueStorageLayout::Flat,
+                "sharded" => IssueStorageLayout::Sharded,
+                other => anyhow::bail!(
+                    "Invalid --mb-issue-layout '{}'. Valid values are: flat, sharded",
+                    other
+                ),
+            };
+            let storage = Storage::init(beads_dir, prefix, mb_hash_ids, issue_layout)?;
 
             // Log command after successful init
             if !mb_no_cmd_logging {
@@ -3157,9 +3170,53 @@ fn run() -> Result<()> {
                         }
                     }
                 }
+                "sharded" | "flat" => {
+                    let update_config = !no_change_config;
+                    let target_layout = if to == "sharded" {
+                        IssueStorageLayout::Sharded
+                    } else {
+                        IssueStorageLayout::Flat
+                    };
+                    let changes = storage.migrate_issue_storage_layout(
+                        target_layout,
+                        dry_run,
+                        update_config,
+                    )?;
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&changes)?);
+                    } else if dry_run {
+                        println!("Dry run - would make the following changes:");
+                        for change in &changes {
+                            println!("  {}", change);
+                        }
+                    } else {
+                        let issue_count = changes
+                            .iter()
+                            .filter(|c| c.starts_with("Move issue "))
+                            .count();
+                        if issue_count > 0 {
+                            println!(
+                                "Successfully migrated {} issue file(s) to {} layout",
+                                issue_count,
+                                target_layout.as_str()
+                            );
+                        } else {
+                            for change in &changes {
+                                println!("{}", change);
+                            }
+                        }
+                        if update_config {
+                            println!(
+                                "Updated config-minibeads.yaml: issue-storage-layout: {}",
+                                target_layout.as_str()
+                            );
+                        }
+                    }
+                }
                 _ => {
                     anyhow::bail!(
-                        "Invalid migration target '{}'. Use '--to=hash' or '--to=numeric'",
+                        "Invalid migration target '{}'. Use '--to=hash', '--to=numeric', '--to=sharded', or '--to=flat'",
                         to
                     );
                 }

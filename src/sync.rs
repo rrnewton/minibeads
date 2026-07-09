@@ -109,6 +109,122 @@ pub struct SyncReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueStorageLayout {
+    Flat,
+    Sharded,
+}
+
+fn issue_storage_layout(beads_dir: &Path) -> Result<IssueStorageLayout> {
+    let config_path = beads_dir.join("config-minibeads.yaml");
+    if !config_path.exists() {
+        return Ok(IssueStorageLayout::Flat);
+    }
+
+    let content =
+        fs::read_to_string(&config_path).context("Failed to read config-minibeads.yaml")?;
+    let config: HashMap<String, String> =
+        serde_yaml::from_str(&content).context("Failed to parse config-minibeads.yaml")?;
+
+    match config.get("issue-storage-layout").map(|s| s.as_str()) {
+        Some("sharded") => Ok(IssueStorageLayout::Sharded),
+        Some("flat") | None => Ok(IssueStorageLayout::Flat),
+        Some(value) => anyhow::bail!(
+            "Invalid issue-storage-layout: '{}'. Valid values are: flat, sharded",
+            value
+        ),
+    }
+}
+
+fn issue_suffix(id: &str) -> &str {
+    id.rsplit_once('-').map(|(_, suffix)| suffix).unwrap_or(id)
+}
+
+fn shard_char(c: Option<char>) -> String {
+    match c {
+        Some(c) if c.is_ascii_alphanumeric() => c.to_ascii_lowercase().to_string(),
+        _ => "_".to_string(),
+    }
+}
+
+fn sharded_relative_path(id: &str) -> PathBuf {
+    let suffix = issue_suffix(id);
+    let mut path = PathBuf::new();
+
+    if suffix.chars().all(|c| c.is_ascii_digit()) && !suffix.is_empty() {
+        let mut chars = suffix.chars().rev();
+        let ones = chars.next();
+        let tens = chars.next().or(Some('0'));
+        path.push("n");
+        path.push(shard_char(tens));
+        path.push(shard_char(ones));
+    } else {
+        let mut chars = suffix.chars();
+        path.push("h");
+        path.push(shard_char(chars.next()));
+        path.push(shard_char(chars.next()));
+    }
+
+    path.push(format!("{}.md", id));
+    path
+}
+
+fn issue_path_for_layout(beads_dir: &Path, id: &str, layout: IssueStorageLayout) -> PathBuf {
+    let issues_dir = beads_dir.join("issues");
+    match layout {
+        IssueStorageLayout::Flat => issues_dir.join(format!("{}.md", id)),
+        IssueStorageLayout::Sharded => issues_dir.join(sharded_relative_path(id)),
+    }
+}
+
+fn existing_or_configured_issue_path(beads_dir: &Path, id: &str) -> Result<PathBuf> {
+    let configured = issue_path_for_layout(beads_dir, id, issue_storage_layout(beads_dir)?);
+    if configured.exists() {
+        return Ok(configured);
+    }
+
+    let flat = issue_path_for_layout(beads_dir, id, IssueStorageLayout::Flat);
+    if flat.exists() {
+        return Ok(flat);
+    }
+
+    let sharded = issue_path_for_layout(beads_dir, id, IssueStorageLayout::Sharded);
+    if sharded.exists() {
+        return Ok(sharded);
+    }
+
+    Ok(configured)
+}
+
+fn issue_file_paths(issues_dir: &Path) -> Result<Vec<PathBuf>> {
+    if !issues_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut stack = vec![issues_dir.to_path_buf()];
+    let mut paths = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")
+            {
+                paths.push(path);
+            }
+        }
+    }
+
+    paths.sort();
+    Ok(paths)
+}
+
 impl SyncReport {
     pub fn total_changes(&self) -> usize {
         self.created_in_jsonl
@@ -128,14 +244,7 @@ pub fn load_markdown_issues(beads_dir: &Path) -> Result<HashMap<String, Markdown
 
     let mut result = HashMap::new();
 
-    for entry in fs::read_dir(&issues_dir).context("Failed to read issues directory")? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-
+    for path in issue_file_paths(&issues_dir)? {
         // Get filesystem mtime
         let metadata = fs::metadata(&path)
             .with_context(|| format!("Failed to get metadata for {}", path.display()))?;
@@ -321,7 +430,7 @@ impl SyncEngine {
                     println!("[DRY RUN] Would create markdown: {}.md", id);
                 } else {
                     match self.write_markdown_issue(
-                        &issues_dir,
+                        beads_dir,
                         &json_issue.issue,
                         json_issue.updated_at,
                     ) {
@@ -344,7 +453,7 @@ impl SyncEngine {
                     );
                 } else {
                     match self.write_markdown_issue(
-                        &issues_dir,
+                        beads_dir,
                         &json_issue.issue,
                         json_issue.updated_at,
                     ) {
@@ -408,15 +517,19 @@ impl SyncEngine {
     /// Write an issue to markdown file with specified timestamp
     fn write_markdown_issue(
         &self,
-        issues_dir: &Path,
+        beads_dir: &Path,
         issue: &Issue,
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
         use crate::format::issue_to_markdown;
 
-        let path = issues_dir.join(format!("{}.md", issue.id));
+        let path = existing_or_configured_issue_path(beads_dir, &issue.id)?;
         let content = issue_to_markdown(issue)?;
 
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
         fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))?;
 
         // Set the file's mtime to match the JSONL timestamp

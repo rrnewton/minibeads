@@ -657,6 +657,7 @@ async fn run_sync_test(
 
         // Flush upstream to JSONL
         run_upstream_sync_flush(work_dir, &upstream_binary, &logger)?;
+        copy_upstream_jsonl_to_minibeads(work_dir, &logger)?;
 
         println!("\n{}", "=".repeat(70));
         println!("Cycle {}/{}: Minibeads phase", cycle, cycles);
@@ -677,6 +678,7 @@ async fn run_sync_test(
 
         // Sync minibeads (bidirectional)
         run_minibeads_sync(work_dir, &minibeads_binary, &logger)?;
+        copy_minibeads_jsonl_to_upstream(work_dir, &logger)?;
 
         // Verify consistency at end of cycle
         println!("\n🔍 Verifying consistency after cycle {}...", cycle);
@@ -1621,14 +1623,21 @@ fn verify_minibeads_state(
         }
     }
 
-    // Read all markdown files
+    // Read all markdown files. Minibeads supports both flat and sharded issue
+    // layouts, so verification must recurse through issues/.
     let mut actual_issues = std::collections::HashMap::new();
-    for entry in std::fs::read_dir(&issues_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "md").unwrap_or(false) {
-            let issue = parse_minibeads_issue(&path)?;
-            actual_issues.insert(issue.id.clone(), issue);
+    let mut stack = vec![issues_dir];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() && path.extension().map(|e| e == "md").unwrap_or(false) {
+                let issue = parse_minibeads_issue(&path)?;
+                actual_issues.insert(issue.id.clone(), issue);
+            }
         }
     }
 
@@ -2256,6 +2265,56 @@ fn run_upstream_sync_flush(
         String::from_utf8_lossy(&output.stdout).trim()
     ));
     logger.log("✅ Upstream sync --flush-only completed".to_string());
+    Ok(())
+}
+
+fn copy_upstream_jsonl_to_minibeads(work_dir: &std::path::Path, logger: &Logger) -> Result<()> {
+    copy_sync_jsonl(
+        &work_dir.join(".beads").join("issues.jsonl"),
+        &work_dir.join(".minibeads").join("issues.jsonl"),
+        "upstream JSONL",
+        "minibeads JSONL",
+        logger,
+    )
+}
+
+fn copy_minibeads_jsonl_to_upstream(work_dir: &std::path::Path, logger: &Logger) -> Result<()> {
+    copy_sync_jsonl(
+        &work_dir.join(".minibeads").join("issues.jsonl"),
+        &work_dir.join(".beads").join("issues.jsonl"),
+        "minibeads JSONL",
+        "upstream JSONL",
+        logger,
+    )
+}
+
+fn copy_sync_jsonl(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    source_name: &str,
+    destination_name: &str,
+    logger: &Logger,
+) -> Result<()> {
+    if !source.exists() {
+        return Err(anyhow::anyhow!(
+            "{} does not exist: {}",
+            source_name,
+            source.display()
+        ));
+    }
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::copy(source, destination)?;
+    logger.verbose(format!(
+        "Copied {} to {}: {} -> {}",
+        source_name,
+        destination_name,
+        source.display(),
+        destination.display()
+    ));
     Ok(())
 }
 

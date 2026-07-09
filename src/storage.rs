@@ -7,7 +7,7 @@ use crate::types::{
 use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,69 @@ fn compare_for_list(a: &Issue, b: &Issue) -> std::cmp::Ordering {
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a.created_at.cmp(&b.created_at),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueStorageLayout {
+    Flat,
+    Sharded,
+}
+
+impl IssueStorageLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueStorageLayout::Flat => "flat",
+            IssueStorageLayout::Sharded => "sharded",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "flat" => Ok(IssueStorageLayout::Flat),
+            "sharded" => Ok(IssueStorageLayout::Sharded),
+            _ => anyhow::bail!(
+                "Invalid issue-storage-layout: '{}'. Valid values are: flat, sharded",
+                value
+            ),
+        }
+    }
+}
+
+fn issue_suffix(id: &str) -> &str {
+    id.rsplit_once('-').map(|(_, suffix)| suffix).unwrap_or(id)
+}
+
+fn shard_char(c: Option<char>) -> String {
+    match c {
+        Some(c) if c.is_ascii_alphanumeric() => c.to_ascii_lowercase().to_string(),
+        _ => "_".to_string(),
+    }
+}
+
+fn sharded_relative_path(id: &str) -> PathBuf {
+    let suffix = issue_suffix(id);
+
+    let mut path = PathBuf::new();
+    if suffix.chars().all(|c| c.is_ascii_digit()) && !suffix.is_empty() {
+        let mut chars = suffix.chars().rev();
+        let ones = chars.next();
+        let tens = chars.next().or(Some('0'));
+        path.push("n");
+        path.push(shard_char(tens).as_str());
+        path.push(shard_char(ones).as_str());
+    } else {
+        let mut chars = suffix.chars();
+        path.push("h");
+        path.push(shard_char(chars.next()).as_str());
+        path.push(shard_char(chars.next()).as_str());
+    }
+
+    path.push(format!("{}.md", id));
+    path
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("md")
 }
 
 fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -> String {
@@ -132,7 +195,8 @@ impl Storage {
         // Ensure config-minibeads.yaml exists with defaults (don't clobber if exists)
         let minibeads_config_path = beads_dir.join("config-minibeads.yaml");
         if !minibeads_config_path.exists() {
-            create_minibeads_config(&beads_dir, false)?; // Default to false for existing repos
+            create_minibeads_config(&beads_dir, false, IssueStorageLayout::Flat)?;
+            // Default to false/flat for existing repos
         }
 
         // Ensure .gitignore exists and has required entries
@@ -145,7 +209,12 @@ impl Storage {
     }
 
     /// Initialize a new minibeads database
-    pub fn init(beads_dir: PathBuf, prefix: Option<String>, mb_hash_ids: bool) -> Result<Self> {
+    pub fn init(
+        beads_dir: PathBuf,
+        prefix: Option<String>,
+        mb_hash_ids: bool,
+        issue_layout: IssueStorageLayout,
+    ) -> Result<Self> {
         // Create minibeads directory
         fs::create_dir_all(&beads_dir).context("Failed to create minibeads directory")?;
 
@@ -166,7 +235,7 @@ impl Storage {
         fs::write(&config_path, config_yaml).context("Failed to write config.yaml")?;
 
         // Create config-minibeads.yaml with minibeads-specific options
-        create_minibeads_config(&beads_dir, mb_hash_ids)?;
+        create_minibeads_config(&beads_dir, mb_hash_ids, issue_layout)?;
 
         // Ensure .gitignore exists and has required entries
         ensure_gitignore(&beads_dir)?;
@@ -265,6 +334,136 @@ impl Storage {
         }
     }
 
+    /// Return the configured issue file layout.
+    pub fn issue_storage_layout(&self) -> Result<IssueStorageLayout> {
+        let config_path = self.beads_dir.join("config-minibeads.yaml");
+
+        if !config_path.exists() {
+            return Ok(IssueStorageLayout::Flat);
+        }
+
+        let content =
+            fs::read_to_string(&config_path).context("Failed to read config-minibeads.yaml")?;
+        let config: HashMap<String, String> =
+            serde_yaml::from_str(&content).context("Failed to parse config-minibeads.yaml")?;
+
+        match config.get("issue-storage-layout") {
+            Some(value) => IssueStorageLayout::parse(value),
+            None => Ok(IssueStorageLayout::Flat),
+        }
+    }
+
+    fn set_issue_storage_layout(&self, layout: IssueStorageLayout) -> Result<()> {
+        let config_path = self.beads_dir.join("config-minibeads.yaml");
+        update_yaml_key_value(&config_path, "issue-storage-layout", layout.as_str())
+    }
+
+    fn flat_issue_path(&self, id: &str) -> PathBuf {
+        self.issues_dir.join(format!("{}.md", id))
+    }
+
+    fn sharded_issue_path(&self, id: &str) -> PathBuf {
+        self.issues_dir.join(sharded_relative_path(id))
+    }
+
+    fn issue_path_for_layout(&self, id: &str, layout: IssueStorageLayout) -> PathBuf {
+        match layout {
+            IssueStorageLayout::Flat => self.flat_issue_path(id),
+            IssueStorageLayout::Sharded => self.sharded_issue_path(id),
+        }
+    }
+
+    fn configured_issue_path(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.issue_path_for_layout(id, self.issue_storage_layout()?))
+    }
+
+    fn existing_issue_path(&self, id: &str) -> Result<Option<PathBuf>> {
+        let configured_path = self.configured_issue_path(id)?;
+        if configured_path.exists() {
+            return Ok(Some(configured_path));
+        }
+
+        let flat_path = self.flat_issue_path(id);
+        if flat_path.exists() {
+            return Ok(Some(flat_path));
+        }
+
+        let sharded_path = self.sharded_issue_path(id);
+        if sharded_path.exists() {
+            return Ok(Some(sharded_path));
+        }
+
+        Ok(None)
+    }
+
+    fn issue_exists_any_layout(&self, id: &str) -> Result<bool> {
+        Ok(self.existing_issue_path(id)?.is_some())
+    }
+
+    fn existing_or_configured_issue_path(&self, id: &str) -> Result<PathBuf> {
+        match self.existing_issue_path(id)? {
+            Some(path) => Ok(path),
+            None => self.configured_issue_path(id),
+        }
+    }
+
+    fn write_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create issue directory: {}", parent.display())
+            })?;
+        }
+        let markdown = issue_to_markdown(issue)?;
+        fs::write(path, markdown)
+            .with_context(|| format!("Failed to write issue file: {}", path.display()))?;
+        Ok(())
+    }
+
+    fn issue_file_paths(&self) -> Result<Vec<(String, PathBuf)>> {
+        if !self.issues_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut stack = vec![self.issues_dir.clone()];
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+
+        while let Some(dir) = stack.pop() {
+            let entries = fs::read_dir(&dir)
+                .with_context(|| format!("Failed to read issues directory: {}", dir.display()))?;
+
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                let file_type = entry.file_type()?;
+
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+
+                if !file_type.is_file() || !is_markdown_path(&path) {
+                    continue;
+                }
+
+                let issue_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid issue filename: {}", path.display()))?
+                    .to_string();
+
+                if !seen.insert(issue_id.clone()) {
+                    anyhow::bail!("Duplicate issue file found for ID: {}", issue_id);
+                }
+
+                paths.push((issue_id, path));
+            }
+        }
+
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(paths)
+    }
+
     /// Get hash encoding format from config-minibeads.yaml
     fn get_hash_encoding(&self) -> Result<hash::HashEncoding> {
         let config_path = self.beads_dir.join("config-minibeads.yaml");
@@ -297,19 +496,11 @@ impl Storage {
 
     /// Infer prefix from existing issues in the filesystem
     fn infer_prefix_from_issues(&self) -> Result<String> {
-        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
-
         let mut prefixes = HashMap::new();
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if let Some(issue_id) = name_str.strip_suffix(".md") {
-                if let Some(pos) = issue_id.rfind('-') {
-                    let prefix = &issue_id[..pos];
-                    *prefixes.entry(prefix.to_string()).or_insert(0) += 1;
-                }
+        for (issue_id, _) in self.issue_file_paths()? {
+            if let Some(pos) = issue_id.rfind('-') {
+                let prefix = &issue_id[..pos];
+                *prefixes.entry(prefix.to_string()).or_insert(0) += 1;
             }
         }
 
@@ -323,22 +514,14 @@ impl Storage {
 
     /// Get the next issue number
     fn get_next_number(&self, prefix: &str) -> Result<u32> {
-        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
-
         let mut max_num = 0;
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if let Some(issue_id) = name_str.strip_suffix(".md") {
-                if let Some(pos) = issue_id.rfind('-') {
-                    let issue_prefix = &issue_id[..pos];
-                    let num_str = &issue_id[pos + 1..];
-                    if issue_prefix == prefix {
-                        if let Ok(num) = num_str.parse::<u32>() {
-                            max_num = max_num.max(num);
-                        }
+        for (issue_id, _) in self.issue_file_paths()? {
+            if let Some(pos) = issue_id.rfind('-') {
+                let issue_prefix = &issue_id[..pos];
+                let num_str = &issue_id[pos + 1..];
+                if issue_prefix == prefix {
+                    if let Ok(num) = num_str.parse::<u32>() {
+                        max_num = max_num.max(num);
                     }
                 }
             }
@@ -354,8 +537,7 @@ impl Storage {
         let timestamp = Utc::now();
 
         // Count existing issues to determine adaptive length
-        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
-        let issue_count = entries.count();
+        let issue_count = self.issue_file_paths()?.len();
 
         // Get hash encoding from config
         let encoding = self.get_hash_encoding()?;
@@ -368,7 +550,7 @@ impl Storage {
             timestamp,
             issue_count,
             encoding,
-            |candidate| self.issues_dir.join(format!("{}.md", candidate)).exists(),
+            |candidate| self.issue_exists_any_layout(candidate).unwrap_or(false),
         )
     }
 
@@ -428,9 +610,8 @@ impl Storage {
         }
 
         // Write to file
-        let issue_path = self.issues_dir.join(format!("{}.md", issue_id));
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        let issue_path = self.configured_issue_path(&issue_id)?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -439,10 +620,9 @@ impl Storage {
     pub fn get_issue(&self, id: &str) -> Result<Option<Issue>> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             return Ok(None);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -497,8 +677,7 @@ impl Storage {
     pub fn add_comment(&self, issue_id: &str, author: &str, body: &str) -> Result<Comment> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", issue_id));
-        if !issue_path.exists() {
+        if !self.issue_exists_any_layout(issue_id)? {
             anyhow::bail!("Issue not found: {}", issue_id);
         }
 
@@ -612,21 +791,10 @@ impl Storage {
 
     /// Helper to load all issues without computing dependents (to avoid recursion)
     fn list_all_issues_no_dependents(&self) -> Result<Vec<Issue>> {
-        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
-
         let mut issues = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if !name_str.ends_with(".md") {
-                continue;
-            }
-
-            let issue_id = &name_str[..name_str.len() - 3];
-            let content = fs::read_to_string(entry.path())?;
-            let issue = markdown_to_issue(issue_id, &content)?;
+        for (issue_id, path) in self.issue_file_paths()? {
+            let content = fs::read_to_string(path)?;
+            let issue = markdown_to_issue(&issue_id, &content)?;
             issues.push(issue);
         }
 
@@ -656,10 +824,9 @@ impl Storage {
     pub fn update_issue(&self, id: &str, updates: HashMap<String, String>) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -685,9 +852,7 @@ impl Storage {
 
         issue.updated_at = chrono::Utc::now();
 
-        // Write back
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -696,10 +861,9 @@ impl Storage {
     pub fn add_label(&self, id: &str, label: &str) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -710,8 +874,7 @@ impl Storage {
         }
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -720,10 +883,9 @@ impl Storage {
     pub fn remove_label(&self, id: &str, label: &str) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -731,8 +893,7 @@ impl Storage {
         issue.labels.retain(|existing| existing != label);
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -741,10 +902,9 @@ impl Storage {
     pub fn set_labels(&self, id: &str, labels: Vec<String>) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -752,8 +912,7 @@ impl Storage {
         issue.labels = normalize_labels(labels);
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -797,10 +956,9 @@ impl Storage {
             anyhow::bail!("--search text must not be empty");
         }
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -830,8 +988,7 @@ impl Storage {
 
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -849,10 +1006,9 @@ impl Storage {
             anyhow::bail!("--append text must not be empty");
         }
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -867,8 +1023,7 @@ impl Storage {
 
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -896,10 +1051,9 @@ impl Storage {
     ) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -953,8 +1107,7 @@ impl Storage {
         issue.claimed_until = Some(claimed_until);
         issue.updated_at = now;
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -968,10 +1121,9 @@ impl Storage {
     pub fn release_issue(&self, id: &str, actor: &str, force: bool) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -993,8 +1145,7 @@ impl Storage {
         }
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -1003,10 +1154,9 @@ impl Storage {
     pub fn close_issue(&self, id: &str, _reason: &str) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -1015,8 +1165,7 @@ impl Storage {
         issue.closed_at = Some(chrono::Utc::now());
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -1025,10 +1174,9 @@ impl Storage {
     pub fn reopen_issue(&self, id: &str) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
@@ -1037,8 +1185,7 @@ impl Storage {
         issue.closed_at = None;
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -1054,18 +1201,16 @@ impl Storage {
     pub fn rename_issue(&self, old_id: &str, new_id: &str, dry_run: bool) -> Result<Vec<String>> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let old_path = self.issues_dir.join(format!("{}.md", old_id));
-        let new_path = self.issues_dir.join(format!("{}.md", new_id));
-
         // Validate old issue exists
-        if !old_path.exists() {
+        let Some(old_path) = self.existing_issue_path(old_id)? else {
             anyhow::bail!("Issue not found: {}", old_id);
-        }
+        };
 
         // Validate new ID doesn't already exist
-        if new_path.exists() {
+        if self.issue_exists_any_layout(new_id)? {
             anyhow::bail!("Target issue ID already exists: {}", new_id);
         }
+        let new_path = self.configured_issue_path(new_id)?;
 
         // Track all changes for dry-run mode
         let mut changes = Vec::new();
@@ -1154,15 +1299,14 @@ impl Storage {
             other_issue.updated_at = chrono::Utc::now();
 
             // Write the updated issue
-            let other_path = self.issues_dir.join(format!("{}.md", other_issue.id));
-            let markdown = issue_to_markdown(&other_issue)?;
-            fs::write(&other_path, markdown)
+            let other_path = self.existing_or_configured_issue_path(&other_issue.id)?;
+            self.write_issue_to_path(&other_path, &other_issue)
                 .context(format!("Failed to update issue: {}", other_issue.id))?;
         }
 
         // Write the renamed issue with new ID
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&new_path, markdown).context("Failed to write renamed issue")?;
+        self.write_issue_to_path(&new_path, &issue)
+            .context("Failed to write renamed issue")?;
 
         // Remove the old file
         fs::remove_file(&old_path).context("Failed to remove old issue file")?;
@@ -1209,9 +1353,8 @@ impl Storage {
                     }
                     updated_issue.updated_at = chrono::Utc::now();
 
-                    let issue_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
-                    let markdown = issue_to_markdown(&updated_issue)?;
-                    fs::write(&issue_path, markdown)
+                    let issue_path = self.existing_or_configured_issue_path(&updated_issue.id)?;
+                    self.write_issue_to_path(&issue_path, &updated_issue)
                         .context(format!("Failed to update issue: {}", updated_issue.id))?;
                 }
             }
@@ -1226,8 +1369,7 @@ impl Storage {
 
     /// Validate that a dependency target exists (warns if not)
     fn validate_dependency_exists(&self, dep_id: &str) -> bool {
-        let dep_path = self.issues_dir.join(format!("{}.md", dep_id));
-        let exists = dep_path.exists();
+        let exists = self.issue_exists_any_layout(dep_id).unwrap_or(false);
 
         if !exists {
             eprintln!("Warning: Dependency target does not exist: {}", dep_id);
@@ -1246,10 +1388,9 @@ impl Storage {
     ) -> Result<()> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", from_id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
-        }
+        };
 
         // Validate dependency target exists (warn if not)
         self.validate_dependency_exists(to_id);
@@ -1261,8 +1402,7 @@ impl Storage {
         issue.depends_on.insert(to_id.to_string(), dep_type);
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(())
     }
@@ -1270,10 +1410,9 @@ impl Storage {
     pub fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let issue_path = self.issues_dir.join(format!("{}.md", from_id));
-        if !issue_path.exists() {
+        let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
-        }
+        };
 
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(from_id, &content)?;
@@ -1284,8 +1423,7 @@ impl Storage {
         }
         issue.updated_at = chrono::Utc::now();
 
-        let markdown = issue_to_markdown(&issue)?;
-        fs::write(&issue_path, markdown).context("Failed to write issue file")?;
+        self.write_issue_to_path(&issue_path, &issue)?;
 
         Ok(())
     }
@@ -1556,21 +1694,10 @@ impl Storage {
     ) -> Result<Vec<Issue>> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
-        let entries = fs::read_dir(&self.issues_dir).context("Failed to read issues directory")?;
-
         let mut issues = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if !name_str.ends_with(".md") {
-                continue;
-            }
-
-            let issue_id = &name_str[..name_str.len() - 3];
-            let content = fs::read_to_string(entry.path())?;
-            let issue = markdown_to_issue(issue_id, &content)?;
+        for (issue_id, path) in self.issue_file_paths()? {
+            let content = fs::read_to_string(path)?;
+            let issue = markdown_to_issue(&issue_id, &content)?;
 
             // Apply filters
             if let Some(s) = status {
@@ -1829,7 +1956,7 @@ impl Storage {
             };
 
             // Check if markdown file already exists
-            let issue_path = self.issues_dir.join(format!("{}.md", issue.id));
+            let issue_path = self.existing_or_configured_issue_path(&issue.id)?;
             if issue_path.exists() && !overwrite {
                 skipped += 1;
                 continue;
@@ -1838,6 +1965,16 @@ impl Storage {
             // Convert to markdown and write
             match issue_to_markdown(&issue) {
                 Ok(markdown) => {
+                    if let Some(parent) = issue_path.parent() {
+                        if let Err(e) = fs::create_dir_all(parent) {
+                            errors.push(format!(
+                                "Issue {}: Failed to create issue directory: {}",
+                                issue.id, e
+                            ));
+                            continue;
+                        }
+                    }
+
                     if let Err(e) = fs::write(&issue_path, &markdown) {
                         errors.push(format!(
                             "Issue {}: Failed to write markdown file: {}",
@@ -1914,14 +2051,11 @@ impl Storage {
                     let new_id = format!("{}-{}", new_prefix, issue_number);
 
                     // Check if new ID would conflict with existing issue
-                    if !force {
-                        let new_path = self.issues_dir.join(format!("{}.md", new_id));
-                        if new_path.exists() {
-                            anyhow::bail!(
-                                "Cannot rename: new ID '{}' already exists. Use --force to override.",
-                                new_id
-                            );
-                        }
+                    if !force && self.issue_exists_any_layout(&new_id)? {
+                        anyhow::bail!(
+                            "Cannot rename: new ID '{}' already exists. Use --force to override.",
+                            new_id
+                        );
                     }
 
                     id_mapping.insert(issue.id.clone(), new_id);
@@ -2014,19 +2148,23 @@ impl Storage {
             if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file (or overwrite if ID didn't change)
-                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
-                let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown).context(format!(
-                    "Failed to write renamed issue: {}",
-                    updated_issue.id
-                ))?;
+                let new_path = if updated_issue.id != issue.id {
+                    self.configured_issue_path(&updated_issue.id)?
+                } else {
+                    self.existing_or_configured_issue_path(&updated_issue.id)?
+                };
+                self.write_issue_to_path(&new_path, &updated_issue)
+                    .context(format!(
+                        "Failed to write renamed issue: {}",
+                        updated_issue.id
+                    ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
-                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                    fs::remove_file(&old_path)
-                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
+                        fs::remove_file(&old_path)
+                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    }
                 }
             }
         }
@@ -2039,6 +2177,130 @@ impl Storage {
         fs::write(&config_path, config_yaml).context("Failed to update config.yaml")?;
 
         Ok(changes)
+    }
+
+    /// Move issue markdown files between flat and sharded on-disk layouts.
+    pub fn migrate_issue_storage_layout(
+        &self,
+        target_layout: IssueStorageLayout,
+        dry_run: bool,
+        update_config: bool,
+    ) -> Result<Vec<String>> {
+        let _lock = Lock::acquire(&self.beads_dir)?;
+
+        let current_layout = self.issue_storage_layout()?;
+        let issue_paths = self.issue_file_paths()?;
+        let mut moves = Vec::new();
+
+        for (issue_id, old_path) in issue_paths {
+            let new_path = self.issue_path_for_layout(&issue_id, target_layout);
+            if old_path == new_path {
+                continue;
+            }
+
+            if new_path.exists() {
+                anyhow::bail!(
+                    "Cannot migrate layout: target path already exists for {}: {}",
+                    issue_id,
+                    new_path.display()
+                );
+            }
+
+            moves.push((issue_id, old_path, new_path));
+        }
+
+        let mut changes = Vec::new();
+        if update_config && current_layout != target_layout {
+            changes.push(format!(
+                "Update config-minibeads.yaml: issue-storage-layout: {} -> {}",
+                current_layout.as_str(),
+                target_layout.as_str()
+            ));
+        }
+        for (issue_id, old_path, new_path) in &moves {
+            changes.push(format!(
+                "Move issue {}: {} -> {}",
+                issue_id,
+                old_path
+                    .strip_prefix(&self.beads_dir)
+                    .unwrap_or(old_path)
+                    .display(),
+                new_path
+                    .strip_prefix(&self.beads_dir)
+                    .unwrap_or(new_path)
+                    .display()
+            ));
+        }
+
+        if changes.is_empty() {
+            changes.push(format!(
+                "No changes needed - issues are already in {} layout",
+                target_layout.as_str()
+            ));
+        }
+
+        if dry_run {
+            return Ok(changes);
+        }
+
+        for (_issue_id, old_path, new_path) in &moves {
+            if let Some(parent) = new_path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create issue directory: {}", parent.display())
+                })?;
+            }
+            fs::rename(old_path, new_path).with_context(|| {
+                format!(
+                    "Failed to move issue file: {} -> {}",
+                    old_path.display(),
+                    new_path.display()
+                )
+            })?;
+        }
+
+        if update_config {
+            self.set_issue_storage_layout(target_layout)?;
+        }
+
+        self.remove_empty_issue_dirs()?;
+
+        Ok(changes)
+    }
+
+    fn remove_empty_issue_dirs(&self) -> Result<()> {
+        fn remove_empty_below(root: &Path, dir: &Path) -> Result<bool> {
+            let mut is_empty = true;
+
+            for entry in fs::read_dir(dir)
+                .with_context(|| format!("Failed to read directory: {}", dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                let file_type = entry.file_type()?;
+
+                if file_type.is_dir() {
+                    if !remove_empty_below(root, &path)? {
+                        is_empty = false;
+                    }
+                } else {
+                    is_empty = false;
+                }
+            }
+
+            if is_empty && dir != root {
+                fs::remove_dir(dir).with_context(|| {
+                    format!("Failed to remove empty directory: {}", dir.display())
+                })?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        if self.issues_dir.exists() {
+            remove_empty_below(&self.issues_dir, &self.issues_dir)?;
+        }
+        Ok(())
     }
 
     /// Migrate from numeric to hash-based IDs
@@ -2083,8 +2345,7 @@ impl Storage {
                         self.generate_hash_id(&prefix, &issue.title, &issue.description)?;
 
                     // Check if new ID would conflict with existing issue
-                    let new_path = self.issues_dir.join(format!("{}.md", hash_id));
-                    if new_path.exists() {
+                    if self.issue_exists_any_layout(&hash_id)? {
                         anyhow::bail!(
                             "Cannot migrate: generated hash ID '{}' already exists. This is a collision - please report this bug.",
                             hash_id
@@ -2182,19 +2443,23 @@ impl Storage {
             if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file (or overwrite if ID didn't change)
-                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
-                let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown).context(format!(
-                    "Failed to write renamed issue: {}",
-                    updated_issue.id
-                ))?;
+                let new_path = if updated_issue.id != issue.id {
+                    self.configured_issue_path(&updated_issue.id)?
+                } else {
+                    self.existing_or_configured_issue_path(&updated_issue.id)?
+                };
+                self.write_issue_to_path(&new_path, &updated_issue)
+                    .context(format!(
+                        "Failed to write renamed issue: {}",
+                        updated_issue.id
+                    ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
-                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                    fs::remove_file(&old_path)
-                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
+                        fs::remove_file(&old_path)
+                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    }
                 }
             }
         }
@@ -2298,8 +2563,7 @@ impl Storage {
             let new_id = format!("{}-{}", prefix, next_id);
 
             // Check if new ID would conflict with existing issue
-            let new_path = self.issues_dir.join(format!("{}.md", new_id));
-            if new_path.exists() {
+            if self.issue_exists_any_layout(&new_id)? {
                 anyhow::bail!(
                     "Cannot migrate: numeric ID '{}' already exists. This should not happen - please report this bug.",
                     new_id
@@ -2389,19 +2653,23 @@ impl Storage {
             if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file (or overwrite if ID didn't change)
-                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
-                let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown).context(format!(
-                    "Failed to write renamed issue: {}",
-                    updated_issue.id
-                ))?;
+                let new_path = if updated_issue.id != issue.id {
+                    self.configured_issue_path(&updated_issue.id)?
+                } else {
+                    self.existing_or_configured_issue_path(&updated_issue.id)?
+                };
+                self.write_issue_to_path(&new_path, &updated_issue)
+                    .context(format!(
+                        "Failed to write renamed issue: {}",
+                        updated_issue.id
+                    ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
-                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                    fs::remove_file(&old_path)
-                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
+                        fs::remove_file(&old_path)
+                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    }
                 }
             }
         }
@@ -2617,19 +2885,23 @@ impl Storage {
             if issue_modified {
                 updated_issue.updated_at = chrono::Utc::now();
 
-                // Write to new file (or overwrite if ID didn't change)
-                let new_path = self.issues_dir.join(format!("{}.md", updated_issue.id));
-                let markdown = issue_to_markdown(&updated_issue)?;
-                fs::write(&new_path, markdown).context(format!(
-                    "Failed to write repacked issue: {}",
-                    updated_issue.id
-                ))?;
+                let new_path = if updated_issue.id != issue.id {
+                    self.configured_issue_path(&updated_issue.id)?
+                } else {
+                    self.existing_or_configured_issue_path(&updated_issue.id)?
+                };
+                self.write_issue_to_path(&new_path, &updated_issue)
+                    .context(format!(
+                        "Failed to write repacked issue: {}",
+                        updated_issue.id
+                    ))?;
 
                 // Remove old file if ID changed
                 if updated_issue.id != issue.id {
-                    let old_path = self.issues_dir.join(format!("{}.md", issue.id));
-                    fs::remove_file(&old_path)
-                        .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
+                        fs::remove_file(&old_path)
+                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
+                    }
                 }
             }
         }
@@ -2650,7 +2922,11 @@ fn infer_prefix(beads_dir: &Path) -> Option<String> {
 
 /// Create config-minibeads.yaml with minibeads-specific options
 /// This file contains options that are NOT compatible with upstream bd
-fn create_minibeads_config(beads_dir: &Path, mb_hash_ids: bool) -> Result<()> {
+fn create_minibeads_config(
+    beads_dir: &Path,
+    mb_hash_ids: bool,
+    issue_layout: IssueStorageLayout,
+) -> Result<()> {
     use std::io::Write;
 
     let config_path = beads_dir.join("config-minibeads.yaml");
@@ -2700,6 +2976,21 @@ fn create_minibeads_config(beads_dir: &Path, mb_hash_ids: bool) -> Result<()> {
     )?;
     writeln!(file, "# Default: base36")?;
     writeln!(file, "hash-encoding: base36")?;
+    writeln!(file)?;
+
+    // Issue file layout
+    writeln!(file, "# Issue markdown file layout")?;
+    writeln!(file, "# flat: issues are stored directly under issues/")?;
+    writeln!(
+        file,
+        "# sharded: issues are stored under issues/n/<tens>/<ones>/ for numeric IDs"
+    )?;
+    writeln!(
+        file,
+        "#          and issues/h/<first>/<second>/ for hash/custom IDs"
+    )?;
+    writeln!(file, "# Default: flat")?;
+    writeln!(file, "issue-storage-layout: {}", issue_layout.as_str())?;
 
     Ok(())
 }
@@ -2993,8 +3284,13 @@ mod ready_tests {
     fn storage_with_open_issues(count: usize) -> (tempfile::TempDir, Storage) {
         let tmp = tempfile::tempdir().unwrap();
         let beads_dir = tmp.path().join(".beads");
-        let storage =
-            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let storage = Storage::init(
+            beads_dir,
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .expect("init storage");
         for i in 0..count {
             storage
                 .create_issue(
@@ -3063,6 +3359,144 @@ mod config_compat_tests {
 }
 
 #[cfg(test)]
+mod issue_layout_tests {
+    use super::*;
+    use crate::types::IssueType;
+
+    #[test]
+    fn sharded_paths_use_numeric_suffix_or_hash_prefix() {
+        assert_eq!(
+            sharded_relative_path("demo-1"),
+            PathBuf::from("n").join("0").join("1").join("demo-1.md")
+        );
+        assert_eq!(
+            sharded_relative_path("demo-12"),
+            PathBuf::from("n").join("1").join("2").join("demo-12.md")
+        );
+        assert_eq!(
+            sharded_relative_path("demo-123"),
+            PathBuf::from("n").join("2").join("3").join("demo-123.md")
+        );
+        assert_eq!(
+            sharded_relative_path("demo-a3f9c2"),
+            PathBuf::from("h")
+                .join("a")
+                .join("3")
+                .join("demo-a3f9c2.md")
+        );
+    }
+
+    #[test]
+    fn create_uses_configured_sharded_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage = Storage::init(
+            beads_dir.clone(),
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Sharded,
+        )
+        .unwrap();
+
+        let issue = storage
+            .create_issue(
+                "Task".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(issue.id, "demo-1");
+        assert!(beads_dir.join("issues/n/0/1/demo-1.md").exists());
+        assert!(!beads_dir.join("issues/demo-1.md").exists());
+        assert!(storage.get_issue("demo-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn migrate_layout_moves_existing_files_and_updates_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage = Storage::init(
+            beads_dir.clone(),
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .unwrap();
+
+        storage
+            .create_issue(
+                "One".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        storage
+            .create_issue(
+                "Two".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+
+        let changes = storage
+            .migrate_issue_storage_layout(IssueStorageLayout::Sharded, false, true)
+            .unwrap();
+
+        assert!(changes.iter().any(|c| c.contains("issue-storage-layout")));
+        assert!(beads_dir.join("issues/n/0/1/demo-1.md").exists());
+        assert!(beads_dir.join("issues/n/0/2/demo-2.md").exists());
+        assert!(!beads_dir.join("issues/demo-1.md").exists());
+        assert_eq!(
+            storage.issue_storage_layout().unwrap(),
+            IssueStorageLayout::Sharded
+        );
+
+        let next = storage
+            .create_issue(
+                "Three".to_string(),
+                String::new(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(next.id, "demo-3");
+        assert!(beads_dir.join("issues/n/0/3/demo-3.md").exists());
+    }
+}
+
+#[cfg(test)]
 mod claim_tests {
     use super::*;
     use chrono::{Duration, Utc};
@@ -3071,8 +3505,13 @@ mod claim_tests {
     fn storage_with_one_issue() -> (tempfile::TempDir, Storage, String) {
         let tmp = tempfile::tempdir().unwrap();
         let beads_dir = tmp.path().join(".beads");
-        let storage =
-            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let storage = Storage::init(
+            beads_dir,
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .expect("init storage");
         let issue = storage
             .create_issue(
                 "A task".to_string(),
@@ -3214,8 +3653,13 @@ mod github_metadata_tests {
     fn storage() -> (tempfile::TempDir, Storage) {
         let tmp = tempfile::tempdir().unwrap();
         let beads_dir = tmp.path().join(".beads");
-        let storage =
-            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let storage = Storage::init(
+            beads_dir,
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .expect("init storage");
         (tmp, storage)
     }
 
@@ -3388,8 +3832,13 @@ mod search_replace_tests {
     fn storage_with_description(desc: &str) -> (tempfile::TempDir, Storage, String) {
         let tmp = tempfile::tempdir().unwrap();
         let beads_dir = tmp.path().join(".beads");
-        let storage =
-            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        let storage = Storage::init(
+            beads_dir,
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .expect("init storage");
         let issue = storage
             .create_issue(
                 "A task".to_string(),

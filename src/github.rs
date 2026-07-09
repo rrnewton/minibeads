@@ -1,6 +1,6 @@
 //! GitHub Issues sync using the authenticated `gh` CLI.
 
-use crate::storage::Storage;
+use crate::storage::{IssueStorageLayout, Storage};
 use crate::types::{Comment, Issue, IssueType, Status};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -1224,6 +1224,7 @@ pub fn stress_test(
         tmp.path().join(".minibeads"),
         Some("ghstress".to_string()),
         false,
+        IssueStorageLayout::Flat,
     )
     .context("Failed to initialize temporary stress minibeads database")?;
     let seed = seed.unwrap_or_else(|| rand::thread_rng().gen());
@@ -2793,7 +2794,13 @@ mod tests {
 
     fn storage_with_issue() -> (tempfile::TempDir, Storage, Issue) {
         let tmp = tempfile::tempdir().unwrap();
-        let storage = Storage::init(tmp.path().join(".beads"), None, false).unwrap();
+        let storage = Storage::init(
+            tmp.path().join(".beads"),
+            None,
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .unwrap();
         let issue = storage
             .create_issue(
                 "Local title".to_string(),
@@ -3148,7 +3155,13 @@ mod tests {
     #[test]
     fn github_sync_pull_only_imports_without_writing_to_github() {
         let tmp = tempfile::tempdir().unwrap();
-        let storage = Storage::init(tmp.path().join(".beads"), None, false).unwrap();
+        let storage = Storage::init(
+            tmp.path().join(".beads"),
+            None,
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .unwrap();
         let issue = storage
             .create_issue(
                 "Local title".to_string(),
