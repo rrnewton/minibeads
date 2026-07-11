@@ -6,6 +6,15 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-11
+
+### Changed
+
+- **`mb ready` no longer caps results at 10 by default.** The `-n`/`--limit`
+  flag now defaults to unlimited and only truncates the result set when
+  explicitly passed. The previous default of 10 repeatedly confused agents
+  who expected to see the full ready set. (minibeads-specific.)
+
 ## [0.22.0] - 2026-07-06
 
 ### Added
