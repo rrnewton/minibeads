@@ -15,6 +15,7 @@ exclude = [
     ".minibeads",
     ".beads",
     "beads",
+    ".gitmodules",
     "scratch",
     "ai_docs",
     "TRASH",
@@ -24,6 +25,9 @@ exclude = [
     "*.sh",
 ]
 
+[features]
+test-tools = []
+
 [[bin]]
 name = "mb"
 path = "src/main.rs"
@@ -31,6 +35,7 @@ path = "src/main.rs"
 [[bin]]
 name = "test_minibeads"
 path = "src/bin/test_minibeads.rs"
+required-features = ["test-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

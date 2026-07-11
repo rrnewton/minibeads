@@ -3,7 +3,7 @@
 //! This test invokes the test_minibeads binary with the random-actions subcommand.
 //! For manual testing with custom parameters, use the binary directly:
 //!
-//!   cargo build --release --bin test_minibeads
+//!   cargo build --release --bin test_minibeads --features test-tools
 //!   ./target/release/test_minibeads random-actions --seed 42 --verbose
 //!   ./target/release/test_minibeads random-actions --seed 42 --impl upstream
 //!   ./target/release/test_minibeads random-actions --seed-from-entropy --iters 10
@@ -22,7 +22,14 @@ fn build_minibeads() -> PathBuf {
 
     // Build the test_minibeads binary
     let test_build = Command::new("cargo")
-        .args(["build", "--release", "--bin", "test_minibeads"])
+        .args([
+            "build",
+            "--release",
+            "--bin",
+            "test_minibeads",
+            "--features",
+            "test-tools",
+        ])
         .status()
         .expect("Failed to build test_minibeads binary");
     assert!(

@@ -4,7 +4,7 @@ A minimal, markdown-based drop-in replacement for [steveyegge/beads](https://git
 
 ## Overview
 
-minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workflows. Issues are stored as markdown files with YAML frontmatter, making them both human-readable and git-friendly. The tool emphasizes simplicity, with no database required—just markdown files in `.minibeads/issues/`.
+minibeads (`mb`) is a dependency-aware issue tracker designed for AI agent workflows. Issues are stored as markdown files with YAML frontmatter, making them both human-readable and git-friendly. The tool emphasizes simplicity, with no database required—just markdown files in `.minibeads/issues/`.
 
 ### Key Features
 
@@ -16,11 +16,29 @@ minibeads (`bd`) is a dependency-aware issue tracker designed for AI agent workf
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install minibeads
+```
+
+This installs the `mb` binary (short for "minibeads"). To use minibeads as a
+drop-in replacement for upstream [beads](https://github.com/steveyegge/beads)
+(e.g., with the beads MCP server), alias or symlink it to `bd`:
+
+```bash
+# Symlink approach
+ln -s $(which mb) ~/.local/bin/bd
+
+# Or shell alias
+alias bd=mb
+```
+
 ### Build from source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/minibeads.git
+git clone https://github.com/rrnewton/minibeads.git
 cd minibeads
 
 # Build in debug mode (recommended for development)
@@ -33,37 +51,37 @@ make release
 make install
 ```
 
-The binary will be named `bd` (short for "beads").
+The binary will be named `mb` (short for "minibeads").
 
 ## Quick Start
 
 ```bash
 # Initialize a beads database in your project
-bd init
+mb init
 
 # Create your first issue
-bd create "Fix login bug" -p 1 -t bug
+mb create "Fix login bug" -p 1 -t bug
 
 # List all issues
-bd list
+mb list
 
 # Show issue details
-bd show bd-1
+mb show mb-1
 
 # Update issue status
-bd update bd-1 --status in_progress
+mb update mb-1 --status in_progress
 
-# Add dependencies (bd-2 blocks bd-1)
-bd dep add bd-1 bd-2
+# Add dependencies (mb-2 blocks mb-1)
+mb dep add mb-1 mb-2
 
 # Find ready work (no blockers)
-bd ready
+mb ready
 
 # Get statistics
-bd stats
+mb stats
 ```
 
-Run `bd quickstart` for a comprehensive guide.
+Run `mb quickstart` for a comprehensive guide.
 
 ## Storage Format
 
@@ -181,11 +199,11 @@ minibeads uses coarse-grained locking with `.minibeads/minibeads.lock` containin
 
 ### Core Commands
 
-- `bd init [--prefix PREFIX]` - Initialize beads database
-- `bd create TITLE [OPTIONS]` - Create new issue
-- `bd list [FILTERS]` - List issues with optional filters
-- `bd show ISSUE_ID` - Show detailed issue information
-- `bd update ISSUE_ID [OPTIONS]` - Update issue fields
+- `mb init [--prefix PREFIX]` - Initialize beads database
+- `mb create TITLE [OPTIONS]` - Create new issue
+- `mb list [FILTERS]` - List issues with optional filters
+- `mb show ISSUE_ID` - Show detailed issue information
+- `mb update ISSUE_ID [OPTIONS]` - Update issue fields
   - `--search TEXT --replace TEXT [--field FIELD] [--replace-all]` - targeted,
     aider-style edit of a text field (default `description`) instead of
     overwriting it wholesale. By default the search text must match exactly once;
@@ -196,23 +214,23 @@ minibeads uses coarse-grained locking with `.minibeads/minibeads.lock` containin
     (default `description`), inserting a blank line before it when the field is
     non-empty so it becomes its own paragraph. Simpler than a search/replace when
     you only want to add to the end. (minibeads-specific)
-- `bd close ISSUE_ID [--reason REASON]` - Close (complete) an issue
-- `bd reopen ISSUE_ID...` - Reopen closed issues
-- `bd comments add ISSUE_ID --body TEXT` - Add a local issue comment
-- `bd comments list ISSUE_ID` - List local issue comments
-- `bd comments delete ISSUE_ID COMMENT_ID...` - Delete local issue comment(s) by ID (minibeads-specific)
+- `mb close ISSUE_ID [--reason REASON]` - Close (complete) an issue
+- `mb reopen ISSUE_ID...` - Reopen closed issues
+- `mb comments add ISSUE_ID --body TEXT` - Add a local issue comment
+- `mb comments list ISSUE_ID` - List local issue comments
+- `mb comments delete ISSUE_ID COMMENT_ID...` - Delete local issue comment(s) by ID (minibeads-specific)
 
 ### Dependencies
 
-- `bd dep add FROM TO [--type TYPE]` - Add dependency
+- `mb dep add FROM TO [--type TYPE]` - Add dependency
   - Types: `blocks` (default), `related`, `parent-child`, `discovered-from`
 
 ### Queries
 
-- `bd ready [--assignee USER] [--priority N]` - Find ready work (no blockers)
-- `bd blocked` - Show blocked issues and what blocks them
-- `bd stats` - Show statistics (total, open, blocked, average lead time)
-- `bd list --github` - Show only issues linked to GitHub Issues
+- `mb ready [--assignee USER] [--priority N]` - Find ready work (no blockers)
+- `mb blocked` - Show blocked issues and what blocks them
+- `mb stats` - Show statistics (total, open, blocked, average lead time)
+- `mb list --github` - Show only issues linked to GitHub Issues
 
 ### GitHub Issues Sync
 
@@ -220,12 +238,12 @@ minibeads can sync a subset of issues with GitHub Issues using the authenticated
 `gh` CLI. Linked issues store the GitHub issue URL in `external_ref`; unlinked
 issues are ignored.
 
-- `bd github link ISSUE_ID GITHUB_ISSUE [-R owner/repo]` - Link to an existing GitHub issue
-- `bd github list` - Show current minibeads-to-GitHub issue links
-- `bd github import [-R owner/repo] [--state open|closed|all] [--label LABEL] [--assignee USER] [--author USER] [--mention USER] [--milestone M] [--app APP] [--search QUERY] [--limit N] [--dry-run] [--quiet|--verbose]` - Import matching GitHub issues that are not already linked to minibeads issues
-- `bd github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
-- `bd github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
-- `bd github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
+- `mb github link ISSUE_ID GITHUB_ISSUE [-R owner/repo]` - Link to an existing GitHub issue
+- `mb github list` - Show current minibeads-to-GitHub issue links
+- `mb github import [-R owner/repo] [--state open|closed|all] [--label LABEL] [--assignee USER] [--author USER] [--mention USER] [--milestone M] [--app APP] [--search QUERY] [--limit N] [--dry-run] [--quiet|--verbose]` - Import matching GitHub issues that are not already linked to minibeads issues
+- `mb github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
+- `mb github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
+- `mb github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
 Synced fields are title, description/body, open/closed state, and comments.
 minibeads keeps `.minibeads/github-sync-state.json` as the last-synced ancestry
@@ -235,7 +253,7 @@ minibeads-specific metadata remain local for now.
 
 Comment sync propagates deletions in both directions. The sync state pairs each
 synced local comment with its GitHub comment id, so deleting a comment on one
-side (for example with `bd comments delete`) deletes its counterpart on the
+side (for example with `mb comments delete`) deletes its counterpart on the
 other side on the next sync, rather than re-importing it. Pull-only sync
 (`--pull-only`) applies GitHub-side deletions locally but never deletes on
 GitHub.
@@ -244,11 +262,11 @@ Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
 viewing the GitHub issue can see which local minibeads issue owns the sync. That
 marker comment is ignored by comment sync and is not imported into minibeads.
 
-`bd github import` only creates local issues for GitHub issues whose URL is not
+`mb github import` only creates local issues for GitHub issues whose URL is not
 already present in any local issue's `external_ref`; already linked issues remain
-the responsibility of `bd github sync`.
+the responsibility of `mb github sync`.
 
-By default, `bd github sync` prints one informative line per linked issue plus a
+By default, `mb github sync` prints one informative line per linked issue plus a
 summary. Use `--quiet` for only the summary line, or `--verbose` to include
 field/comment details under each issue and print each underlying `gh` CLI call
 with elapsed time to stderr.
@@ -284,7 +302,7 @@ issue fields.
 
 ### Migration Path
 
-To export for upstream beads compatibility, use `bd export` (planned in minibeads-11) to generate `issues.jsonl`. Bidirectional sync (minibeads-12) will enable hybrid workflows.
+To export for upstream beads compatibility, use `mb export` (planned in minibeads-11) to generate `issues.jsonl`. Bidirectional sync (minibeads-12) will enable hybrid workflows.
 
 ## Roadmap
 
@@ -311,7 +329,7 @@ See `.minibeads/issues/` for tracking:
 
 ## License
 
-[License TBD - check upstream beads for guidance]
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Links
 
