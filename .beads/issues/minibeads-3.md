@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-07-07T01:37:55.667558527+00:00
+updated_at: 2026-07-11T10:35:12.059571606+00:00
 ---
 
 # Description
@@ -113,3 +113,17 @@ Track testing improvements for minibeads.
 
 ## minibeads-35: bidirectional upstream sync stress test failing (pre-existing)
 make stress-test's test_sync_stress fails deterministically (seed 12345) with an issue-count mismatch (expected 45, got 30). Confirmed pre-existing as of af00710. Not caught by make validate. See minibeads-35.
+
+
+## Update 2026-07-11_#197(293601f)
+- Merged main (0.13.2, crates.io-publishing prep) into integration to unblock
+  promoting integration -> main; resolved conflicts in Cargo.toml/lock,
+  src/main.rs (CLI help text), and README.md (mb/bd naming consistency).
+- Fixed `mb ready` to have no default result limit (previously capped at 10,
+  which had confused agents relying on `mb ready` to see the full ready set).
+  `-n`/`--limit` still works when explicitly passed. Added
+  storage::ready_tests (no_limit_returns_all_ready_issues,
+  explicit_limit_truncates) as regression coverage.
+- Found flaky test: minibeads-36
+  (github::tests::github_import_creates_only_unlinked_issues intermittently
+  fails with "Text file busy" under parallel `cargo test`).

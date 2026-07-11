@@ -1698,7 +1698,7 @@ impl Storage {
         &self,
         assignee: Option<&str>,
         priority: Option<i32>,
-        limit: usize,
+        limit: Option<usize>,
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
         // Convert single priority to vector for list_issues
@@ -1739,7 +1739,7 @@ impl Storage {
         }
 
         // Apply limit after sorting
-        if limit > 0 {
+        if let Some(limit) = limit {
             ready.truncate(limit);
         }
 
@@ -2994,6 +2994,50 @@ mod list_order_tests {
                 "minibeads-a3f9",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+
+    fn storage_with_open_issues(count: usize) -> (tempfile::TempDir, Storage) {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage =
+            Storage::init(beads_dir, Some("demo".to_string()), false).expect("init storage");
+        for i in 0..count {
+            storage
+                .create_issue(
+                    format!("Issue {i}"),
+                    String::new(),
+                    None,
+                    None,
+                    2,
+                    IssueType::Task,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .expect("create issue");
+        }
+        (tmp, storage)
+    }
+
+    #[test]
+    fn no_limit_returns_all_ready_issues() {
+        let (_tmp, storage) = storage_with_open_issues(15);
+        let ready = storage.get_ready(None, None, None, "hybrid").unwrap();
+        assert_eq!(ready.len(), 15);
+    }
+
+    #[test]
+    fn explicit_limit_truncates() {
+        let (_tmp, storage) = storage_with_open_issues(15);
+        let ready = storage.get_ready(None, None, Some(5), "hybrid").unwrap();
+        assert_eq!(ready.len(), 5);
     }
 }
 

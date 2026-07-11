@@ -673,9 +673,9 @@ enum Commands {
         #[arg(short, long)]
         priority: Option<i32>,
 
-        /// Maximum number of issues to return
-        #[arg(short = 'n', long, default_value = "10")]
-        limit: usize,
+        /// Maximum number of issues to return (default: unlimited)
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
 
         /// Sort policy: priority (by priority), oldest (by creation date), hybrid (priority + age)
         #[arg(short = 's', long, default_value = "hybrid")]
