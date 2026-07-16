@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2026-06-19T03:41:17.933591163+00:00
+updated_at: 2026-07-16T20:24:17.237217807+00:00
 ---
 
 # Description
@@ -286,11 +286,20 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 **✅ Implemented Features:**
 - `-a, --assignee` - Filter by assignee
-- `-p, --priority` - Filter by priority
-- `-n, --limit` - Maximum issues to show (default: 10)
+- `-p, --priority` - Filter by priority (comma-separated list, e.g. "1,2,3") ✅ **parity with list (0.24.0)**
+- `-t, --type` - Filter by type ✅ **NEW (0.24.0)**
+- `-l, --label` - Filter by labels (must have ALL specified labels) ✅ **NEW (0.24.0)**
+- `--github` - Only issues linked to GitHub Issues ✅ **NEW (0.24.0)**
+- `--id` - Filter by specific issue IDs (comma-separated) ✅ **NEW (0.24.0)**
+- `--title` - Filter by title substring (case-insensitive) ✅ **NEW (0.24.0)**
+- `--parent` - Filter to direct children of a parent issue ✅ **NEW (0.24.0)**
+- `--group-priority` - Group issues by priority with headers ✅ **NEW (0.24.0)**
+- `-n, --limit` - Maximum issues to show (no default; applied after filtering) ✅
 - `-s, --sort` - Sort policy (hybrid, priority, oldest) - default: "hybrid"
 
-**Status:** ✅ Feature-complete
+In-memory filter and priority-grouping logic is shared with `bd list` (see minibeads-15).
+
+**Status:** ✅ Feature-complete (at parity with `bd list` filters as of 0.24.0)
 
 ---
 

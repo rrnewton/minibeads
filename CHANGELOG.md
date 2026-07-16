@@ -6,6 +6,19 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-16
+
+### Added
+
+- **`mb ready` gains the filter options from `mb list`.** In addition to the
+  existing `--assignee`, `--priority`, and `--limit`, `mb ready` now accepts
+  `--type`, `--label`/`-l` (repeatable, must match ALL), `--github`, `--id`
+  (comma-separated exact IDs), `--title` (case-insensitive substring),
+  `--parent`, and `--group-priority`. `--priority`/`-p` now takes a
+  comma-separated list (e.g. `1,2,3`) to match `mb list`. Filtering happens
+  before the result `--limit` is applied, and the underlying in-memory filter
+  and priority-grouping logic is now shared between `list` and `ready`.
+
 ## [0.23.0] - 2026-07-11
 
 ### Changed

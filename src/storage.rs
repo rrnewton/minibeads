@@ -1694,16 +1694,18 @@ impl Storage {
     }
 
     /// Get ready work
+    ///
+    /// The caller is responsible for any post-query in-memory filtering (labels,
+    /// title, etc.) and for applying a result limit afterwards, so that limiting
+    /// happens after every filter has run.
     pub fn get_ready(
         &self,
         assignee: Option<&str>,
-        priority: Option<i32>,
-        limit: Option<usize>,
+        priority: Option<Vec<i32>>,
+        issue_type: Option<IssueType>,
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
-        // Convert single priority to vector for list_issues
-        let priority_list = priority.map(|p| vec![p]);
-        let issues = self.list_issues(Some(Status::Open), priority_list, None, assignee, None)?;
+        let issues = self.list_issues(Some(Status::Open), priority, issue_type, assignee, None)?;
 
         let mut ready: Vec<Issue> = issues
             .into_iter()
@@ -1736,11 +1738,6 @@ impl Storage {
                         .then_with(|| a.created_at.cmp(&b.created_at))
                 });
             }
-        }
-
-        // Apply limit after sorting
-        if let Some(limit) = limit {
-            ready.truncate(limit);
         }
 
         Ok(ready)
@@ -2292,9 +2289,8 @@ impl Storage {
 
         // Build mapping from old hash ID to new numeric ID
         let mut id_mapping = HashMap::new();
-        let mut next_id = max_numeric_id + 1;
 
-        for issue in &hash_issues {
+        for (next_id, issue) in (max_numeric_id + 1..).zip(hash_issues.iter()) {
             let new_id = format!("{}-{}", prefix, next_id);
 
             // Check if new ID would conflict with existing issue
@@ -2307,7 +2303,6 @@ impl Storage {
             }
 
             id_mapping.insert(issue.id.clone(), new_id);
-            next_id += 1;
         }
 
         // Track all changes for dry-run mode
@@ -2499,43 +2494,33 @@ impl Storage {
             }
 
             // Number open issues: 1, 2, 3, ...
-            let mut next_open_id = 1;
-            for issue in &open_issues {
+            for (next_open_id, issue) in (1u32..).zip(open_issues.iter()) {
                 let new_id = format!("{}-{}", prefix, next_open_id);
 
                 // Only add to mapping if ID actually changes
                 if issue.id != new_id {
                     id_mapping.insert(issue.id.clone(), new_id);
                 }
-
-                next_open_id += 1;
             }
 
             // Number closed issues: closed_issue_start, closed_issue_start+1, ...
-            let mut next_closed_id = closed_start;
-            for issue in &closed_issues {
+            for (next_closed_id, issue) in (closed_start..).zip(closed_issues.iter()) {
                 let new_id = format!("{}-{}", prefix, next_closed_id);
 
                 // Only add to mapping if ID actually changes
                 if issue.id != new_id {
                     id_mapping.insert(issue.id.clone(), new_id);
                 }
-
-                next_closed_id += 1;
             }
         } else {
             // Original behavior: number all issues sequentially
-            let mut next_id = 1;
-
-            for issue in &numeric_issues {
+            for (next_id, issue) in (1u32..).zip(numeric_issues.iter()) {
                 let new_id = format!("{}-{}", prefix, next_id);
 
                 // Only add to mapping if ID actually changes
                 if issue.id != new_id {
                     id_mapping.insert(issue.id.clone(), new_id);
                 }
-
-                next_id += 1;
             }
         }
 
@@ -3036,7 +3021,9 @@ mod ready_tests {
     #[test]
     fn explicit_limit_truncates() {
         let (_tmp, storage) = storage_with_open_issues(15);
-        let ready = storage.get_ready(None, None, Some(5), "hybrid").unwrap();
+        // Limiting is now the caller's responsibility (applied after filtering).
+        let mut ready = storage.get_ready(None, None, None, "hybrid").unwrap();
+        ready.truncate(5);
         assert_eq!(ready.len(), 5);
     }
 }

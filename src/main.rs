@@ -669,13 +669,41 @@ enum Commands {
         #[arg(short = 'a', long)]
         assignee: Option<String>,
 
-        /// Filter by priority
-        #[arg(short, long)]
-        priority: Option<i32>,
+        /// Filter by priority (comma-separated list, e.g., "1,2,3")
+        #[arg(short = 'p', long)]
+        priority: Option<String>,
+
+        /// Filter by type: bug, feature, task, epic, chore
+        #[arg(long)]
+        r#type: Option<IssueType>,
+
+        /// Filter by labels (must have ALL specified labels)
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
+
+        /// Show only issues linked to GitHub Issues (minibeads-specific)
+        #[arg(long)]
+        github: bool,
+
+        /// Filter by specific issue IDs (comma-separated)
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Filter by title substring (case-insensitive)
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Filter to direct children of a parent issue
+        #[arg(long)]
+        parent: Option<String>,
 
         /// Maximum number of issues to return (default: unlimited)
         #[arg(short = 'n', long)]
         limit: Option<usize>,
+
+        /// Group issues by priority with headers
+        #[arg(long)]
+        group_priority: bool,
 
         /// Sort policy: priority (by priority), oldest (by creation date), hybrid (priority + age)
         #[arg(short = 's', long, default_value = "hybrid")]
@@ -1429,6 +1457,102 @@ fn main() {
     }
 }
 
+/// In-memory issue filters shared by `list` and `ready`. The storage layer
+/// handles status/priority/type/assignee; everything here is a post-query
+/// `retain` so both commands filter identically.
+struct IssueFilters<'a> {
+    /// Must have ALL specified labels.
+    labels: &'a [String],
+    /// Only issues linked to a GitHub issue.
+    github: bool,
+    /// Restrict to a comma-separated set of exact issue IDs.
+    id: Option<&'a str>,
+    /// Case-insensitive title substring.
+    title: Option<&'a str>,
+    /// Only direct children of this parent issue.
+    parent: Option<&'a str>,
+}
+
+/// Parse a comma-separated priority filter (e.g. "1,2,3") into a list, shared by
+/// `list` and `ready`.
+fn parse_priority_list(priority: Option<&str>) -> Result<Option<Vec<i32>>> {
+    match priority {
+        Some(priority_str) => {
+            let priorities: Result<Vec<i32>, _> = priority_str
+                .split(',')
+                .map(|s| s.trim().parse::<i32>())
+                .collect();
+            Ok(Some(priorities.context("Invalid priority value")?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Print issues grouped by priority with a boxed header per group. Shared by
+/// `list` and `ready` (`--group-priority`).
+fn print_issues_grouped_by_priority(issues: &[Issue]) {
+    // Group issues by priority using BTreeMap for sorted keys
+    let mut groups: BTreeMap<i32, Vec<&Issue>> = BTreeMap::new();
+    for issue in issues {
+        groups.entry(issue.priority).or_default().push(issue);
+    }
+
+    for (priority, group_issues) in groups {
+        let header_text = format!("Priority {}", priority);
+        let header_width = 60;
+        let padding = (header_width - header_text.len() - 2) / 2;
+        println!("{}", "=".repeat(header_width));
+        println!(
+            "|{}{}{}|",
+            " ".repeat(padding),
+            header_text,
+            " ".repeat(header_width - padding - header_text.len() - 2)
+        );
+        println!("{}", "=".repeat(header_width));
+
+        for issue in group_issues {
+            println!("{}: {} [{}]", issue.id, issue.title, issue.status);
+        }
+        println!();
+    }
+}
+
+impl IssueFilters<'_> {
+    fn apply(&self, issues: &mut Vec<Issue>) {
+        if !self.labels.is_empty() {
+            issues.retain(|issue| self.labels.iter().all(|label| issue.labels.contains(label)));
+        }
+
+        if self.github {
+            issues.retain(|issue| {
+                issue
+                    .external_ref
+                    .as_deref()
+                    .is_some_and(is_github_issue_ref)
+            });
+        }
+
+        if let Some(id_filter) = self.id {
+            let target_ids: Vec<&str> = id_filter.split(',').map(str::trim).collect();
+            issues.retain(|issue| target_ids.contains(&issue.id.as_str()));
+        }
+
+        if let Some(title_filter) = self.title {
+            let title_lower = title_filter.to_lowercase();
+            issues.retain(|issue| issue.title.to_lowercase().contains(&title_lower));
+        }
+
+        if let Some(parent_id) = self.parent {
+            issues.retain(|issue| {
+                issue
+                    .depends_on
+                    .get(parent_id)
+                    .is_some_and(|dep_type| *dep_type == DependencyType::ParentChild)
+            });
+        }
+    }
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1623,15 +1747,7 @@ fn run() -> Result<()> {
             }
 
             // Parse comma-separated priorities
-            let priority_list = if let Some(priority_str) = priority {
-                let priorities: Result<Vec<i32>, _> = priority_str
-                    .split(',')
-                    .map(|s| s.trim().parse::<i32>())
-                    .collect();
-                Some(priorities.context("Invalid priority value")?)
-            } else {
-                None
-            };
+            let priority_list = parse_priority_list(priority.as_deref())?;
 
             let status_filter = match status.as_deref() {
                 None | Some("all") => None,
@@ -1646,42 +1762,15 @@ fn run() -> Result<()> {
                 None,
             )?;
 
-            // Apply label filter (must have ALL specified labels)
-            if !labels.is_empty() {
-                issues.retain(|issue| labels.iter().all(|label| issue.labels.contains(label)));
+            // Apply in-memory filters shared with `ready`
+            IssueFilters {
+                labels: &labels,
+                github,
+                id: id.as_deref(),
+                title: title.as_deref(),
+                parent: parent.as_deref(),
             }
-
-            if github {
-                issues.retain(|issue| {
-                    issue
-                        .external_ref
-                        .as_deref()
-                        .is_some_and(is_github_issue_ref)
-                });
-            }
-
-            // Apply ID filter (comma-separated list of specific IDs)
-            if let Some(id_filter) = id {
-                let target_ids: Vec<String> =
-                    id_filter.split(',').map(|s| s.trim().to_string()).collect();
-                issues.retain(|issue| target_ids.contains(&issue.id));
-            }
-
-            // Apply title filter (case-insensitive substring match)
-            if let Some(title_filter) = title {
-                let title_lower = title_filter.to_lowercase();
-                issues.retain(|issue| issue.title.to_lowercase().contains(&title_lower));
-            }
-
-            // Apply parent-child filter
-            if let Some(parent_id) = parent {
-                issues.retain(|issue| {
-                    issue
-                        .depends_on
-                        .get(&parent_id)
-                        .is_some_and(|dep_type| *dep_type == DependencyType::ParentChild)
-                });
-            }
+            .apply(&mut issues);
 
             // Apply limit if specified
             if let Some(limit_val) = limit {
@@ -1693,36 +1782,7 @@ fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&issues)?);
             } else if group_priority {
-                // Group by priority and display with headers
-                use std::collections::BTreeMap;
-
-                // Group issues by priority using BTreeMap for sorted keys
-                let mut groups: BTreeMap<i32, Vec<&types::Issue>> = BTreeMap::new();
-                for issue in &issues {
-                    groups.entry(issue.priority).or_default().push(issue);
-                }
-
-                // Display each priority group with header
-                for (priority, group_issues) in groups {
-                    // Print priority header
-                    let header_text = format!("Priority {}", priority);
-                    let header_width = 60;
-                    let padding = (header_width - header_text.len() - 2) / 2;
-                    println!("{}", "=".repeat(header_width));
-                    println!(
-                        "|{}{}{}|",
-                        " ".repeat(padding),
-                        header_text,
-                        " ".repeat(header_width - padding - header_text.len() - 2)
-                    );
-                    println!("{}", "=".repeat(header_width));
-
-                    // Print issues in this group (without priority tag)
-                    for issue in group_issues {
-                        println!("{}: {} [{}]", issue.id, issue.title, issue.status);
-                    }
-                    println!();
-                }
+                print_issues_grouped_by_priority(&issues);
             } else {
                 // Standard output
                 for issue in issues {
@@ -2887,7 +2947,14 @@ fn run() -> Result<()> {
         Commands::Ready {
             assignee,
             priority,
+            r#type,
+            labels,
+            github,
+            id,
+            title,
+            parent,
             limit,
+            group_priority,
             sort,
         } => {
             let storage = get_storage(mb_beads_dir, db)?;
@@ -2906,10 +2973,32 @@ fn run() -> Result<()> {
                 }
             };
 
-            let ready = storage.get_ready(assignee.as_deref(), priority, limit, sort_policy)?;
+            let priority_list = parse_priority_list(priority.as_deref())?;
+
+            let mut ready =
+                storage.get_ready(assignee.as_deref(), priority_list, r#type, sort_policy)?;
+
+            // Apply in-memory filters shared with `list`
+            IssueFilters {
+                labels: &labels,
+                github,
+                id: id.as_deref(),
+                title: title.as_deref(),
+                parent: parent.as_deref(),
+            }
+            .apply(&mut ready);
+
+            // Apply limit after every filter has run
+            if let Some(limit_val) = limit {
+                if limit_val > 0 {
+                    ready.truncate(limit_val);
+                }
+            }
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&ready)?);
+            } else if group_priority {
+                print_issues_grouped_by_priority(&ready);
             } else {
                 for issue in ready {
                     println!(
