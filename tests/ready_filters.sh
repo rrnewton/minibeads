@@ -129,6 +129,13 @@ OUTPUT=$("$BD_BIN" ready --priority 1,2 2>&1)
 assert_contains "$OUTPUT" "test-1: Fix login bug" "priority 1,2 includes p1"
 assert_contains "$OUTPUT" "test-2: Add dark mode" "priority 1,2 includes p2"
 
+# --priority repeated (must union with comma-separated behaviour).
+echo -e "\n${YELLOW}--priority repeated flag${NC}"
+OUTPUT=$("$BD_BIN" ready -p 1 -p 2 2>&1)
+assert_contains "$OUTPUT" "test-1: Fix login bug" "-p 1 -p 2 includes p1"
+assert_contains "$OUTPUT" "test-2: Add dark mode" "-p 1 -p 2 includes p2"
+assert_not_contains "$OUTPUT" "test-3: Write docs" "-p 1 -p 2 excludes p3 (also blocked)"
+
 # --title substring (case-insensitive).
 echo -e "\n${YELLOW}--title filter${NC}"
 OUTPUT=$("$BD_BIN" ready --title DARK 2>&1)
@@ -169,6 +176,31 @@ assert_contains "$OUTPUT" "Priority 2" "group-priority prints a Priority 2 heade
 echo -e "\n${YELLOW}--github filter${NC}"
 OUTPUT=$("$BD_BIN" ready --github 2>&1)
 assert_not_contains "$OUTPUT" "test-1: Fix login bug" "github filter excludes non-linked issues"
+
+# --sort random preserves the full ready set (just reorders it).
+echo -e "\n${YELLOW}--sort random preserves the set${NC}"
+TESTS_RUN=$((TESTS_RUN + 1))
+COUNT=$("$BD_BIN" ready --sort random 2>&1 | grep -c "^test-" || true)
+# Ready set is test-1, test-2, test-4 (test-3 is blocked).
+if [ "$COUNT" = "3" ]; then
+    success "random sort returns all 3 ready issues"
+else
+    fail "random sort should return 3 issues (got $COUNT)"
+fi
+
+# --sort random with -n 1 picks from the whole filtered set, not just its head.
+# test-1 and test-4 are the two ready priority-1 issues; over many draws we
+# should observe both (P(all-same) over 40 draws is ~2^-39).
+echo -e "\n${YELLOW}--sort random -n 1 picks uniformly${NC}"
+TESTS_RUN=$((TESTS_RUN + 1))
+DISTINCT=$(for _ in $(seq 40); do
+    "$BD_BIN" ready -p 1 -s random -n 1 2>/dev/null | awk -F: '{print $1}'
+done | sort -u | wc -l | tr -d ' ')
+if [ "$DISTINCT" -ge 2 ]; then
+    success "random -n 1 yielded $DISTINCT distinct picks across 40 draws"
+else
+    fail "random -n 1 should vary its pick (only $DISTINCT distinct over 40 draws)"
+fi
 
 # Combined filters compose.
 echo -e "\n${YELLOW}Combined filters${NC}"

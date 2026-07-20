@@ -1730,6 +1730,10 @@ impl Storage {
                         .then_with(|| a.created_at.cmp(&b.created_at))
                 });
             }
+            "random" => {
+                // No ordering here; the caller shuffles after post-query
+                // filtering so the randomization spans the whole filtered set.
+            }
             _ => {
                 // Default to hybrid if invalid (shouldn't happen due to CLI validation)
                 ready.sort_by(|a, b| {

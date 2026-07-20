@@ -6,6 +6,21 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-20
+
+### Added
+
+- **`mb ready --sort random`** shuffles the ready set. The shuffle runs after
+  all filters and before `--limit`, so `mb ready -p 1 -n 1 -s random` picks one
+  random priority-1 task uniformly from the whole matching set.
+
+### Changed
+
+- **`--priority`/`-p` is now repeatable** on both `mb ready` and `mb list`, in
+  addition to the existing comma-separated form. `-p 0 -p 1`, `-p 0,1`, and
+  `-p 0 -p 1,2` all work. Combined with `--sort random`, `mb ready -p 0 -p 1 -n 1
+  -s random` selects one random task among priorities 0 and 1.
+
 ## [0.24.0] - 2026-07-16
 
 ### Added

@@ -4,7 +4,7 @@ status: open
 priority: 1
 issue_type: task
 created_at: 2025-10-30T16:22:39.915813892+00:00
-updated_at: 2026-07-16T20:24:17.237217807+00:00
+updated_at: 2026-07-20T14:41:03.034264203+00:00
 ---
 
 # Description
@@ -139,7 +139,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 **✅ Implemented Features:**
 - `-s, --status` - Filter by status ✅
-- `-p, --priority` - Filter by priority (comma-separated list) ✅
+- `-p, --priority` - Filter by priority (repeatable and/or comma-separated) ✅
 - `-t, --type` - Filter by type ✅
 - `--assignee` - Filter by assignee ✅
 - `--limit` - Limit results (no default) ✅
@@ -286,7 +286,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 
 **✅ Implemented Features:**
 - `-a, --assignee` - Filter by assignee
-- `-p, --priority` - Filter by priority (comma-separated list, e.g. "1,2,3") ✅ **parity with list (0.24.0)**
+- `-p, --priority` - Filter by priority (repeatable and/or comma-separated, e.g. "-p 0 -p 1" or "-p 0,1") ✅ **repeatable in 0.25.0**
 - `-t, --type` - Filter by type ✅ **NEW (0.24.0)**
 - `-l, --label` - Filter by labels (must have ALL specified labels) ✅ **NEW (0.24.0)**
 - `--github` - Only issues linked to GitHub Issues ✅ **NEW (0.24.0)**
@@ -295,7 +295,7 @@ Ensure minibeads provides full compatibility with the beads MCP server, which re
 - `--parent` - Filter to direct children of a parent issue ✅ **NEW (0.24.0)**
 - `--group-priority` - Group issues by priority with headers ✅ **NEW (0.24.0)**
 - `-n, --limit` - Maximum issues to show (no default; applied after filtering) ✅
-- `-s, --sort` - Sort policy (hybrid, priority, oldest) - default: "hybrid"
+- `-s, --sort` - Sort policy (hybrid, priority, oldest, random) - default: "hybrid" ✅ **random added in 0.25.0**
 
 In-memory filter and priority-grouping logic is shared with `bd list` (see minibeads-15).
 

@@ -297,9 +297,9 @@ enum Commands {
         #[arg(short = 's', long)]
         status: Option<String>,
 
-        /// Filter by priority (comma-separated list, e.g., "1,2,3")
+        /// Filter by priority (repeatable and/or comma-separated, e.g. "-p 0 -p 1" or "-p 0,1")
         #[arg(short = 'p', long)]
-        priority: Option<String>,
+        priority: Vec<String>,
 
         /// Filter by type: bug, feature, task, epic, chore
         #[arg(long)]
@@ -669,9 +669,9 @@ enum Commands {
         #[arg(short = 'a', long)]
         assignee: Option<String>,
 
-        /// Filter by priority (comma-separated list, e.g., "1,2,3")
+        /// Filter by priority (repeatable and/or comma-separated, e.g. "-p 0 -p 1" or "-p 0,1")
         #[arg(short = 'p', long)]
-        priority: Option<String>,
+        priority: Vec<String>,
 
         /// Filter by type: bug, feature, task, epic, chore
         #[arg(long)]
@@ -705,7 +705,7 @@ enum Commands {
         #[arg(long)]
         group_priority: bool,
 
-        /// Sort policy: priority (by priority), oldest (by creation date), hybrid (priority + age)
+        /// Sort policy: priority (by priority), oldest (by creation date), hybrid (priority + age), random (shuffled)
         #[arg(short = 's', long, default_value = "hybrid")]
         sort: String,
     },
@@ -1473,18 +1473,26 @@ struct IssueFilters<'a> {
     parent: Option<&'a str>,
 }
 
-/// Parse a comma-separated priority filter (e.g. "1,2,3") into a list, shared by
-/// `list` and `ready`.
-fn parse_priority_list(priority: Option<&str>) -> Result<Option<Vec<i32>>> {
-    match priority {
-        Some(priority_str) => {
-            let priorities: Result<Vec<i32>, _> = priority_str
-                .split(',')
-                .map(|s| s.trim().parse::<i32>())
-                .collect();
-            Ok(Some(priorities.context("Invalid priority value")?))
+/// Parse priority filters into a flat list, shared by `list` and `ready`. The
+/// flag is repeatable and each value may itself be comma-separated, so
+/// `-p 0 -p 1`, `-p 0,1`, and `-p 0 -p 1,2` are all accepted. Returns None when
+/// no priority filter was supplied.
+fn parse_priority_filters(values: &[String]) -> Result<Option<Vec<i32>>> {
+    let mut priorities = Vec::new();
+    for value in values {
+        for part in value.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            priorities.push(part.parse::<i32>().context("Invalid priority value")?);
         }
-        None => Ok(None),
+    }
+
+    if priorities.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(priorities))
     }
 }
 
@@ -1746,8 +1754,8 @@ fn run() -> Result<()> {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
-            // Parse comma-separated priorities
-            let priority_list = parse_priority_list(priority.as_deref())?;
+            // Parse priority filters (repeatable and/or comma-separated)
+            let priority_list = parse_priority_filters(&priority)?;
 
             let status_filter = match status.as_deref() {
                 None | Some("all") => None,
@@ -2966,14 +2974,14 @@ fn run() -> Result<()> {
 
             // Validate sort policy
             let sort_policy = match sort.as_str() {
-                "priority" | "oldest" | "hybrid" => sort.as_str(),
+                "priority" | "oldest" | "hybrid" | "random" => sort.as_str(),
                 _ => {
                     eprintln!("Warning: Invalid sort policy '{}', using 'hybrid'", sort);
                     "hybrid"
                 }
             };
 
-            let priority_list = parse_priority_list(priority.as_deref())?;
+            let priority_list = parse_priority_filters(&priority)?;
 
             let mut ready =
                 storage.get_ready(assignee.as_deref(), priority_list, r#type, sort_policy)?;
@@ -2987,6 +2995,13 @@ fn run() -> Result<()> {
                 parent: parent.as_deref(),
             }
             .apply(&mut ready);
+
+            // Shuffle after filtering so `-n 1 -s random` picks uniformly from
+            // the whole filtered set, not just its head.
+            if sort_policy == "random" {
+                use rand::seq::SliceRandom;
+                ready.shuffle(&mut rand::thread_rng());
+            }
 
             // Apply limit after every filter has run
             if let Some(limit_val) = limit {
