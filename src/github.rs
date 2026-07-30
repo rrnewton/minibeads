@@ -660,9 +660,11 @@ pub fn sync_linked(
     repo: Option<&str>,
     dry_run: bool,
     pull_only: bool,
+    force: bool,
+    since: Option<DateTime<Utc>>,
 ) -> Result<GithubSyncReport> {
     block_on_github(sync_linked_async(
-        storage, issue_ids, repo, dry_run, pull_only,
+        storage, issue_ids, repo, dry_run, pull_only, force, since,
     ))
 }
 
@@ -847,9 +849,11 @@ async fn sync_linked_async(
     repo: Option<&str>,
     dry_run: bool,
     pull_only: bool,
+    force: bool,
+    since: Option<DateTime<Utc>>,
 ) -> Result<GithubSyncReport> {
     let store = GithubStore::new(repo);
-    sync_linked_with_store(storage, issue_ids, dry_run, pull_only, &store).await
+    sync_linked_with_store(storage, issue_ids, dry_run, pull_only, force, since, &store).await
 }
 
 async fn sync_linked_with_store(
@@ -857,6 +861,8 @@ async fn sync_linked_with_store(
     issue_ids: &[String],
     dry_run: bool,
     pull_only: bool,
+    force: bool,
+    since: Option<DateTime<Utc>>,
     store: &GithubStore,
 ) -> Result<GithubSyncReport> {
     let beads_dir = storage.get_beads_dir();
@@ -875,6 +881,15 @@ async fn sync_linked_with_store(
     };
 
     let mut issues = storage.list_issues(None, None, None, None, None)?;
+    if let Some(since) = since {
+        // Incremental mode: only walk issues whose local record changed at/after
+        // the cutoff, so a linked set in the hundreds doesn't need a full pass
+        // every time. This looks at the LOCAL updated_at only (cheap, no GitHub
+        // call needed to decide the candidate set) -- an issue that changed only
+        // on GitHub's side is picked up by whichever sync call covers it next,
+        // same as today's "sync everything" mode already relies on.
+        issues.retain(|issue| issue.updated_at >= since);
+    }
     if !issue_ids.is_empty() {
         let wanted: HashSet<&str> = issue_ids.iter().map(String::as_str).collect();
         issues.retain(|issue| wanted.contains(issue.id.as_str()));
@@ -931,7 +946,34 @@ async fn sync_linked_with_store(
         }
 
         if pull_only {
-            if local_hash != remote_hash {
+            let local_changed_since_last_sync = old_state.is_some() && local_changed;
+            if local_hash != remote_hash && local_changed_since_last_sync && !force {
+                // The title/body/status changed locally since the last recorded sync, and
+                // --pull-only would otherwise silently overwrite that edit with GitHub's
+                // version (one-directional by design, but not at the cost of losing local
+                // work without a trace). Refuse and surface exactly what would be discarded;
+                // --force overrides.
+                let warning = format!(
+                    "refusing to overwrite local edits on {} ({}) with --pull-only: \
+                     local title/description/status changed since the last sync. \
+                     Re-run with --force to let GitHub win, or use plain `mb github sync` \
+                     to push the local edit instead.\n  discarded local title: {}\n  \
+                     discarded local description:\n{}\n",
+                    issue.id, url, issue.title, issue.description
+                );
+                eprintln!("{warning}");
+                item.action = "conflict-local-changed".to_string();
+                item.conflict = Some(format!(
+                    "{} / {}: local changed since last sync; --pull-only skipped it (use --force to overwrite)",
+                    issue.id, url
+                ));
+                item.details.push(
+                    "pull-only: local title/description/status changed since last sync; refusing to overwrite without --force"
+                        .to_string(),
+                );
+                report.conflicts.push(item.conflict.clone().unwrap());
+                field_conflict = true;
+            } else if local_hash != remote_hash {
                 if !dry_run {
                     apply_remote_to_local(storage, &issue, &remote)?;
                     issue = storage.get_issue(&issue.id)?.ok_or_else(|| {
@@ -949,6 +991,11 @@ async fn sync_linked_with_store(
                 if old_state.is_none() {
                     item.details.push(
                         "pull-only: no previous GitHub sync state; used GitHub as the initial common base"
+                            .to_string(),
+                    );
+                } else if force && local_changed_since_last_sync {
+                    item.details.push(
+                        "pull-only: --force overwrote local title/description/status changed since last sync"
                             .to_string(),
                     );
                 }
@@ -1092,6 +1139,7 @@ async fn sync_linked_with_store(
             old_state,
             dry_run,
             pull_only,
+            force,
         )
         .await?;
         if deletions.remote_written {
@@ -1117,6 +1165,18 @@ async fn sync_linked_with_store(
                 "deleted {} local comment(s) after GitHub deletion",
                 deletions.deleted_local
             ));
+        }
+        if !deletions.skipped_local_deletions.is_empty() {
+            let conflict = format!(
+                "{} / {}: {} local comment(s) look GitHub-deleted but were left alone (use --force to delete locally)",
+                issue.id,
+                url,
+                deletions.skipped_local_deletions.len()
+            );
+            item.details.push(conflict.clone());
+            item.conflict = Some(conflict.clone());
+            report.conflicts.push(conflict);
+            field_conflict = true;
         }
 
         let synced_local_ids: HashSet<String> = old_state
@@ -1408,6 +1468,8 @@ pub fn stress_test(
                 Some(repo),
                 false,
                 false,
+                false,
+                None,
             )
             .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
@@ -1428,6 +1490,8 @@ pub fn stress_test(
                 Some(repo),
                 false,
                 false,
+                false,
+                None,
             )
             .with_context(|| {
                 format!("stress no-op sync failed for {} at step {}", issue.id, step)
@@ -1460,6 +1524,8 @@ pub fn stress_test(
             Some(repo),
             false,
             false,
+            false,
+            None,
         )
         .with_context(|| format!("stress close sync failed for {}", issue.id))?;
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
@@ -1583,12 +1649,12 @@ fn stress_test_adversarial(
             apply_adversarial_mutation(storage, context, step, idx, model, rng)?;
         }
 
-        let report = sync_linked(storage, &issue_ids, Some(context.repo), false, false)
+        let report = sync_linked(storage, &issue_ids, Some(context.repo), false, false, false, None)
             .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
             .with_context(|| format!("adversarial convergence failed at round {}", step))?;
 
-        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false, false)
+        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false, false, false, None)
             .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
             .with_context(|| format!("adversarial no-op check failed at round {}", step))?;
@@ -2092,6 +2158,10 @@ struct CommentDeletionOutcome {
     deleted_local: usize,
     /// Whether we mutated GitHub (so the caller re-snapshots for state).
     remote_written: bool,
+    /// Local comments that LOOKED remote-deleted (their previously-paired remote
+    /// id vanished) but were left alone because `force` was not given -- see the
+    /// comment on the `(true, false)` match arm below for why this exists.
+    skipped_local_deletions: Vec<Comment>,
 }
 
 /// Reconcile comment deletions using the last-synced ancestry pairs.
@@ -2102,7 +2172,22 @@ struct CommentDeletionOutcome {
 /// append-only import/export logic resurrect it:
 ///
 /// - deleted locally  -> delete the GitHub comment (a push; skipped in pull-only)
-/// - deleted on GitHub -> delete the local comment (a pull; always applied)
+/// - deleted on GitHub -> delete the local comment (a pull; gated on `force`, see below)
+///
+/// The "deleted on GitHub" pull direction is a genuine data-loss risk that isn't
+/// gated on anything else in this codebase: the only signal available is that the
+/// comment id we recorded at the last sync no longer appears among GitHub's
+/// current comment ids. That's indistinguishable, from here, between "someone
+/// really deleted the GitHub comment" and "GitHub (or a `gh` version change)
+/// returned the same comment under a different id representation" -- and a
+/// misfire on the second case would silently wipe a real, possibly
+/// locally-authored comment with no error, no warning, no conflict indicator.
+/// So this pull is now an explicit, opt-in overwrite, matching the same shape as
+/// the `--pull-only` field-overwrite guard above: without `--force` it refuses,
+/// prints what it would have deleted, and reports it as a conflict; the deletion
+/// state is not recorded as resolved, so it is reported again on every sync until
+/// the caller either passes `--force` or (better) confirms on GitHub's side and
+/// deletes the local comment explicitly.
 ///
 /// `remote` is updated in place so the subsequent import step does not re-import a
 /// comment we just deleted on GitHub.
@@ -2114,6 +2199,7 @@ async fn reconcile_deleted_comments(
     old_state: Option<&GithubIssueState>,
     dry_run: bool,
     pull_only: bool,
+    force: bool,
 ) -> Result<CommentDeletionOutcome> {
     let mut outcome = CommentDeletionOutcome::default();
     let Some(state) = old_state else {
@@ -2124,7 +2210,8 @@ async fn reconcile_deleted_comments(
     }
 
     let local_comments = storage.list_comments(&issue.id)?;
-    let local_ids: HashSet<&str> = local_comments.iter().map(|c| c.id.as_str()).collect();
+    let local_by_id: HashMap<&str, &Comment> =
+        local_comments.iter().map(|c| (c.id.as_str(), c)).collect();
     let remote_ids: HashSet<&str> = remote
         .comments
         .iter()
@@ -2136,11 +2223,25 @@ async fn reconcile_deleted_comments(
     let mut delete_local: Vec<String> = Vec::new();
     for pair in &state.synced_comments {
         match (
-            local_ids.contains(pair.local_id.as_str()),
+            local_by_id.contains_key(pair.local_id.as_str()),
             remote_ids.contains(pair.remote_id.as_str()),
         ) {
             (false, true) => delete_remote.push(pair.remote_id.clone()),
-            (true, false) => delete_local.push(pair.local_id.clone()),
+            (true, false) => {
+                if force {
+                    delete_local.push(pair.local_id.clone());
+                } else if let Some(comment) = local_by_id.get(pair.local_id.as_str()) {
+                    eprintln!(
+                        "refusing to delete local comment {} on {} -- its GitHub counterpart \
+                         ({}) is no longer visible, but that could be a real deletion OR just an \
+                         id-format change on GitHub's side. Re-run with --force to delete it \
+                         locally, or confirm on GitHub and delete it locally yourself.\n  \
+                         discarded local comment body:\n{}\n",
+                        pair.local_id, issue.id, pair.remote_id, comment.body
+                    );
+                    outcome.skipped_local_deletions.push((*comment).clone());
+                }
+            }
             _ => {}
         }
     }
@@ -2991,6 +3092,7 @@ mod tests {
             Some(&old_state),
             false,
             false,
+            false,
         ))
         .unwrap();
 
@@ -3008,9 +3110,64 @@ mod tests {
         );
     }
 
+    /// Regression test for a real data-loss report: a comment that LOOKS
+    /// GitHub-deleted (its previously-paired remote id no longer appears among
+    /// GitHub's current comment ids) must NOT be silently wiped locally by
+    /// default -- that id going missing is indistinguishable, from here, from
+    /// GitHub (or a `gh` version bump) simply reporting the same comment under
+    /// a different id representation. Without `--force` the comment must
+    /// survive and the skip must be visible to the caller.
     #[cfg(unix)]
     #[test]
-    fn github_deleted_comment_is_deleted_locally() {
+    fn github_looks_deleted_comment_is_kept_without_force() {
+        let (tmp, storage, issue) = storage_with_issue();
+        storage
+            .upsert_comments(
+                &issue.id,
+                vec![imported_comment(&issue, "42", "a reviewer's verdict")],
+            )
+            .unwrap();
+        // Remote no longer has a comment under id "42" (deleted, OR just
+        // reported under a different id -- indistinguishable from here).
+        let mut remote = remote_issue(vec![]);
+        let old_state = state_with_pair(&issue, &remote, "gh-42", "42");
+
+        let (program, _log) = fake_gh_recording(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+        let handle = store.issue("https://github.com/example/repo/issues/1");
+
+        let outcome = block_on_github(reconcile_deleted_comments(
+            &storage,
+            &issue,
+            &handle,
+            &mut remote,
+            Some(&old_state),
+            false,
+            false,
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            outcome.deleted_local, 0,
+            "must not delete without --force"
+        );
+        assert_eq!(outcome.deleted_remote, 0);
+        assert_eq!(outcome.skipped_local_deletions.len(), 1);
+        assert_eq!(
+            outcome.skipped_local_deletions[0].body,
+            "a reviewer's verdict"
+        );
+        let surviving = storage.list_comments(&issue.id).unwrap();
+        assert_eq!(surviving.len(), 1, "the comment must survive the sync");
+        assert_eq!(surviving[0].body, "a reviewer's verdict");
+    }
+
+    /// Companion case: `--force` is the explicit escape hatch when the GitHub
+    /// deletion is confirmed real.
+    #[cfg(unix)]
+    #[test]
+    fn github_deleted_comment_is_deleted_locally_with_force() {
         let (tmp, storage, issue) = storage_with_issue();
         storage
             .upsert_comments(
@@ -3034,11 +3191,13 @@ mod tests {
             Some(&old_state),
             false,
             false,
+            true,
         ))
         .unwrap();
 
         assert_eq!(outcome.deleted_local, 1);
         assert_eq!(outcome.deleted_remote, 0);
+        assert!(outcome.skipped_local_deletions.is_empty());
         assert!(storage.list_comments(&issue.id).unwrap().is_empty());
     }
 
@@ -3068,6 +3227,7 @@ mod tests {
             Some(&old_state),
             false,
             true,
+            false,
         ))
         .unwrap();
 
@@ -3188,6 +3348,8 @@ mod tests {
             std::slice::from_ref(&issue.id),
             false,
             true,
+            false,
+            None,
             &store,
         ))
         .unwrap();
@@ -3229,6 +3391,8 @@ mod tests {
             std::slice::from_ref(&issue.id),
             false,
             true,
+            false,
+            None,
             &store,
         ))
         .unwrap();
@@ -3250,6 +3414,134 @@ mod tests {
             1,
             "{calls}"
         );
+        assert!(
+            !calls.lines().any(|line| {
+                line.starts_with("issue comment ")
+                    || line.starts_with("issue edit ")
+                    || line.starts_with("issue close ")
+                    || line.starts_with("issue reopen ")
+            }),
+            "{calls}"
+        );
+    }
+
+    /// Regression test for a real data-loss bug: once a `--pull-only` baseline is
+    /// established, editing the LOCAL description (with GitHub unchanged) used to be
+    /// silently discarded on the next `--pull-only` sync -- no conflict, no warning,
+    /// just gone. `--pull-only` refuses that overwrite now unless `--force` is given.
+    #[cfg(unix)]
+    #[test]
+    fn github_sync_pull_only_refuses_to_discard_local_edit_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::init(
+            tmp.path().join(".beads"),
+            None,
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .unwrap();
+        let issue = storage
+            .create_issue(
+                "Local title".to_string(),
+                "Local body".to_string(),
+                None,
+                None,
+                2,
+                IssueType::Task,
+                None,
+                Vec::new(),
+                Some("https://github.com/example/repo/issues/1".to_string()),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let (program, log) = fake_gh_read_only(&tmp);
+        let store = GithubStore::new_with_program(Some("example/repo"), program);
+
+        // First pull-only sync: no previous state, so GitHub's snapshot ("Remote
+        // title" / "Remote body" / closed) becomes the initial common base.
+        block_on_github(sync_linked_with_store(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            false,
+            true,
+            false,
+            None,
+            &store,
+        ))
+        .unwrap();
+        let baseline = storage.get_issue(&issue.id).unwrap().unwrap();
+        assert_eq!(baseline.description, "Remote body");
+        let state_path = storage.get_beads_dir().join("github-sync-state.json");
+        let state_after_baseline = std::fs::read_to_string(&state_path).unwrap();
+
+        // Now the user edits the description locally. GitHub's content (per the
+        // read-only fixture) has NOT changed.
+        let mut updates = HashMap::new();
+        updates.insert(
+            "description".to_string(),
+            "Locally edited description -- must not be lost".to_string(),
+        );
+        storage.update_issue(&issue.id, updates).unwrap();
+
+        // Without --force, --pull-only must refuse to overwrite the local edit.
+        let report = block_on_github(sync_linked_with_store(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            false,
+            true,
+            false,
+            None,
+            &store,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            report.pulled_issues, 0,
+            "a locally-changed issue must not be silently pulled over"
+        );
+        assert_eq!(
+            report.conflicts.len(),
+            1,
+            "the skipped overwrite must be reported as a conflict: {:?}",
+            report.conflicts
+        );
+        assert!(
+            report.conflicts[0].contains(&issue.id),
+            "{:?}",
+            report.conflicts
+        );
+        let still_local = storage.get_issue(&issue.id).unwrap().unwrap();
+        assert_eq!(
+            still_local.description, "Locally edited description -- must not be lost",
+            "the local edit must survive an unforced --pull-only sync"
+        );
+
+        // The sync state must be left untouched so the divergence is still visible
+        // (and gets reported again) on the next unforced attempt.
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            state_after_baseline
+        );
+
+        // --force is the explicit escape hatch: GitHub wins on request.
+        let forced_report = block_on_github(sync_linked_with_store(
+            &storage,
+            std::slice::from_ref(&issue.id),
+            false,
+            true,
+            true,
+            None,
+            &store,
+        ))
+        .unwrap();
+        assert_eq!(forced_report.pulled_issues, 1);
+        assert!(forced_report.conflicts.is_empty());
+        let forced = storage.get_issue(&issue.id).unwrap().unwrap();
+        assert_eq!(forced.description, "Remote body");
+
+        // Never actually wrote anything back to GitHub -- pull-only stays read-only.
+        let calls = std::fs::read_to_string(log).unwrap();
         assert!(
             !calls.lines().any(|line| {
                 line.starts_with("issue comment ")

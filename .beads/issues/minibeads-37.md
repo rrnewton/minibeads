@@ -6,7 +6,7 @@ issue_type: task
 labels:
 - human
 created_at: 2026-07-30T16:11:54.945437012+00:00
-updated_at: 2026-07-30T16:11:54.945437012+00:00
+updated_at: 2026-07-30T16:50:51.975175255+00:00
 ---
 
 # Description
@@ -75,3 +75,12 @@ description on every sync pass (prior history of that being
 destructive); can a bead carry a screenshot reference; is the
 bead<->issue link reliably bidirectional; does a subset/single-issue
 filter exist at all today.
+
+
+PART 2 PROGRESS (2026-07-30): team-lead relayed ui-issue-workflow's live-verified findings. Targeted sync already existed (mb github sync <ids>) -- did not rebuild it. Implemented on branch feature/pull-only-local-edit-guard, not yet merged:
+1. --pull-only silent-overwrite fix (Gap 1): refuses to discard a locally-changed title/description/status, prints what would be discarded, records a conflict, requires --force to override. Regression test added and confirmed to fail pre-fix.
+2. mb github sync --since <cutoff> (Gap 2): RFC3339 or relative duration (24h/2d/90m), composable with explicit IDs.
+3. mb github --token <TOKEN> <subcommand> (Gap 3, the token/bot-attribution flag): scopes GH_TOKEN to this invocation only, no gh auth switch, applies to all github subcommands via one change point.
+4. Separately flagged safety bug (mb create defaulting to prefix "tmp" when config.yaml is missing but real issues already exist): fixed by preferring inference from existing issue files over the directory-name guess in both Storage::open and Storage::init. Regression test added and confirmed to fail pre-fix.
+Screenshot/attachment field (lowest priority) not started.
+Bumping to 0.27.0 (CHANGELOG updated). Full test suite + clippy in progress before opening the PR (feature branch + PR only, no merge, no crates.io -- per standing constraint).

@@ -20,7 +20,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use storage::{is_github_issue_ref, IssueStorageLayout, Storage};
-use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status};
+use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status, SyncSince};
 
 const PRIMARY_STORAGE_DIR: &str = ".minibeads";
 const LEGACY_STORAGE_DIR: &str = ".beads";
@@ -615,6 +615,14 @@ enum Commands {
 
     /// Sync selected minibeads issues with GitHub Issues via gh (minibeads-specific)
     Github {
+        /// GitHub token to use for the underlying `gh` calls made by this invocation only
+        /// (minibeads-specific). Sets `GH_TOKEN` for the spawned `gh` process; does NOT run
+        /// `gh auth switch` and does not touch `gh`'s stored/global auth state, so it's safe
+        /// to use for one-off bot-attributed calls (e.g. GitHub Issue comments/labels) without
+        /// racing other concurrent `gh` users on the same machine. Omit to use whatever account
+        /// `gh` already resolves (its currently logged-in account).
+        #[arg(long, global = true)]
+        token: Option<String>,
         #[command(subcommand)]
         command: GithubCommands,
     },
@@ -948,9 +956,24 @@ enum GithubCommands {
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
-        /// Pull GitHub title/body/status/comments into minibeads without writing anything to GitHub
+        /// Pull GitHub title/body/status/comments into minibeads without writing anything to GitHub.
+        /// If an issue's title/body/status changed locally since the last sync, --pull-only
+        /// refuses to overwrite it (prints the discarded local text and skips) unless --force
+        /// is also given.
         #[arg(long)]
         pull_only: bool,
+        /// With --pull-only, overwrite local title/body/status even if they changed locally
+        /// since the last sync (GitHub wins). Has no effect without --pull-only, since the
+        /// default bidirectional sync already detects and reports genuine conflicts.
+        #[arg(long)]
+        force: bool,
+        /// Only sync issues whose local record changed at/after this time (minibeads-specific).
+        /// Accepts an RFC3339 timestamp (e.g. '2026-07-30T00:00:00Z') or a relative duration
+        /// like '24h', '2d', '90m'. Combines with explicit issue IDs (intersection). Cheap
+        /// incremental mode so a large linked set doesn't need a full walk every time; omit to
+        /// sync everything.
+        #[arg(long)]
+        since: Option<SyncSince>,
         /// Print only the one-line summary
         #[arg(long, conflicts_with = "verbose")]
         quiet: bool,
@@ -2568,11 +2591,18 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        Commands::Github { command } => {
+        Commands::Github { token, command } => {
             let storage = get_storage(mb_beads_dir, db)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
+            }
+
+            // Scope the token to this process's `gh` calls only: no `gh auth switch`, no
+            // change to gh's persistent/global auth state, so concurrent `gh` users on the
+            // same machine are unaffected.
+            if let Some(token) = &token {
+                env::set_var("GH_TOKEN", token);
             }
 
             let report = match command {
@@ -2667,6 +2697,8 @@ fn run() -> Result<()> {
                     repo,
                     dry_run,
                     pull_only,
+                    force,
+                    since,
                     quiet,
                     verbose,
                 } => {
@@ -2677,6 +2709,8 @@ fn run() -> Result<()> {
                         repo.as_deref(),
                         dry_run,
                         pull_only,
+                        force,
+                        since.map(|SyncSince(dt)| dt),
                     )?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);

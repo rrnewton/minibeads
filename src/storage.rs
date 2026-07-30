@@ -175,8 +175,16 @@ impl Storage {
         // Validate and ensure config.yaml exists
         let config_path = beads_dir.join("config.yaml");
         if !config_path.exists() {
-            // Try to infer prefix and create config
-            let prefix = infer_prefix(&beads_dir).unwrap_or_else(|| "bd".to_string());
+            // Prefer inferring the prefix from issue files that already exist in
+            // issues_dir (ground truth -- e.g. this is upstream `bd` data, or a
+            // config.yaml that was lost/deleted): the directory-name guess below
+            // has no relation to a project's real issue IDs and can silently
+            // produce a wrong prefix (e.g. "tmp" for a checkout under /tmp/...).
+            // Only fall back to the directory-name guess, then to "bd", when
+            // there are no existing issues to learn from.
+            let prefix = infer_prefix_from_issues_dir(&issues_dir)
+                .or_else(|| infer_prefix(&beads_dir))
+                .unwrap_or_else(|| "bd".to_string());
             let mut config = HashMap::new();
             config.insert("issue-prefix".to_string(), prefix);
             let config_yaml = serde_yaml::to_string(&config)?;
@@ -222,8 +230,14 @@ impl Storage {
         let issues_dir = beads_dir.join("issues");
         fs::create_dir_all(&issues_dir).context("Failed to create issues directory")?;
 
-        // Determine prefix
+        // Determine prefix: an explicit --prefix wins; otherwise prefer
+        // inferring from issue files that already exist in issues_dir (ground
+        // truth) over the directory-name guess -- see the matching comment in
+        // `open`. `init` usually creates a brand-new, empty issues_dir, but
+        // this keeps both entry points consistent and safe if it's ever
+        // pointed at a directory that already has orphaned issue files.
         let prefix = prefix
+            .or_else(|| infer_prefix_from_issues_dir(&issues_dir))
             .or_else(|| infer_prefix(&beads_dir))
             .unwrap_or_else(|| "bd".to_string());
 
@@ -420,48 +434,7 @@ impl Storage {
     }
 
     fn issue_file_paths(&self) -> Result<Vec<(String, PathBuf)>> {
-        if !self.issues_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut stack = vec![self.issues_dir.clone()];
-        let mut paths = Vec::new();
-        let mut seen = HashSet::new();
-
-        while let Some(dir) = stack.pop() {
-            let entries = fs::read_dir(&dir)
-                .with_context(|| format!("Failed to read issues directory: {}", dir.display()))?;
-
-            for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                let file_type = entry.file_type()?;
-
-                if file_type.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-
-                if !file_type.is_file() || !is_markdown_path(&path) {
-                    continue;
-                }
-
-                let issue_id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("Invalid issue filename: {}", path.display()))?
-                    .to_string();
-
-                if !seen.insert(issue_id.clone()) {
-                    anyhow::bail!("Duplicate issue file found for ID: {}", issue_id);
-                }
-
-                paths.push((issue_id, path));
-            }
-        }
-
-        paths.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(paths)
+        issue_file_paths_in(&self.issues_dir)
     }
 
     /// Get hash encoding format from config-minibeads.yaml
@@ -496,19 +469,7 @@ impl Storage {
 
     /// Infer prefix from existing issues in the filesystem
     fn infer_prefix_from_issues(&self) -> Result<String> {
-        let mut prefixes = HashMap::new();
-        for (issue_id, _) in self.issue_file_paths()? {
-            if let Some(pos) = issue_id.rfind('-') {
-                let prefix = &issue_id[..pos];
-                *prefixes.entry(prefix.to_string()).or_insert(0) += 1;
-            }
-        }
-
-        // Return most common prefix, or "bd" if none found
-        prefixes
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(prefix, _)| prefix)
+        infer_prefix_from_issues_dir(&self.issues_dir)
             .ok_or_else(|| anyhow::anyhow!("No issues found to infer prefix"))
     }
 
@@ -2910,7 +2871,79 @@ impl Storage {
     }
 }
 
-/// Infer prefix from the parent directory name
+/// Recursively walk `issues_dir` (flat or sharded layout) and return every
+/// issue's ID and path. Free function so it can be used before a `Storage` is
+/// fully constructed (see `infer_prefix_from_issues_dir`, used while
+/// bootstrapping `config.yaml`); `Storage::issue_file_paths` delegates here.
+fn issue_file_paths_in(issues_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    if !issues_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut stack = vec![issues_dir.to_path_buf()];
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .with_context(|| format!("Failed to read issues directory: {}", dir.display()))?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !file_type.is_file() || !is_markdown_path(&path) {
+                continue;
+            }
+
+            let issue_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid issue filename: {}", path.display()))?
+                .to_string();
+
+            if !seen.insert(issue_id.clone()) {
+                anyhow::bail!("Duplicate issue file found for ID: {}", issue_id);
+            }
+
+            paths.push((issue_id, path));
+        }
+    }
+
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(paths)
+}
+
+/// Infer the dominant issue prefix from issue files already sitting in
+/// `issues_dir` (e.g. `ds-42.md`, `ds-43.md` -> `"ds"`). This is GROUND TRUTH
+/// when issues already exist and must be preferred over guessing from the
+/// directory name: opening or initializing a store whose config.yaml is
+/// missing (but whose issues/ directory already has real issues in it, e.g.
+/// upstream `bd` data being read for the first time, or a deleted/lost
+/// config.yaml) must not silently invent a prefix that ignores the issues
+/// that are right there. Returns `None` only when there is nothing to infer
+/// from (empty or newly-created issues/ directory).
+fn infer_prefix_from_issues_dir(issues_dir: &Path) -> Option<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (issue_id, _) in issue_file_paths_in(issues_dir).ok()? {
+        if let Some(pos) = issue_id.rfind('-') {
+            *counts.entry(issue_id[..pos].to_string()).or_insert(0) += 1;
+        }
+    }
+    counts.into_iter().max_by_key(|(_, count)| *count).map(|(prefix, _)| prefix)
+}
+
+/// Infer prefix from the parent directory name. Only a fallback: prefer
+/// [`infer_prefix_from_issues_dir`] whenever real issues already exist, since
+/// this directory-name guess has no relation to a project's actual issue IDs
+/// and can produce a silently-wrong prefix (e.g. "tmp" for a store opened
+/// from a path under `/tmp/...`).
 fn infer_prefix(beads_dir: &Path) -> Option<String> {
     let parent = beads_dir.parent()?.parent()?;
     let name = parent.file_name()?.to_str()?;
@@ -3355,6 +3388,70 @@ mod config_compat_tests {
 
         let storage = Storage::open(beads_dir).expect("open must tolerate commented prefix");
         assert_eq!(storage.get_prefix().unwrap(), "acme");
+    }
+
+    /// Regression test: opening a store whose config.yaml is MISSING entirely
+    /// (e.g. upstream `bd` data seen for the first time, or a lost/deleted
+    /// config.yaml) must infer the prefix from issue files that already exist,
+    /// not from the parent directory's name. A directory-name guess is
+    /// unrelated to a project's real issue IDs and can be actively misleading
+    /// -- e.g. a checkout living under a path containing "tmp" would silently
+    /// bootstrap `issue-prefix: tmp` and every later `mb create` would then
+    /// use that wrong prefix, ignoring the `ds-*` issues sitting right there.
+    #[test]
+    fn open_infers_prefix_from_existing_issues_over_directory_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate a checkout living under a path whose grandparent-of-.beads
+        // directory is named "tmp" -- exactly the directory-name heuristic's
+        // input (see `infer_prefix`) -- so it would mislead it into guessing
+        // "tmp" as the prefix.
+        let beads_dir = tmp.path().join("tmp").join("checkout").join(".beads");
+        let issues_dir = beads_dir.join("issues");
+        fs::create_dir_all(&issues_dir).unwrap();
+
+        // No config.yaml at all yet -- but real issues already exist.
+        fs::write(issues_dir.join("ds-1.md"), "placeholder").unwrap();
+        fs::write(issues_dir.join("ds-2.md"), "placeholder").unwrap();
+        fs::write(issues_dir.join("ds-3.md"), "placeholder").unwrap();
+
+        let storage = Storage::open(beads_dir.clone()).expect("open must succeed");
+        assert_eq!(
+            storage.get_prefix().unwrap(),
+            "ds",
+            "must infer the prefix from the existing ds-* issues, not the 'tmp' directory name"
+        );
+
+        // And the inferred prefix must have actually been written into
+        // config.yaml, not just returned transiently.
+        let config_yaml = fs::read_to_string(beads_dir.join("config.yaml")).unwrap();
+        assert!(
+            config_yaml.contains("ds"),
+            "config.yaml should record the inferred prefix: {config_yaml}"
+        );
+        assert!(
+            !config_yaml.contains("tmp"),
+            "config.yaml must not fall back to the misleading directory name: {config_yaml}"
+        );
+    }
+
+    /// Companion case: with NO existing issues to learn from, falling back to
+    /// the directory-name guess (then "bd") is still the reasonable default --
+    /// this fix must not regress that.
+    #[test]
+    fn open_falls_back_to_directory_name_when_no_issues_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `infer_prefix`'s directory-name guess reads the grandparent-of-.beads
+        // directory name (see the `open`/`init` bootstrap: it's the fallback
+        // consulted only when there are no existing issues to learn from).
+        let beads_dir = tmp
+            .path()
+            .join("acme-project")
+            .join("checkout")
+            .join(".beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+
+        let storage = Storage::open(beads_dir).expect("open must succeed");
+        assert_eq!(storage.get_prefix().unwrap(), "acme-project");
     }
 }
 

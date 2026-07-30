@@ -64,6 +64,34 @@ impl std::str::FromStr for ClaimDuration {
     }
 }
 
+/// A `--since` cutoff for incremental GitHub sync (minibeads-specific): either an
+/// absolute RFC3339 timestamp, or a compact relative duration in the same form as
+/// [`ClaimDuration`] (`24h`, `2d`, `90m`, or a bare number of hours), meaning "now
+/// minus that long". Lets `mb github sync` walk only recently-changed issues
+/// instead of the whole linked set, which matters once that set is in the
+/// hundreds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncSince(pub DateTime<Utc>);
+
+impl std::str::FromStr for SyncSince {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+            return Ok(SyncSince(dt.with_timezone(&Utc)));
+        }
+        match trimmed.parse::<ClaimDuration>() {
+            Ok(ClaimDuration(duration)) => Ok(SyncSince(Utc::now() - duration)),
+            Err(_) => anyhow::bail!(
+                "Invalid --since value '{}'. Use an RFC3339 timestamp (e.g. 2026-07-30T00:00:00Z) \
+                 or a relative duration like '24h', '2d', '90m'.",
+                s
+            ),
+        }
+    }
+}
+
 /// Issue status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -598,5 +626,42 @@ mod claim_type_tests {
         // Assignee but no expiry => held indefinitely.
         issue.claimed_until = None;
         assert!(issue.is_actively_claimed(now));
+    }
+}
+
+#[cfg(test)]
+mod sync_since_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_absolute_rfc3339_timestamp() {
+        let SyncSince(dt) = SyncSince::from_str("2026-07-01T12:00:00Z").unwrap();
+        assert_eq!(dt, DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z").unwrap());
+    }
+
+    #[test]
+    fn parses_relative_duration_like_claim_duration() {
+        let before = Utc::now() - Duration::hours(24);
+        let SyncSince(dt) = SyncSince::from_str("24h").unwrap();
+        let after = Utc::now() - Duration::hours(24);
+        assert!(
+            dt >= before - Duration::seconds(2) && dt <= after + Duration::seconds(2),
+            "expected ~now-24h, got {dt}"
+        );
+
+        // Bare number is hours, same convention as ClaimDuration.
+        let SyncSince(dt) = SyncSince::from_str("2").unwrap();
+        assert!((Utc::now() - dt - Duration::hours(2)).num_seconds().abs() < 2);
+
+        let SyncSince(dt) = SyncSince::from_str("2d").unwrap();
+        assert!((Utc::now() - dt - Duration::days(2)).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn rejects_garbage_since_values() {
+        assert!(SyncSince::from_str("").is_err());
+        assert!(SyncSince::from_str("not-a-time").is_err());
+        assert!(SyncSince::from_str("10y").is_err());
     }
 }

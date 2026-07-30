@@ -6,6 +6,45 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-30
+
+### Fixed
+
+- **`mb github sync --pull-only` no longer silently discards local edits.**
+  Previously, once a sync baseline existed, editing an issue's title/
+  description/status locally (with GitHub unchanged) was silently overwritten
+  on the next `--pull-only` sync -- no merge, no conflict, no warning. It now
+  refuses that overwrite, prints the discarded title/description to stderr,
+  and reports it as a conflict in the sync report (the sync-state baseline is
+  left untouched so the same divergence is reported again until resolved).
+  `--force` is the explicit escape hatch when GitHub should win. The default
+  bidirectional `mb github sync` (no `--pull-only`) already detected and
+  reported this kind of conflict; only the one-directional pull-only mode had
+  the gap.
+- **Opening/initializing a store with no `config.yaml` no longer guesses a
+  potentially bogus issue prefix from the containing directory's name when
+  real issues already exist.** It now infers the prefix from the dominant
+  prefix among existing issue files first (ground truth), falling back to the
+  directory-name guess only when there is nothing to infer from. Previously a
+  checkout living under a path like `/tmp/...` (or any misleadingly-named
+  directory) could silently bootstrap `issue-prefix: tmp` and lock every
+  future `mb create` into that wrong prefix, ignoring real issues (e.g.
+  `ds-*`) sitting right there in `issues/`.
+
+### Added
+
+- **`mb github sync --since <cutoff>`**: restrict a sync to issues whose
+  local record changed at/after the cutoff (an RFC3339 timestamp or a
+  relative duration like `24h`, `2d`, `90m`), composable with explicit issue
+  IDs. Lets a large linked set (hundreds of issues) sync incrementally
+  instead of walking everything every time.
+- **`mb github --token <TOKEN> <subcommand>`**: use a specific GitHub token
+  for this invocation's `gh` calls only (sets `GH_TOKEN` for the spawned `gh`
+  process). Applies to every `mb github` subcommand. Does not run
+  `gh auth switch` and does not touch `gh`'s stored/global auth state, so it's
+  safe to use for one-off bot-attributed calls without racing other
+  concurrent `gh` users on the same machine.
+
 ## [0.26.0] - 2026-07-30
 
 ### Added
