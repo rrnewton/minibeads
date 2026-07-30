@@ -6,6 +6,25 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-30
+
+### Added
+
+- **Sharded issue storage layout** (`issue-storage-layout: sharded` in
+  `config-minibeads.yaml`), an opt-in alternative to the default flat
+  `.minibeads/issues/*.md` layout that avoids putting many thousands of
+  files in one directory. Numeric IDs shard by tens/ones digit
+  (`issues/n/<tens>/<ones>/prefix-123.md`); hash IDs shard by their first
+  two hex characters. New repos stay on the flat layout unless
+  `--mb-issue-layout sharded` is passed to `init`; existing repos are
+  unaffected until migrated.
+- **`mb mb-migrate --to=sharded` / `--to=flat`** moves existing issue files
+  between the two layouts in place (`--dry-run` to preview, reversible in
+  either direction). Every issue lookup checks the configured layout first
+  and then falls back to checking both the flat and sharded paths, so a
+  partially migrated store (or one migrated mid-write) still resolves
+  every issue correctly.
+
 ## [0.25.0] - 2026-07-20
 
 ### Added
