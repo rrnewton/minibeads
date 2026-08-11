@@ -20,7 +20,9 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use storage::{is_github_issue_ref, IssueStorageLayout, Storage};
-use types::{ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status, SyncSince};
+use types::{
+    ClaimDuration, Comment, DependencyType, EditField, Issue, IssueType, Status, SyncSince,
+};
 
 const PRIMARY_STORAGE_DIR: &str = ".minibeads";
 const LEGACY_STORAGE_DIR: &str = ".beads";

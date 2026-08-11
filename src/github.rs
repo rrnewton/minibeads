@@ -1649,13 +1649,29 @@ fn stress_test_adversarial(
             apply_adversarial_mutation(storage, context, step, idx, model, rng)?;
         }
 
-        let report = sync_linked(storage, &issue_ids, Some(context.repo), false, false, false, None)
-            .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
+        let report = sync_linked(
+            storage,
+            &issue_ids,
+            Some(context.repo),
+            false,
+            false,
+            false,
+            None,
+        )
+        .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
             .with_context(|| format!("adversarial convergence failed at round {}", step))?;
 
-        let noop = sync_linked(storage, &issue_ids, Some(context.repo), false, false, false, None)
-            .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
+        let noop = sync_linked(
+            storage,
+            &issue_ids,
+            Some(context.repo),
+            false,
+            false,
+            false,
+            None,
+        )
+        .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
             .with_context(|| format!("adversarial no-op check failed at round {}", step))?;
     }
@@ -3148,10 +3164,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(
-            outcome.deleted_local, 0,
-            "must not delete without --force"
-        );
+        assert_eq!(outcome.deleted_local, 0, "must not delete without --force");
         assert_eq!(outcome.deleted_remote, 0);
         assert_eq!(outcome.skipped_local_deletions.len(), 1);
         assert_eq!(

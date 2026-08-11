@@ -2936,7 +2936,10 @@ fn infer_prefix_from_issues_dir(issues_dir: &Path) -> Option<String> {
             *counts.entry(issue_id[..pos].to_string()).or_insert(0) += 1;
         }
     }
-    counts.into_iter().max_by_key(|(_, count)| *count).map(|(prefix, _)| prefix)
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(prefix, _)| prefix)
 }
 
 /// Infer prefix from the parent directory name. Only a fallback: prefer
