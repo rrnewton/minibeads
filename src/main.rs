@@ -242,6 +242,21 @@ enum Commands {
         #[arg(short, long, default_value = "", allow_hyphen_values = true)]
         description: String,
 
+        /// Read the description from a FILE, or from stdin when given `-`.
+        ///
+        /// Prefer this over `--description` for any multi-line or
+        /// markdown-bearing body. Passing prose as an inline shell argument
+        /// lets the SHELL expand backticks and `$(...)` before minibeads ever
+        /// sees the text, which silently stores a mangled description and
+        /// still exits 0. Reading from a file or stdin removes the shell from
+        /// the path entirely, so there is nothing left to expand.
+        #[arg(
+            long = "description-file",
+            value_name = "PATH",
+            conflicts_with = "description"
+        )]
+        description_file: Option<String>,
+
         /// Design notes
         #[arg(long, allow_hyphen_values = true)]
         design: Option<String>,
@@ -392,6 +407,16 @@ enum Commands {
         /// New description
         #[arg(short, long, allow_hyphen_values = true)]
         description: Option<String>,
+
+        /// Read the new description from a FILE, or from stdin when given `-`.
+        /// See `mb create --help` for why this is preferred over passing prose
+        /// as an inline shell argument.
+        #[arg(
+            long = "description-file",
+            value_name = "PATH",
+            conflicts_with = "description"
+        )]
+        description_file: Option<String>,
 
         /// Targeted edit: find this exact text in a field and swap it for
         /// --replace, instead of overwriting the whole field. Safer for agents
@@ -1479,6 +1504,54 @@ fn print_dependency_tree(node: &types::TreeNode, depth: usize, prefix: &str, is_
     }
 }
 
+/// Resolve an issue body from either an inline argument or a file/stdin.
+///
+/// `--description-file -` reads stdin. This exists because passing prose as an
+/// inline shell argument lets the SHELL expand backticks and `$(...)` before
+/// minibeads receives it: the command then stores a silently truncated body and
+/// exits 0. minibeads cannot detect that -- by the time the string arrives it is
+/// already valid and already wrong -- so the only real fix is to keep the shell
+/// out of the path. Four separate agents hit that footgun in a single day, all
+/// of whom knew the rule, because this safe path did not exist.
+fn resolve_body(inline: Option<String>, from_file: Option<String>) -> Result<Option<String>> {
+    match from_file {
+        None => Ok(inline),
+        Some(path) => {
+            use std::io::Read;
+            let text = if path == "-" {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .context("Failed to read description from stdin")?;
+                buf
+            } else {
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read description from {path}"))?
+            };
+            Ok(Some(text))
+        }
+    }
+}
+
+/// Report what was actually STORED, not merely that the write succeeded.
+///
+/// The character count is the load-bearing part: a body mangled by shell
+/// expansion comes back conspicuously short, and a count survives being piped
+/// through `head`/`tail` in a way a multi-line echo does not.
+fn report_stored_body(field: &str, body: &str) {
+    let chars = body.chars().count();
+    let preview: String = body
+        .chars()
+        .take(140)
+        .collect::<String>()
+        .replace('\n', " ");
+    let ellipsis = if chars > 140 { " ..." } else { "" };
+    println!("  stored {field}: {chars} characters");
+    if chars > 0 {
+        println!("  begins: {preview}{ellipsis}");
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {:#}", e);
@@ -1661,6 +1734,7 @@ fn run() -> Result<()> {
             priority,
             issue_type,
             description,
+            description_file,
             design,
             acceptance,
             assignee,
@@ -1748,9 +1822,13 @@ fn run() -> Result<()> {
             let mut all_labels = label;
             all_labels.extend(split_label_args(labels));
 
+            // Prefer a file/stdin body when given; the shell never touches it.
+            let description =
+                resolve_body(Some(description), description_file)?.unwrap_or_default();
+
             let issue = storage.create_issue(
                 actual_title,
-                description,
+                description.clone(),
                 design,
                 acceptance,
                 priority,
@@ -1766,6 +1844,8 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&issue)?);
             } else if !silent {
                 println!("Created issue: {}", issue.id);
+                // Report what was STORED, not merely that the write succeeded.
+                report_stored_body("description", &description);
             }
             Ok(())
         }
@@ -1937,6 +2017,7 @@ fn run() -> Result<()> {
             unassign,
             title,
             description,
+            description_file,
             search,
             replace,
             search_field,
@@ -2007,6 +2088,8 @@ fn run() -> Result<()> {
             }
 
             let mut updates = HashMap::new();
+            // Retained so the success output can report what was STORED.
+            let mut stored_description: Option<String> = None;
             if let Some(s) = status {
                 updates.insert("status".to_string(), s.to_string());
             }
@@ -2022,7 +2105,10 @@ fn run() -> Result<()> {
             if let Some(t) = title {
                 updates.insert("title".to_string(), t);
             }
+            // Prefer a file/stdin body when given; the shell never touches it.
+            let description = resolve_body(description, description_file)?;
             if let Some(d) = description {
+                stored_description = Some(d.clone());
                 updates.insert("description".to_string(), d);
             }
             if let Some(d) = design {
@@ -2069,6 +2155,10 @@ fn run() -> Result<()> {
                         print_claim_result(issue);
                     } else {
                         println!("Updated issue: {}", issue.id);
+                        // Report what was STORED, not merely that it succeeded.
+                        if let Some(body) = stored_description.as_deref() {
+                            report_stored_body("description", body);
+                        }
                     }
                 }
             }
@@ -3549,4 +3639,59 @@ Ready to start!
 Run mb create "My first issue" to create your first issue.
 "#
     );
+}
+
+#[cfg(test)]
+mod body_input_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Inline stays inline when no file is given.
+    #[test]
+    fn inline_body_passes_through() {
+        let got = resolve_body(Some("inline".to_string()), None).unwrap();
+        assert_eq!(got.as_deref(), Some("inline"));
+    }
+
+    /// A file body is read verbatim -- INCLUDING backticks and $(...), which is
+    /// the entire point: nothing between the file and the store can expand them.
+    #[test]
+    fn file_body_preserves_shell_metacharacters() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let raw = "so both `echo SWALLOWED` and a bare $(echo GONE) survive";
+        write!(f, "{raw}").unwrap();
+        let got = resolve_body(None, Some(f.path().display().to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, raw, "file body must be byte-identical");
+        assert!(got.contains('`'), "backticks must survive: {got}");
+        assert!(got.contains("$("), "dollar-parens must survive: {got}");
+    }
+
+    /// A missing file is a loud error, never an empty body. An empty body would
+    /// be a successful write of wrong content -- the exact failure mode this
+    /// whole feature exists to remove.
+    #[test]
+    fn missing_file_errors_rather_than_storing_empty() {
+        let err = resolve_body(None, Some("/nonexistent/body.md".to_string()));
+        assert!(
+            err.is_err(),
+            "missing file must error, not yield an empty body"
+        );
+    }
+
+    /// The file wins when both are somehow present. Clap rejects the
+    /// combination at parse time, so this pins the library-level behaviour too.
+    #[test]
+    fn file_takes_precedence_over_inline() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "from file").unwrap();
+        let got = resolve_body(
+            Some("from inline".to_string()),
+            Some(f.path().display().to_string()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(got, "from file");
+    }
 }
