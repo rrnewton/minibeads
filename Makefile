@@ -58,7 +58,7 @@ clean:
 # Install binary to ~/.local/bin
 install: release
 	mkdir -p ~/.local/bin
-	cp target/release/bd ~/.local/bin/
+	cp target/release/mb ~/.local/bin/
 
 # Show help
 help:

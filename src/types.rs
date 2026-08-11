@@ -344,6 +344,15 @@ impl std::str::FromStr for DependencyType {
 /// Dependency representation for JSON output (MCP compatibility)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dependency {
+    /// The issue this one depends on.
+    ///
+    /// Upstream beads (steveyegge/beads) names this field `depends_on_id` and
+    /// ships extra metadata alongside it (`issue_id`, `created_at`,
+    /// `created_by`). The alias accepts that spelling on READ while we keep
+    /// emitting `id`, and serde already ignores the extra fields, so an
+    /// upstream database imports without a bespoke parallel type. Without the
+    /// alias the import fails outright with `missing field \`id\``.
+    #[serde(alias = "depends_on_id")]
     pub id: String,
     #[serde(rename = "type")]
     pub dep_type: String,
@@ -637,7 +646,10 @@ mod sync_since_tests {
     #[test]
     fn parses_absolute_rfc3339_timestamp() {
         let SyncSince(dt) = SyncSince::from_str("2026-07-01T12:00:00Z").unwrap();
-        assert_eq!(dt, DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z").unwrap());
+        assert_eq!(
+            dt,
+            DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z").unwrap()
+        );
     }
 
     #[test]
@@ -663,5 +675,36 @@ mod sync_since_tests {
         assert!(SyncSince::from_str("").is_err());
         assert!(SyncSince::from_str("not-a-time").is_err());
         assert!(SyncSince::from_str("10y").is_err());
+    }
+}
+
+#[cfg(test)]
+mod upstream_import_compat {
+    use super::*;
+
+    /// Upstream beads emits `depends_on_id` plus metadata we do not model.
+    /// Before the alias this failed with `missing field \`id\``, so importing
+    /// an upstream database was impossible rather than merely lossy.
+    #[test]
+    fn upstream_shaped_dependency_deserializes() {
+        let json = r#"{"issue_id":"a","depends_on_id":"b","type":"blocks",
+                       "created_at":"2025-11-23T00:00:00Z","created_by":"someone"}"#;
+        let dep: Dependency = serde_json::from_str(json).expect("upstream dependency");
+        assert_eq!(dep.id, "b", "depends_on_id must map onto id");
+        assert_eq!(dep.dep_type, "blocks");
+    }
+
+    /// Our own spelling must keep working, and we must keep EMITTING `id`.
+    #[test]
+    fn native_dependency_round_trips_as_id() {
+        let json = r#"{"id":"b","type":"related"}"#;
+        let dep: Dependency = serde_json::from_str(json).expect("native dependency");
+        assert_eq!(dep.id, "b");
+        let out = serde_json::to_string(&dep).expect("serialize");
+        assert!(
+            out.contains("\"id\""),
+            "must serialize as id, not depends_on_id: {out}"
+        );
+        assert!(!out.contains("depends_on_id"), "{out}");
     }
 }
