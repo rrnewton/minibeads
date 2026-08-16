@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct Storage {
@@ -433,6 +434,32 @@ impl Storage {
         Ok(())
     }
 
+    /// Write a newly-created issue without ever replacing an existing file.
+    ///
+    /// ID allocation can observe stale or otherwise unexpected state. A
+    /// normal `fs::write` would then replace an unrelated issue and let the
+    /// caller print a fabricated "Created issue" success. `create_new(true)`
+    /// makes that collision an explicit error instead.
+    fn write_new_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create issue directory: {}", parent.display())
+            })?;
+        }
+        let markdown = issue_to_markdown(issue)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("Failed to create issue file: {}", path.display()))?;
+        if let Err(error) = file.write_all(markdown.as_bytes()) {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(error).context("Failed to write newly-created issue file");
+        }
+        Ok(())
+    }
+
     fn issue_file_paths(&self) -> Result<Vec<(String, PathBuf)>> {
         issue_file_paths_in(&self.issues_dir)
     }
@@ -572,7 +599,7 @@ impl Storage {
 
         // Write to file
         let issue_path = self.configured_issue_path(&issue_id)?;
-        self.write_issue_to_path(&issue_path, &issue)?;
+        self.write_new_issue_to_path(&issue_path, &issue)?;
 
         Ok(issue)
     }
@@ -3265,6 +3292,62 @@ fn upsert_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result
         .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod create_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_create_id_fails_without_overwriting_existing_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let beads_dir = tmp.path().join(".beads");
+        let storage = Storage::init(
+            beads_dir.clone(),
+            Some("demo".to_string()),
+            false,
+            IssueStorageLayout::Flat,
+        )
+        .unwrap();
+
+        let original = storage
+            .create_issue(
+                "Existing epic".to_string(),
+                "Keep this issue unchanged.".to_string(),
+                None,
+                None,
+                0,
+                IssueType::Epic,
+                None,
+                Vec::new(),
+                None,
+                Some("demo-2".to_string()),
+                Vec::new(),
+            )
+            .unwrap();
+        let original_markdown = fs::read_to_string(beads_dir.join("issues/demo-2.md")).unwrap();
+
+        let result = storage.create_issue(
+            "Accidental replacement".to_string(),
+            String::new(),
+            None,
+            None,
+            2,
+            IssueType::Task,
+            None,
+            Vec::new(),
+            None,
+            Some(original.id.clone()),
+            Vec::new(),
+        );
+
+        assert!(result.is_err(), "duplicate creation must fail loudly");
+        assert_eq!(
+            fs::read_to_string(beads_dir.join("issues/demo-2.md")).unwrap(),
+            original_markdown,
+            "a failed create must preserve the existing issue"
+        );
+    }
 }
 
 #[cfg(test)]
