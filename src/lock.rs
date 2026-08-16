@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -75,13 +76,35 @@ fn try_acquire_lock(lock_path: &Path, pid: u32) -> Result<()> {
                 fs::remove_file(lock_path).context("Failed to remove stale lock")?;
             }
         } else {
-            // Invalid lock file - remove it
-            fs::remove_file(lock_path).context("Failed to remove invalid lock")?;
+            // A newly-created lock is briefly empty while its owner writes
+            // its PID. Treat invalid content as contention rather than
+            // deleting another process's just-created lock. The retry loop
+            // will observe the completed PID write; if the owner died before
+            // writing, we fail loudly instead of risking an unlocked write.
+            anyhow::bail!("Lock file is being initialized or is invalid");
         }
     }
 
-    // Create lock file with our PID
-    fs::write(lock_path, pid.to_string()).context("Failed to write lock file")?;
+    // Claim the lock atomically. `exists()` followed by `fs::write()` is a
+    // check-then-act race: concurrent creators can all observe an absent lock,
+    // overwrite one another's PID, and then compute the same next issue ID.
+    // `create_new(true)` maps to O_EXCL and makes exactly one contender win.
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_path)
+    {
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "{pid}") {
+                let _ = fs::remove_file(lock_path);
+                return Err(error).context("Failed to write lock file");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("Lock appeared while acquiring it")
+        }
+        Err(error) => return Err(error).context("Failed to create lock file"),
+    }
 
     Ok(())
 }
@@ -141,6 +164,43 @@ mod tests {
 
         drop(lock);
         assert!(!temp_dir.join("minibeads.lock").exists());
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_acquisition_has_one_winner() {
+        let temp_dir = env::temp_dir().join(format!(
+            "beads_concurrent_lock_test_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let lock_path = temp_dir.join("minibeads.lock");
+        let contenders = 32;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(contenders));
+
+        let handles = (0..contenders)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let lock_path = lock_path.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    try_acquire_lock(&lock_path, std::process::id()).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let winners = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1, "lock acquisition must have one winner");
+        assert_eq!(
+            fs::read_to_string(&lock_path).unwrap().trim(),
+            std::process::id().to_string()
+        );
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }
