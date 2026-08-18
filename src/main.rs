@@ -418,6 +418,15 @@ enum Commands {
         )]
         description_file: Option<String>,
 
+        /// Permit changing the description of a GitHub-mirrored issue.
+        ///
+        /// Mirrored descriptions are replaced by a pull-only synchronization.
+        /// Put project analysis in a minibeads comment or a companion local
+        /// issue instead. This explicit override is for intentionally changing
+        /// the upstream GitHub issue body.
+        #[arg(long)]
+        allow_mirrored_description: bool,
+
         /// Targeted edit: find this exact text in a field and swap it for
         /// --replace, instead of overwriting the whole field. Safer for agents
         /// than rewriting a long description wholesale. By default the text must
@@ -1533,6 +1542,62 @@ fn resolve_body(inline: Option<String>, from_file: Option<String>) -> Result<Opt
     }
 }
 
+/// Reject a local description edit that a GitHub mirror can later replace.
+///
+/// A linked issue's description is the mirrored GitHub issue body, not a safe
+/// place for local implementation notes. Requiring an explicit override makes
+/// intentional upstream-body edits possible while making accidental local-only
+/// notes fail before they are written.
+fn refuse_unacknowledged_mirrored_description_edit(
+    storage: &Storage,
+    issue_ids: &[String],
+    changes_description: bool,
+    allow_mirrored_description: bool,
+) -> Result<()> {
+    let mut issues = Vec::with_capacity(issue_ids.len());
+    for issue_id in issue_ids {
+        issues.push(
+            storage
+                .get_issue(issue_id)?
+                .ok_or_else(|| anyhow::anyhow!("Issue not found: {issue_id}"))?,
+        );
+    }
+    refuse_mirrored_description_edit_for_issues(
+        &issues,
+        changes_description,
+        allow_mirrored_description,
+    )
+}
+
+fn refuse_mirrored_description_edit_for_issues(
+    issues: &[Issue],
+    changes_description: bool,
+    allow_mirrored_description: bool,
+) -> Result<()> {
+    if !changes_description || allow_mirrored_description {
+        return Ok(());
+    }
+
+    let mirrored: Vec<&str> = issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .external_ref
+                .as_deref()
+                .is_some_and(is_github_issue_ref)
+        })
+        .map(|issue| issue.id.as_str())
+        .collect();
+    if mirrored.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "refusing to change mirrored GitHub description(s): {}. Their description is replaced by GitHub synchronization; put local analysis in `mb comment` or a companion local issue. If you intentionally mean to edit the upstream GitHub issue body, rerun with --allow-mirrored-description.",
+        mirrored.join(", ")
+    );
+}
+
 /// Report what was actually STORED, not merely that the write succeeded.
 ///
 /// The character count is the load-bearing part: a body mangled by shell
@@ -2018,6 +2083,7 @@ fn run() -> Result<()> {
             title,
             description,
             description_file,
+            allow_mirrored_description,
             search,
             replace,
             search_field,
@@ -2046,6 +2112,12 @@ fn run() -> Result<()> {
             // --replace and is mutually exclusive with the wholesale field
             // setters and --claim, so this is a self-contained mode.
             if let Some(search) = search {
+                refuse_unacknowledged_mirrored_description_edit(
+                    &storage,
+                    &issue_ids,
+                    search_field == EditField::Description,
+                    allow_mirrored_description,
+                )?;
                 let replace = replace.unwrap_or_default();
                 let mut updated_issues = Vec::new();
                 for issue_id in &issue_ids {
@@ -2072,6 +2144,12 @@ fn run() -> Result<()> {
             // exclusive with --search/--replace, the wholesale field setters, and
             // --claim, so this is a self-contained mode like search/replace.
             if let Some(append) = append {
+                refuse_unacknowledged_mirrored_description_edit(
+                    &storage,
+                    &issue_ids,
+                    search_field == EditField::Description,
+                    allow_mirrored_description,
+                )?;
                 let mut updated_issues = Vec::new();
                 for issue_id in &issue_ids {
                     let issue = storage.append_to_issue(issue_id, search_field, &append)?;
@@ -2107,6 +2185,12 @@ fn run() -> Result<()> {
             }
             // Prefer a file/stdin body when given; the shell never touches it.
             let description = resolve_body(description, description_file)?;
+            refuse_unacknowledged_mirrored_description_edit(
+                &storage,
+                &issue_ids,
+                description.is_some(),
+                allow_mirrored_description,
+            )?;
             if let Some(d) = description {
                 stored_description = Some(d.clone());
                 updates.insert("description".to_string(), d);
@@ -3693,5 +3777,56 @@ mod body_input_tests {
         .unwrap()
         .unwrap();
         assert_eq!(got, "from file");
+    }
+
+    #[test]
+    fn mirrored_description_edit_requires_an_explicit_override() {
+        let mut mirrored = Issue::new(
+            "minibeads-1".to_string(),
+            "Mirrored bug".to_string(),
+            3,
+            IssueType::Bug,
+        );
+        mirrored.external_ref =
+            Some("https://github.com/DeepScryAI/DeepScry_bugs/issues/1".to_string());
+
+        let err = refuse_mirrored_description_edit_for_issues(&[mirrored], true, false)
+            .expect_err("a mirrored description must fail loudly by default");
+        let text = err.to_string();
+        assert!(
+            text.contains("minibeads-1"),
+            "must name the blocked issue: {text}"
+        );
+        assert!(
+            text.contains("mb comment"),
+            "must name the durable alternative: {text}"
+        );
+        assert!(
+            text.contains("--allow-mirrored-description"),
+            "must name the explicit override: {text}"
+        );
+    }
+
+    #[test]
+    fn explicit_override_and_unlinked_description_edits_are_allowed() {
+        let mut mirrored = Issue::new(
+            "minibeads-1".to_string(),
+            "Mirrored bug".to_string(),
+            3,
+            IssueType::Bug,
+        );
+        mirrored.external_ref =
+            Some("https://github.com/DeepScryAI/DeepScry_bugs/issues/1".to_string());
+        let local = Issue::new(
+            "minibeads-2".to_string(),
+            "Local analysis".to_string(),
+            3,
+            IssueType::Task,
+        );
+
+        refuse_mirrored_description_edit_for_issues(&[mirrored], true, true)
+            .expect("explicit override must preserve intentional upstream edits");
+        refuse_mirrored_description_edit_for_issues(&[local], true, false)
+            .expect("unlinked descriptions remain ordinary editable task records");
     }
 }
