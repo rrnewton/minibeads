@@ -1553,6 +1553,7 @@ fn refuse_unacknowledged_mirrored_description_edit(
     issue_ids: &[String],
     changes_description: bool,
     allow_mirrored_description: bool,
+    replacement_external_ref: Option<&str>,
 ) -> Result<()> {
     let mut issues = Vec::with_capacity(issue_ids.len());
     for issue_id in issue_ids {
@@ -1566,6 +1567,7 @@ fn refuse_unacknowledged_mirrored_description_edit(
         &issues,
         changes_description,
         allow_mirrored_description,
+        replacement_external_ref,
     )
 }
 
@@ -1573,18 +1575,21 @@ fn refuse_mirrored_description_edit_for_issues(
     issues: &[Issue],
     changes_description: bool,
     allow_mirrored_description: bool,
+    replacement_external_ref: Option<&str>,
 ) -> Result<()> {
     if !changes_description || allow_mirrored_description {
         return Ok(());
     }
 
+    let will_link_to_github = replacement_external_ref.is_some_and(is_github_issue_ref);
     let mirrored: Vec<&str> = issues
         .iter()
         .filter(|issue| {
-            issue
-                .external_ref
-                .as_deref()
-                .is_some_and(is_github_issue_ref)
+            will_link_to_github
+                || issue
+                    .external_ref
+                    .as_deref()
+                    .is_some_and(is_github_issue_ref)
         })
         .map(|issue| issue.id.as_str())
         .collect();
@@ -2117,6 +2122,7 @@ fn run() -> Result<()> {
                     &issue_ids,
                     search_field == EditField::Description,
                     allow_mirrored_description,
+                    external_ref.as_deref(),
                 )?;
                 let replace = replace.unwrap_or_default();
                 let mut updated_issues = Vec::new();
@@ -2149,6 +2155,7 @@ fn run() -> Result<()> {
                     &issue_ids,
                     search_field == EditField::Description,
                     allow_mirrored_description,
+                    external_ref.as_deref(),
                 )?;
                 let mut updated_issues = Vec::new();
                 for issue_id in &issue_ids {
@@ -2190,6 +2197,7 @@ fn run() -> Result<()> {
                 &issue_ids,
                 description.is_some(),
                 allow_mirrored_description,
+                external_ref.as_deref(),
             )?;
             if let Some(d) = description {
                 stored_description = Some(d.clone());
@@ -3790,7 +3798,7 @@ mod body_input_tests {
         mirrored.external_ref =
             Some("https://github.com/DeepScryAI/DeepScry_bugs/issues/1".to_string());
 
-        let err = refuse_mirrored_description_edit_for_issues(&[mirrored], true, false)
+        let err = refuse_mirrored_description_edit_for_issues(&[mirrored], true, false, None)
             .expect_err("a mirrored description must fail loudly by default");
         let text = err.to_string();
         assert!(
@@ -3824,9 +3832,22 @@ mod body_input_tests {
             IssueType::Task,
         );
 
-        refuse_mirrored_description_edit_for_issues(&[mirrored], true, true)
+        refuse_mirrored_description_edit_for_issues(&[mirrored], true, true, None)
             .expect("explicit override must preserve intentional upstream edits");
-        refuse_mirrored_description_edit_for_issues(&[local], true, false)
-            .expect("unlinked descriptions remain ordinary editable task records");
+        refuse_mirrored_description_edit_for_issues(
+            std::slice::from_ref(&local),
+            true,
+            false,
+            None,
+        )
+        .expect("unlinked descriptions remain ordinary editable task records");
+        let err = refuse_mirrored_description_edit_for_issues(
+            std::slice::from_ref(&local),
+            true,
+            false,
+            Some("https://github.com/DeepScryAI/DeepScry_bugs/issues/2"),
+        )
+        .expect_err("linking and editing in one command must not bypass the guard");
+        assert!(err.to_string().contains("minibeads-2"));
     }
 }
