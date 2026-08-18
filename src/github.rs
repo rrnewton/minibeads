@@ -2313,7 +2313,6 @@ fn update_state_entry(
     remote: &RemoteIssue,
     comments: &[Comment],
 ) {
-    let existing = state.issues.get(&remote.url);
     let synced_local_comment_ids = comments
         .iter()
         .filter(|c| !is_local_marker_comment(c))
@@ -2335,7 +2334,7 @@ fn update_state_entry(
             })
         })
         .collect();
-    let mut next = GithubIssueState {
+    let next = GithubIssueState {
         local_id: issue.id.clone(),
         local_hash: hash_local_issue(issue),
         remote_hash: hash_remote_issue(remote),
@@ -2344,20 +2343,12 @@ fn update_state_entry(
         synced_remote_comment_ids,
         synced_comments,
     };
-    if let Some(previous) = existing {
-        let only_synced_at_would_change = previous.local_id == next.local_id
-            && previous.local_hash == next.local_hash
-            && previous.remote_hash == next.remote_hash
-            && previous.synced_local_comment_ids == next.synced_local_comment_ids
-            && previous.synced_remote_comment_ids == next.synced_remote_comment_ids
-            && previous.synced_comments == next.synced_comments;
-        if only_synced_at_would_change {
-            next.synced_at = previous.synced_at;
-        }
-        if previous == &next {
-            return;
-        }
-    }
+    // `synced_at` is an acknowledgement that this exact local/remote pair was
+    // successfully reconciled.  It must advance even when their hashes did
+    // not change: callers use it to distinguish an incremental window that
+    // skipped an old record from a full sync that actually checked it.  A
+    // conflicted record never reaches this function, so retaining that stale
+    // timestamp continues to make unresolved conflicts visible.
     state.issues.insert(remote.url.clone(), next);
 }
 
@@ -3078,6 +3069,25 @@ mod tests {
                 remote_id: "regular".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn update_state_entry_refreshes_timestamp_for_an_unchanged_reconciliation() {
+        let (_tmp, _storage, issue) = storage_with_issue();
+        let remote = remote_issue(vec![]);
+        let mut state = GithubSyncState::default();
+
+        update_state_entry(&mut state, &issue, &remote, &[]);
+        let first = state.issues.get(&remote.url).unwrap().clone();
+        state.issues.get_mut(&remote.url).unwrap().synced_at =
+            first.synced_at - chrono::Duration::seconds(1);
+
+        update_state_entry(&mut state, &issue, &remote, &[]);
+        let refreshed = state.issues.get(&remote.url).unwrap();
+
+        assert_eq!(refreshed.local_hash, first.local_hash);
+        assert_eq!(refreshed.remote_hash, first.remote_hash);
+        assert!(refreshed.synced_at > first.synced_at - chrono::Duration::seconds(1));
     }
 
     #[cfg(unix)]
