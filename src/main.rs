@@ -1598,7 +1598,7 @@ fn refuse_mirrored_description_edit_for_issues(
     }
 
     anyhow::bail!(
-        "refusing to change mirrored GitHub description(s): {}. Their description is replaced by GitHub synchronization; put local analysis in `mb comment` or a companion local issue. If you intentionally mean to edit the upstream GitHub issue body, rerun with --allow-mirrored-description.",
+        "refusing to change mirrored GitHub description(s): {}. Their description is replaced by GitHub synchronization; put local analysis in `mb comments add` or a companion local issue. If you intentionally mean to edit the upstream GitHub issue body, rerun with --allow-mirrored-description.",
         mirrored.join(", ")
     );
 }
@@ -3806,7 +3806,7 @@ mod body_input_tests {
             "must name the blocked issue: {text}"
         );
         assert!(
-            text.contains("mb comment"),
+            text.contains("mb comments add"),
             "must name the durable alternative: {text}"
         );
         assert!(
