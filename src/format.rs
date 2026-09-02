@@ -213,13 +213,16 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
     let mut current_content = String::new();
 
     for line in body.lines() {
-        let trimmed = line.trim();
-
-        // Check if this is a top-level header
-        if let Some(header) = trimmed.strip_prefix("# ") {
+        // Check if this is a top-level header. Only column-0 "# " lines count:
+        // `sanitize_section_content` escapes any column-0 "# " inside section
+        // content to "## " at write time, so an INDENTED "# ..." line (e.g. a
+        // shell comment in an indented code block) is body content, never a
+        // header. Trimming before this check used to eat such lines as unknown
+        // section headers and silently drop everything after them.
+        if let Some(header) = line.strip_prefix("# ").map(str::trim) {
             // Save previous section
             if !current_section.is_empty() {
-                let content = current_content.trim().to_string();
+                let content = trim_blank_edge_lines(&current_content).to_string();
                 match current_section {
                     "Description" => description = content,
                     "Design" => design = content,
@@ -243,7 +246,7 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
 
     // Save last section
     if !current_section.is_empty() {
-        let content = current_content.trim().to_string();
+        let content = trim_blank_edge_lines(&current_content).to_string();
         match current_section {
             "Description" => description = content,
             "Design" => design = content,
@@ -254,6 +257,32 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
     }
 
     (description, design, acceptance_criteria, notes)
+}
+
+/// Trim leading/trailing BLANK lines (empty or whitespace-only) from section
+/// content without touching the indentation of the content itself. A plain
+/// `str::trim` here would strip the leading whitespace of an indented first
+/// line (e.g. the opening line of an indented code block), which the next
+/// write would then mis-escape as a top-level header.
+fn trim_blank_edge_lines(content: &str) -> &str {
+    let mut s = content;
+    while let Some(i) = s.find('\n') {
+        if !s[..i].trim().is_empty() {
+            break;
+        }
+        s = &s[i + 1..];
+    }
+    while let Some(i) = s.rfind('\n') {
+        if !s[i + 1..].trim().is_empty() {
+            break;
+        }
+        s = &s[..i];
+    }
+    if s.trim().is_empty() {
+        ""
+    } else {
+        s
+    }
 }
 
 /// Parse a timestamp string
@@ -345,6 +374,133 @@ mod tests {
         assert!(!markdown.contains("claimed_at"));
         assert!(!markdown.contains("claimed_until"));
         assert!(!markdown.contains("assignee"));
+    }
+
+    #[test]
+    fn test_indented_code_block_survives_roundtrip() {
+        // Regression test for the mb-migrate description-truncation bug:
+        // an indented "# ..." line (a shell/Python comment inside an
+        // indented code block) was mistaken for a top-level section header,
+        // and everything from that line onward was silently dropped the
+        // next time the issue was parsed and rewritten (e.g. by
+        // `mb mb-migrate --to numeric`).
+        let mut issue = Issue::new(
+            "test-1".to_string(),
+            "Trunc".to_string(),
+            2,
+            IssueType::Task,
+        );
+        issue.description = "A\n    # x\nB".to_string();
+
+        let markdown = issue_to_markdown(&issue).unwrap();
+        let parsed = markdown_to_issue("test-1", &markdown).unwrap();
+        assert_eq!(parsed.description, issue.description);
+    }
+
+    #[test]
+    fn test_adversarial_descriptions_roundtrip() {
+        // (input, expected after one write->parse cycle). `expected` differs
+        // from `input` only where the format documents a normalization:
+        // column-0 "# " lines are escaped to "## " by
+        // sanitize_section_content, and leading/trailing blank lines are
+        // trimmed by parse_sections. Nothing may ever be dropped or rerouted
+        // to another field.
+        let cases: Vec<(&str, &str)> = vec![
+            // Indented code block, 4-space and 1-space indents
+            (
+                "Before\n\n    # comment in code\n    make install\n\nAfter",
+                "Before\n\n    # comment in code\n    make install\n\nAfter",
+            ),
+            (" # one-space indent\nrest", " # one-space indent\nrest"),
+            // Description STARTING with an indented code-block comment: the
+            // first line's indentation must survive (a bare trim would turn
+            // it into a column-0 "# " line and corrupt it on the next write).
+            (
+                "    # first line indented\n    cmd\nrest",
+                "    # first line indented\n    cmd\nrest",
+            ),
+            // Fenced code block: indented comment, shebang, no-space hash
+            (
+                "```sh\n  # comment\n#!/bin/bash\n#nospace\n```\ntail",
+                "```sh\n  # comment\n#!/bin/bash\n#nospace\n```\ntail",
+            ),
+            // Fenced block with a column-0 "# " line: documented escape to
+            // "## ", but nothing after it may be lost.
+            (
+                "```sh\n# fenced comment\nmake\n```\ntail",
+                "```sh\n## fenced comment\nmake\n```\ntail",
+            ),
+            // Indented line resembling a KNOWN section header: must stay in
+            // the description, not reroute following content into Notes.
+            (
+                "intro\n    # Notes\nstill description",
+                "intro\n    # Notes\nstill description",
+            ),
+            // Lines resembling frontmatter keys and a document separator
+            (
+                "title: fake\nstatus: open\n---\npriority: 9",
+                "title: fake\nstatus: open\n---\npriority: 9",
+            ),
+            // An H2 that resembles a section header is not a boundary
+            (
+                "## Design\nnot the design section",
+                "## Design\nnot the design section",
+            ),
+            // Trailing blank lines: trimmed, nothing else lost
+            ("A\nB\n\n\n", "A\nB"),
+        ];
+
+        for (input, expected) in cases {
+            let mut issue = Issue::new(
+                "test-1".to_string(),
+                "Adversarial".to_string(),
+                2,
+                IssueType::Task,
+            );
+            issue.description = input.to_string();
+            issue.notes = "notes stay put".to_string();
+
+            let markdown = issue_to_markdown(&issue).unwrap();
+            let parsed = markdown_to_issue("test-1", &markdown).unwrap();
+            assert_eq!(
+                parsed.description, expected,
+                "description round-trip for {:?}",
+                input
+            );
+            assert_eq!(parsed.notes, "notes stay put", "notes leaked for {:?}", input);
+
+            // A second cycle must be a fixpoint: nothing drifts further.
+            let markdown2 = issue_to_markdown(&parsed).unwrap();
+            let parsed2 = markdown_to_issue("test-1", &markdown2).unwrap();
+            assert_eq!(
+                parsed2.description, expected,
+                "round-trip not stable for {:?}",
+                input
+            );
+            assert_eq!(parsed2.notes, "notes stay put");
+        }
+    }
+
+    #[test]
+    fn test_all_sections_hold_indented_code_blocks() {
+        let body = "text\n    # comment\n    cmd --flag\nmore text";
+        let mut issue = Issue::new(
+            "test-1".to_string(),
+            "Sections".to_string(),
+            2,
+            IssueType::Task,
+        );
+        issue.description = body.to_string();
+        issue.design = body.to_string();
+        issue.acceptance_criteria = body.to_string();
+        issue.notes = body.to_string();
+
+        let markdown = issue_to_markdown(&issue).unwrap();
+        let parsed = markdown_to_issue("test-1", &markdown).unwrap();
+        assert_eq!(parsed.description, body);
+        assert_eq!(parsed.design, body);
+        assert_eq!(parsed.acceptance_criteria, body);
+        assert_eq!(parsed.notes, body);
     }
 
     #[test]
