@@ -203,7 +203,7 @@ impl GithubStore {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn new_with_program(repo: Option<&str>, program: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(GithubStoreInner {
@@ -2222,6 +2222,12 @@ async fn reconcile_deleted_comments(
     let Some(state) = old_state else {
         return Ok(outcome);
     };
+    anyhow::ensure!(
+        state.local_id == issue.id,
+        "GitHub comment ancestry belongs to {}, not {}; refusing deletion",
+        state.local_id,
+        issue.id
+    );
     if state.synced_comments.is_empty() {
         return Ok(outcome);
     }
@@ -2869,7 +2875,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn state_with_pair(
         issue: &Issue,
         remote: &RemoteIssue,
@@ -2936,6 +2941,58 @@ mod tests {
             )
             .unwrap();
         (tmp, storage, issue)
+    }
+
+    #[test]
+    fn renamed_comments_are_preserved_without_a_remote_delete() {
+        let (_temp, storage, issue) = storage_with_issue();
+        let mut remote = remote_issue(vec![remote_comment("101", "keep comment")]);
+        let comment = imported_comment(&issue, "101", "keep comment");
+        storage
+            .upsert_comments(&issue.id, vec![comment.clone()])
+            .unwrap();
+        let mut state = GithubSyncState::default();
+        state.issues.insert(
+            remote.url.clone(),
+            state_with_pair(&issue, &remote, &comment.id, "101"),
+        );
+        save_state(&storage.get_beads_dir(), &state).unwrap();
+        storage.rename_issue(&issue.id, "renamed-1", false).unwrap();
+        let renamed = storage.get_issue("renamed-1").unwrap().unwrap();
+        let state = load_state(&storage.get_beads_dir()).unwrap();
+        let store = GithubStore::new_with_program(None, "must-not-execute-gh");
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reconcile_deleted_comments(
+                &storage,
+                &renamed,
+                &store.issue(&remote.url),
+                &mut remote.clone(),
+                state.issues.get(&remote.url),
+                false,
+                false,
+                false,
+            ))
+            .unwrap();
+        assert_eq!(result.deleted_remote, 0);
+        assert_eq!(result.deleted_local, 0);
+        let mut stale = state.issues.get(&remote.url).unwrap().clone();
+        stale.local_id = issue.id.clone();
+        let url = remote.url.clone();
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reconcile_deleted_comments(
+                &storage,
+                &renamed,
+                &store.issue(&url),
+                &mut remote,
+                Some(&stale),
+                false,
+                false,
+                true,
+            ))
+            .expect_err("stale ownership must be rejected even with force");
+        assert!(error.to_string().contains("ancestry belongs"));
     }
 
     #[test]

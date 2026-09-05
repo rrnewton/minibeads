@@ -146,3 +146,174 @@ fn a_symlink_cannot_redirect_issue_writes_outside_the_database() {
     assert!(storage.get_issue("r-1").is_err());
     assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep this");
 }
+
+fn import_fixture_issues(storage: &Storage, ids: &[&str]) -> Vec<Issue> {
+    let base = chrono::Utc::now() - chrono::Duration::days(1);
+    let issues: Vec<Issue> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut issue = Issue::new(
+                (*id).into(),
+                format!("original {index}"),
+                2,
+                IssueType::Task,
+            );
+            issue.created_at = base + chrono::Duration::seconds(index as i64);
+            issue.updated_at = issue.created_at;
+            issue
+        })
+        .collect();
+    let input = tempfile::NamedTempFile::new().unwrap();
+    let content = issues
+        .iter()
+        .map(|issue| serde_json::to_string(issue).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(input.path(), content).unwrap();
+    let (imported, skipped, errors) = storage.import_from_jsonl(input.path(), true).unwrap();
+    assert_eq!(imported, issues.len());
+    assert_eq!(skipped, 0);
+    assert!(errors.is_empty());
+    issues
+}
+
+#[test]
+fn repacking_swaps_and_cycles_preserves_all_issues_dependencies_and_comments() {
+    use minibeads::types::DependencyType;
+    for layout in [IssueStorageLayout::Flat, IssueStorageLayout::Sharded] {
+        for ids in [vec!["r-2", "r-1"], vec!["r-3", "r-1", "r-2"]] {
+            let (_temp, storage) = fixture(layout);
+            let issues = import_fixture_issues(&storage, &ids);
+            storage
+                .add_dependency(ids[0], ids[1], DependencyType::Blocks)
+                .unwrap();
+            let comment = storage
+                .add_comment(ids[0], "review", "keep this comment")
+                .unwrap();
+            let (_, mapping) = storage.repack_numeric_ids(false, None).unwrap();
+            for original in &issues {
+                let id = mapping.get(&original.id).unwrap_or(&original.id);
+                assert_eq!(
+                    storage.get_issue(id).unwrap().unwrap().title,
+                    original.title
+                );
+            }
+            let new_first = &mapping[ids[0]];
+            let new_second = mapping.get(ids[1]).map(String::as_str).unwrap_or(ids[1]);
+            assert!(storage
+                .get_issue(new_first)
+                .unwrap()
+                .unwrap()
+                .depends_on
+                .contains_key(new_second));
+            let comments = storage.list_comments(new_first).unwrap();
+            assert_eq!(comments.len(), 1);
+            assert_eq!(comments[0].id, comment.id);
+            assert_eq!(&comments[0].issue_id, new_first);
+            let all = minibeads::sync::load_markdown_issues(&storage.get_beads_dir()).unwrap();
+            assert_eq!(all.len(), ids.len());
+        }
+    }
+}
+
+#[test]
+fn every_id_migration_preserves_comment_ownership_ancestry_and_jsonl_ids() {
+    for mode in ["rename", "prefix", "hash", "numeric", "repack"] {
+        let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+        let old_id = if mode == "numeric" { "r-abcd" } else { "r-2" };
+        let originals = import_fixture_issues(&storage, &[old_id]);
+        let comment = storage
+            .add_comment(old_id, "review", "keep my identity")
+            .unwrap();
+        let state = serde_json::json!({"issues": {"https://github.com/review/fixture/issues/1": {
+            "local_id": old_id,
+            "synced_comments": [{"local_id": comment.id, "remote_id": "101"}]
+        }}});
+        fs::write(
+            storage.get_beads_dir().join("github-sync-state.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            storage.get_beads_dir().join("issues.jsonl"),
+            serde_json::to_vec(&originals[0]).unwrap(),
+        )
+        .unwrap();
+        let new_id = match mode {
+            "rename" => {
+                storage.rename_issue(old_id, "r-9", false).unwrap();
+                "r-9".to_owned()
+            }
+            "prefix" => {
+                storage.rename_prefix("new", false, false).unwrap();
+                "new-2".to_owned()
+            }
+            "hash" => storage.migrate_to_hash_ids(false, true).unwrap().1[old_id].clone(),
+            "numeric" => storage.migrate_to_numeric_ids(false, true).unwrap().1[old_id].clone(),
+            _ => storage.repack_numeric_ids(false, None).unwrap().1[old_id].clone(),
+        };
+        let comments = storage.list_comments(&new_id).unwrap();
+        assert_eq!(comments.len(), 1, "{mode}");
+        assert_eq!(comments[0].id, comment.id, "{mode}");
+        assert_eq!(comments[0].issue_id, new_id, "{mode}");
+        assert!(storage.list_comments(old_id).unwrap().is_empty(), "{mode}");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(storage.get_beads_dir().join("github-sync-state.json")).unwrap(),
+        )
+        .unwrap();
+        let ancestry = &state["issues"]["https://github.com/review/fixture/issues/1"];
+        assert_eq!(ancestry["local_id"], new_id, "{mode}");
+        assert_eq!(
+            ancestry["synced_comments"][0]["local_id"], comment.id,
+            "{mode}"
+        );
+        let jsonl =
+            minibeads::sync::load_jsonl_issues(&storage.get_beads_dir().join("issues.jsonl"))
+                .unwrap();
+        assert!(jsonl.contains_key(&new_id), "{mode}");
+        assert!(!jsonl.contains_key(old_id), "{mode}");
+        assert!(!storage
+            .get_beads_dir()
+            .join("minibeads-transaction.json")
+            .exists());
+    }
+}
+
+#[test]
+fn migration_preflight_failure_preserves_sources_and_config() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "keep issue").unwrap();
+    fs::create_dir_all(storage.get_beads_dir().join("comments")).unwrap();
+    fs::write(
+        storage.get_beads_dir().join("comments/new-1.json"),
+        b"orphan comments",
+    )
+    .unwrap();
+    assert!(storage.rename_prefix("new", false, false).is_err());
+    assert_eq!(
+        storage.get_issue("r-1").unwrap().unwrap().title,
+        "keep issue"
+    );
+    assert_eq!(storage.get_prefix().unwrap(), "r");
+    assert_eq!(
+        fs::read(storage.get_beads_dir().join("comments/new-1.json")).unwrap(),
+        b"orphan comments"
+    );
+}
+
+#[test]
+fn repacking_closed_issues_can_swap_their_ids_with_open_issues() {
+    for layout in [IssueStorageLayout::Flat, IssueStorageLayout::Sharded] {
+        let (_temp, storage) = fixture(layout);
+        import_fixture_issues(&storage, &["r-1", "r-2"]);
+        storage.close_issue("r-1", "done").unwrap();
+        storage.repack_numeric_ids(false, Some(2)).unwrap();
+        let open = storage.get_issue("r-1").unwrap().unwrap();
+        let closed = storage.get_issue("r-2").unwrap().unwrap();
+        assert_eq!(open.title, "original 1");
+        assert_eq!(open.status, minibeads::types::Status::Open);
+        assert_eq!(closed.title, "original 0");
+        assert_eq!(closed.status, minibeads::types::Status::Closed);
+    }
+}

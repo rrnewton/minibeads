@@ -26,10 +26,12 @@ impl Lock {
             // Try to create lock file
             match try_acquire_lock(&lock_path, pid) {
                 Ok(()) => {
-                    return Ok(Self {
+                    let lock = Self {
                         lock_path,
                         _pid: pid,
-                    });
+                    };
+                    crate::transaction::recover(beads_dir)?;
+                    return Ok(lock);
                 }
                 Err(e) => {
                     // Check if we've exceeded max backoff time

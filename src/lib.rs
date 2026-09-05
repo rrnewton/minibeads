@@ -10,4 +10,5 @@ pub mod lock;
 mod paths;
 pub mod storage;
 pub mod sync;
+mod transaction;
 pub mod types;
