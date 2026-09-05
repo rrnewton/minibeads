@@ -104,7 +104,7 @@ struct GlobalOpts {
     #[arg(long, global = true, hide = true)]
     profile: bool,
 
-    /// Read-only mode (accepted for upstream bd compatibility)
+    /// Reject modifying commands and disable persistent storage writes
     #[arg(long, global = true, hide = true)]
     readonly: bool,
 
@@ -794,6 +794,62 @@ enum Commands {
         #[arg(long = "closed-issue-start")]
         closed_issue_start: Option<u32>,
     },
+}
+
+impl Commands {
+    /// Keep this exhaustive so every new command must declare its write behavior.
+    fn is_read_only(&self) -> bool {
+        match self {
+            Self::List { .. }
+            | Self::Show { .. }
+            | Self::Children { .. }
+            | Self::Stats
+            | Self::Blocked
+            | Self::Ready { .. }
+            | Self::Quickstart
+            | Self::Version
+            | Self::Migrate { .. } => true,
+            Self::Export {
+                output,
+                mb_output_default,
+                ..
+            } => output.is_none() && !mb_output_default,
+            Self::Dep { command } => match command {
+                DepCommands::List { .. } | DepCommands::Tree { .. } | DepCommands::Cycles => true,
+                DepCommands::Add { .. } | DepCommands::Remove { .. } => false,
+            },
+            Self::Label { command } => match command {
+                LabelCommands::List { .. } | LabelCommands::ListAll => true,
+                LabelCommands::Add { .. } | LabelCommands::Remove { .. } => false,
+            },
+            Self::Config { command } => match command {
+                ConfigCommands::Get { .. } | ConfigCommands::List => true,
+                ConfigCommands::Set { .. } | ConfigCommands::Unset { .. } => false,
+            },
+            Self::Comments { command } => match command {
+                CommentCommands::List { .. } => true,
+                CommentCommands::Add { .. } | CommentCommands::Delete { .. } => false,
+            },
+            Self::Github { command, .. } => match command {
+                GithubCommands::List => true,
+                GithubCommands::Link { .. }
+                | GithubCommands::Publish { .. }
+                | GithubCommands::Import { .. }
+                | GithubCommands::Sync { .. }
+                | GithubCommands::StressTest { .. } => false,
+            },
+            Self::Init { .. }
+            | Self::Create { .. }
+            | Self::Update { .. }
+            | Self::Claim { .. }
+            | Self::Close { .. }
+            | Self::Reopen { .. }
+            | Self::MbRename { .. }
+            | Self::RenamePrefix { .. }
+            | Self::Sync { .. }
+            | Self::MbMigrate { .. } => false,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1737,6 +1793,11 @@ impl IssueFilters<'_> {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let readonly = cli.global_opts.readonly;
+    anyhow::ensure!(
+        !readonly || cli.command.is_read_only(),
+        "--readonly rejects commands that can modify files or remote issues"
+    );
 
     if let Some(directory) = &cli.global_opts.directory {
         env::set_current_dir(directory)
@@ -1744,11 +1805,11 @@ fn run() -> Result<()> {
     }
 
     // Extract fields needed for get_storage before matching on cli.command
-    // This avoids borrowing issues when we try to call get_storage(mb_beads_dir, db) inside match arms
+    // This avoids borrowing issues when we try to call get_storage(mb_beads_dir, db, readonly) inside match arms
     let mb_beads_dir = &cli.global_opts.mb_beads_dir;
     let db = &cli.global_opts.db;
     let json = cli.global_opts.json;
-    let mb_no_cmd_logging = cli.global_opts.mb_no_cmd_logging;
+    let mb_no_cmd_logging = cli.global_opts.mb_no_cmd_logging || readonly;
     let actor = cli.global_opts.actor.clone();
 
     match cli.command {
@@ -1821,7 +1882,7 @@ fn run() -> Result<()> {
             ephemeral: _,
             silent,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -1937,7 +1998,7 @@ fn run() -> Result<()> {
             include_infra: _,
             no_pager: _,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -1994,7 +2055,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Show { issue_ids } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2057,7 +2118,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Children { parent_id } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2108,7 +2169,7 @@ fn run() -> Result<()> {
             claim_for,
             claim_as,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2267,7 +2328,7 @@ fn run() -> Result<()> {
             claim_as,
             force,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2309,7 +2370,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Close { issue_ids, reason } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2337,7 +2398,7 @@ fn run() -> Result<()> {
             issue_ids,
             reason: _,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2368,7 +2429,7 @@ fn run() -> Result<()> {
             repair,
             mb_patch_code,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2427,7 +2488,7 @@ fn run() -> Result<()> {
             dry_run,
             force,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2451,7 +2512,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Dep { command } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2590,7 +2651,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Label { command } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2652,7 +2713,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Config { command } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2719,7 +2780,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Comments { command } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2778,7 +2839,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Github { token, command } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             if !mb_no_cmd_logging {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
@@ -2943,7 +3004,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Stats => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -2970,7 +3031,7 @@ fn run() -> Result<()> {
         }
 
         Commands::Blocked => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -3002,7 +3063,7 @@ fn run() -> Result<()> {
             r#type,
             assignee,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -3055,7 +3116,7 @@ fn run() -> Result<()> {
             dry_run,
             direction,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -3204,7 +3265,7 @@ fn run() -> Result<()> {
             group_priority,
             sort,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -3282,7 +3343,7 @@ fn run() -> Result<()> {
             repack_contiguous,
             closed_issue_start,
         } => {
-            let storage = get_storage(mb_beads_dir, db)?;
+            let storage = get_storage(mb_beads_dir, db, readonly)?;
 
             // Log command after storage is validated
             if !mb_no_cmd_logging {
@@ -3452,7 +3513,11 @@ fn run() -> Result<()> {
     }
 }
 
-fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<Storage> {
+fn get_storage(
+    mb_beads_dir: &Option<PathBuf>,
+    db: &Option<PathBuf>,
+    readonly: bool,
+) -> Result<Storage> {
     // Priority order for determining minibeads directory:
     // 1. --mb-beads-dir flag (preferred, minibeads-specific)
     // 2. --db flag (for upstream compatibility, treated as syntactic sugar for BEADS_DIR)
@@ -3494,7 +3559,12 @@ fn get_storage(mb_beads_dir: &Option<PathBuf>, db: &Option<PathBuf>) -> Result<S
         find_beads_dir()?
     };
 
-    Storage::open(beads_dir).context("Failed to open storage")
+    if readonly {
+        Storage::open_readonly(beads_dir)
+    } else {
+        Storage::open(beads_dir)
+    }
+    .context("Failed to open storage")
 }
 
 fn find_beads_dir() -> Result<PathBuf> {
@@ -3535,11 +3605,27 @@ fn log_command(beads_dir: &Path, args: &[String]) -> Result<()> {
     let log_path = beads_dir.join("command_history.log");
     let timestamp = chrono::Utc::now().to_rfc3339();
 
+    // Redact credentials before formatting arguments. Debug quoting also keeps
+    // embedded newlines from forging another history entry.
+    let mut redact_next = false;
     // Skip the first argument (binary path) and quote each CLI argument
     let command_line = if args.len() > 1 {
         args[1..]
             .iter()
-            .map(|arg| format!("\"{}\"", arg))
+            .map(|arg| {
+                let safe = if redact_next {
+                    redact_next = false;
+                    "[REDACTED]"
+                } else if arg == "--token" {
+                    redact_next = true;
+                    arg.as_str()
+                } else if arg.starts_with("--token=") {
+                    "--token=[REDACTED]"
+                } else {
+                    arg.as_str()
+                };
+                format!("{safe:?}")
+            })
             .collect::<Vec<_>>()
             .join(" ")
     } else {

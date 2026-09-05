@@ -637,3 +637,123 @@ fn conditional_updates_preserve_manual_edits_even_without_a_timestamp_change() {
         changed.description
     );
 }
+
+#[test]
+fn command_history_redacts_both_token_forms() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    for args in [
+        vec!["github", "--token", "dummy-review-token-separated", "list"],
+        vec!["github", "list", "--token=dummy-review-token-equals"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mb"))
+            .arg("--mb-beads-dir")
+            .arg(storage.get_beads_dir())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let history = fs::read_to_string(storage.get_beads_dir().join("command_history.log")).unwrap();
+    assert_eq!(history.lines().count(), 2);
+    assert!(!history.contains("dummy-review-token"));
+    assert_eq!(history.matches("[REDACTED]").count(), 2);
+}
+
+#[test]
+fn readonly_rejects_modifications_before_opening_storage() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "keep").unwrap();
+    let path = storage.get_beads_dir().join("issues/r-1.md");
+    let before = fs::read(&path).unwrap();
+    for args in [
+        vec!["update", "r-1", "--title", "changed"],
+        vec!["create", "new"],
+        vec!["close", "r-1"],
+        vec!["mb-rename", "r-1", "r-2"],
+        vec!["config", "set", "issue-prefix", "changed"],
+        vec!["comments", "add", "r-1", "--body", "new"],
+        vec!["label", "add", "r-1", "new"],
+        vec!["dep", "add", "r-1", "r-2"],
+        vec!["sync"],
+        vec!["github", "publish", "r-1"],
+        vec!["export", "--mb-output-default"],
+    ] {
+        let output = run_cli(&storage, &[vec!["--readonly"], args].concat());
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--readonly"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    let fresh = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mb"))
+        .current_dir(fresh.path())
+        .args(["--readonly", "init"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!fresh.path().join(".minibeads").exists());
+}
+
+#[test]
+fn readonly_reads_do_not_bootstrap_or_log_and_refuse_recovery() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "keep").unwrap();
+    for name in ["config.yaml", "config-minibeads.yaml", ".gitignore"] {
+        fs::remove_file(storage.get_beads_dir().join(name)).unwrap();
+    }
+    for args in [
+        vec!["show", "r-1"],
+        vec!["list"],
+        vec!["ready"],
+        vec!["stats"],
+        vec!["blocked"],
+        vec!["export"],
+        vec!["comments", "list", "r-1"],
+        vec!["config", "list"],
+        vec!["github", "list"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mb"))
+            .args(["--readonly", "--mb-beads-dir"])
+            .arg(storage.get_beads_dir())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for name in [
+        "config.yaml",
+        "config-minibeads.yaml",
+        ".gitignore",
+        "command_history.log",
+    ] {
+        assert!(
+            !storage.get_beads_dir().join(name).exists(),
+            "created {name}"
+        );
+    }
+    let readonly = Storage::open_readonly(storage.get_beads_dir()).unwrap();
+    assert!(create(&readonly, "r-2", "must fail").is_err());
+    assert!(readonly
+        .set_config_value("issue-prefix", "changed")
+        .is_err());
+    let journal = storage.get_beads_dir().join("minibeads-transaction.json");
+    fs::write(&journal, "pending recovery sentinel").unwrap();
+    let output = run_cli(&storage, &["--readonly", "show", "r-1"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires recovery"));
+    assert_eq!(
+        fs::read_to_string(journal).unwrap(),
+        "pending recovery sentinel"
+    );
+}

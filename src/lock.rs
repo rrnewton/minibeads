@@ -16,6 +16,14 @@ pub struct Lock {
 impl Lock {
     /// Acquire a coarse-grained lock on the beads directory
     pub fn acquire(beads_dir: &Path) -> Result<Self> {
+        Self::acquire_with_recovery(beads_dir, true)
+    }
+
+    pub(crate) fn acquire_without_recovery(beads_dir: &Path) -> Result<Self> {
+        Self::acquire_with_recovery(beads_dir, false)
+    }
+
+    fn acquire_with_recovery(beads_dir: &Path, recover: bool) -> Result<Self> {
         let lock_path = beads_dir.join("minibeads.lock");
         let pid = std::process::id();
 
@@ -30,7 +38,14 @@ impl Lock {
                         lock_path,
                         _pid: pid,
                     };
-                    crate::transaction::recover(beads_dir)?;
+                    if recover {
+                        crate::transaction::recover(beads_dir)?;
+                    } else {
+                        anyhow::ensure!(
+                            !beads_dir.join(crate::transaction::JOURNAL).exists(),
+                            "Pending transaction requires recovery; rerun without --readonly"
+                        );
+                    }
                     return Ok(lock);
                 }
                 Err(e) => {

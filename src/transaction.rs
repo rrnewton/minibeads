@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-const JOURNAL: &str = "minibeads-transaction.json";
+pub(crate) const JOURNAL: &str = "minibeads-transaction.json";
 
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path.parent().context("File has no parent directory")?;

@@ -14,9 +14,16 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorageAccess {
+    ReadWrite,
+    ReadOnly,
+}
+
 pub struct Storage {
     beads_dir: PathBuf,
     issues_dir: PathBuf,
+    access: StorageAccess,
 }
 
 /// A checked issue snapshot with the database lock held. Destructive external
@@ -374,7 +381,49 @@ impl Storage {
         Ok(Self {
             beads_dir,
             issues_dir,
+            access: StorageAccess::ReadWrite,
         })
+    }
+
+    /// Open existing storage without bootstrapping config or recovering writes.
+    /// Reads still take the transient database lock; this is a logical write
+    /// guard, not support for a filesystem mounted without write permission.
+    pub fn open_readonly(beads_dir: PathBuf) -> Result<Self> {
+        let issues_dir = beads_dir.join("issues");
+        anyhow::ensure!(
+            issues_dir.is_dir(),
+            "Existing issues directory required for --readonly"
+        );
+        ensure_contained(&beads_dir, &issues_dir)?;
+        let storage = Self {
+            beads_dir,
+            issues_dir,
+            access: StorageAccess::ReadOnly,
+        };
+        let _lock = storage.lock_for_read()?;
+        storage.list_config_values()?;
+        storage.issue_storage_layout()?;
+        Ok(storage)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.access == StorageAccess::ReadWrite,
+            "Storage is read-only"
+        );
+        Ok(())
+    }
+
+    fn lock_for_write(&self) -> Result<Lock> {
+        self.ensure_writable()?;
+        Lock::acquire(&self.beads_dir)
+    }
+
+    fn lock_for_read(&self) -> Result<Lock> {
+        match self.access {
+            StorageAccess::ReadWrite => Lock::acquire(&self.beads_dir),
+            StorageAccess::ReadOnly => Lock::acquire_without_recovery(&self.beads_dir),
+        }
     }
 
     /// Initialize a new minibeads database
@@ -422,6 +471,7 @@ impl Storage {
         Ok(Self {
             beads_dir,
             issues_dir,
+            access: StorageAccess::ReadWrite,
         })
     }
 
@@ -468,6 +518,7 @@ impl Storage {
 
     /// Set a compatibility config value in config.yaml.
     pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
+        let _lock = self.lock_for_write()?;
         let key = normalize_config_key(key);
         if key == "issue-prefix" {
             IssueId::parse(value)?;
@@ -732,7 +783,7 @@ impl Storage {
         id: Option<String>,
         deps: Vec<(String, DependencyType)>,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Generate ID if not provided
         let issue_id = if let Some(id) = id {
@@ -780,7 +831,7 @@ impl Storage {
 
     /// Get an issue by ID
     pub fn get_issue(&self, id: &str) -> Result<Option<Issue>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             return Ok(None);
@@ -842,7 +893,7 @@ impl Storage {
 
     /// Add a local comment to an issue.
     pub fn add_comment(&self, issue_id: &str, author: &str, body: &str) -> Result<Comment> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if !self.issue_exists_any_layout(issue_id)? {
             anyhow::bail!("Issue not found: {}", issue_id);
@@ -878,7 +929,7 @@ impl Storage {
 
     /// List comments for an issue.
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
         self.read_comments_no_lock(issue_id)
     }
 
@@ -888,7 +939,7 @@ impl Storage {
     /// no comment on `issue_id` has the given `comment_id`, so a typo or stale ID
     /// never silently succeeds.
     pub fn delete_comment(&self, issue_id: &str, comment_id: &str) -> Result<Comment> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let mut comments = self.read_comments_no_lock(issue_id)?;
         let pos = comments
@@ -909,7 +960,7 @@ impl Storage {
 
     /// Upsert comments imported from an external source.
     pub fn upsert_comments(&self, issue_id: &str, incoming: Vec<Comment>) -> Result<usize> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
         anyhow::ensure!(
             self.issue_exists_any_layout(issue_id)?,
             "Issue not found: {issue_id}"
@@ -945,7 +996,7 @@ impl Storage {
 
     /// Remove comments whose body contains the given marker string.
     pub fn remove_comments_containing(&self, issue_id: &str, marker: &str) -> Result<usize> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
         let comments = self.read_comments_no_lock(issue_id)?;
         let original_len = comments.len();
         let comments: Vec<Comment> = comments
@@ -994,7 +1045,7 @@ impl Storage {
     /// Acquire the database lock only if all persisted issue fields still match
     /// the analyzed version. Derived dependents and collection order are ignored.
     pub fn lock_issue_snapshot(&self, expected: &Issue) -> Result<Option<LockedIssue<'_>>> {
-        let lock = Lock::acquire(&self.beads_dir)?;
+        let lock = self.lock_for_write()?;
         let Some(path) = self.existing_issue_path(&expected.id)? else {
             return Ok(None);
         };
@@ -1025,7 +1076,7 @@ impl Storage {
 
     /// Update an issue
     pub fn update_issue(&self, id: &str, updates: HashMap<String, String>) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1043,7 +1094,7 @@ impl Storage {
 
     /// Add a label to an issue, returning the updated issue.
     pub fn add_label(&self, id: &str, label: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1065,7 +1116,7 @@ impl Storage {
 
     /// Remove a label from an issue, returning the updated issue.
     pub fn remove_label(&self, id: &str, label: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1084,7 +1135,7 @@ impl Storage {
 
     /// Replace all labels on an issue.
     pub fn set_labels(&self, id: &str, labels: Vec<String>) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1134,7 +1185,7 @@ impl Storage {
         replace: &str,
         replace_all: bool,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if search.is_empty() {
             anyhow::bail!("--search text must not be empty");
@@ -1184,7 +1235,7 @@ impl Storage {
     /// you only want to add to the end, and simpler than a search/replace that
     /// has to reproduce the field's trailing lines exactly.
     pub fn append_to_issue(&self, id: &str, field: EditField, text: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if text.is_empty() {
             anyhow::bail!("--append text must not be empty");
@@ -1233,7 +1284,7 @@ impl Storage {
         claimed_until: chrono::DateTime<chrono::Utc>,
         extra_updates: &HashMap<String, String>,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1303,7 +1354,7 @@ impl Storage {
     /// Refuses to release a claim held by a different worker unless `force` is
     /// set (a stale claim can also simply be reclaimed via [`claim_issue`]).
     pub fn release_issue(&self, id: &str, actor: &str, force: bool) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1336,7 +1387,7 @@ impl Storage {
 
     /// Close an issue
     pub fn close_issue(&self, id: &str, _reason: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1356,7 +1407,7 @@ impl Storage {
 
     /// Reopen an issue
     pub fn reopen_issue(&self, id: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1383,7 +1434,7 @@ impl Storage {
     /// - Updates all text mentions of the old ID in all issues (title, description, design, notes, acceptance_criteria)
     /// - Is atomic (all updates succeed or none)
     pub fn rename_issue(&self, old_id: &str, new_id: &str, dry_run: bool) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
         anyhow::ensure!(
             self.issue_exists_any_layout(old_id)?,
             "Issue not found: {old_id}"
@@ -1414,7 +1465,7 @@ impl Storage {
     ///
     /// This scans all issues and removes references to nonexistent issues
     pub fn repair_references(&self, dry_run: bool) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let mut changes = Vec::new();
         let all_issues = self.list_all_issues_no_dependents()?;
@@ -1482,7 +1533,7 @@ impl Storage {
         to_id: &str,
         dep_type: DependencyType,
     ) -> Result<()> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
@@ -1504,7 +1555,7 @@ impl Storage {
     }
 
     pub fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
@@ -1788,7 +1839,7 @@ impl Storage {
         assignee: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Issue>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
 
         let mut issues = Vec::new();
         for (issue_id, path) in self.issue_file_paths()? {
@@ -1997,6 +2048,7 @@ impl Storage {
     ) -> Result<usize> {
         use std::io::Write;
 
+        self.ensure_writable()?;
         // Convert single priority to vector for list_issues
         let priority_list = priority.map(|p| vec![p]);
 
@@ -2028,7 +2080,7 @@ impl Storage {
     ) -> Result<(usize, usize, Vec<String>)> {
         use std::io::{BufRead, BufReader};
 
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Open input file
         let file = fs::File::open(input_path)
@@ -2130,7 +2182,7 @@ impl Storage {
         dry_run: bool,
         force: bool,
     ) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         IssueId::parse(new_prefix)?;
         // Get current prefix
@@ -2231,7 +2283,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let current_layout = self.issue_storage_layout()?;
         let issue_paths = self.issue_file_paths()?;
@@ -2359,7 +2411,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Check if already using hash IDs
         if self.use_hash_ids()? {
@@ -2464,7 +2516,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Get current prefix
         let prefix = self.get_prefix()?;
@@ -2615,7 +2667,7 @@ impl Storage {
         dry_run: bool,
         closed_issue_start: Option<u32>,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Get current prefix
         let prefix = self.get_prefix()?;
