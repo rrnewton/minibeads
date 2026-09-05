@@ -449,3 +449,163 @@ fn unstructured_preamble_is_rejected_instead_of_discarded() {
     let error = minibeads::format::markdown_to_issue("r-1", &malformed).unwrap_err();
     assert!(format!("{error:#}").contains("before the first Markdown section"));
 }
+
+fn run_cli(storage: &Storage, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mb"))
+        .args(["--mb-no-cmd-logging", "--json", "--mb-beads-dir"])
+        .arg(storage.get_beads_dir())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn jsonl_sync_waits_for_the_database_lock_instead_of_writing_through_it() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "keep").unwrap();
+    let _lock = minibeads::lock::Lock::acquire(&storage.get_beads_dir()).unwrap();
+    let output = run_cli(&storage, &["sync"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to acquire lock"));
+    assert!(!storage.get_beads_dir().join("issues.jsonl").exists());
+}
+
+#[test]
+fn a_stale_jsonl_sync_plan_cannot_overwrite_a_new_local_edit() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "original").unwrap();
+    let engine = minibeads::sync::SyncEngine::new();
+    let markdown = minibeads::sync::load_markdown_issues(&storage.get_beads_dir()).unwrap();
+    let jsonl = std::collections::HashMap::new();
+    let plan = engine.analyze_ref(&markdown, &jsonl).unwrap();
+    storage
+        .update_issue(
+            "r-1",
+            std::collections::HashMap::from([("title".to_owned(), "concurrent edit".to_owned())]),
+        )
+        .unwrap();
+    let error = engine
+        .apply(&plan, &markdown, &jsonl, &storage.get_beads_dir(), false)
+        .unwrap_err();
+    assert!(error.to_string().contains("changed after analysis"));
+    assert_eq!(
+        storage.get_issue("r-1").unwrap().unwrap().title,
+        "concurrent edit"
+    );
+    assert!(!storage.get_beads_dir().join("issues.jsonl").exists());
+}
+
+#[test]
+fn custom_jsonl_paths_are_honored_and_dry_runs_return_json_with_planned_counts() {
+    let (temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "local").unwrap();
+    let custom = temp.path().join("custom.jsonl");
+    fs::write(&custom, "").unwrap();
+    let dry = run_cli(
+        &storage,
+        &["sync", "--jsonl", custom.to_str().unwrap(), "--dry-run"],
+    );
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!(report["created_in_jsonl"], 1);
+    assert_eq!(report["dry_run"], true);
+    assert!(fs::read(&custom).unwrap().is_empty());
+    assert!(!storage.get_beads_dir().join("issues.jsonl").exists());
+    let applied = run_cli(&storage, &["sync", "--jsonl", custom.to_str().unwrap()]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(report["created_in_jsonl"], 1);
+    assert_eq!(report["dry_run"], false);
+    assert!(minibeads::sync::load_jsonl_issues(&custom)
+        .unwrap()
+        .contains_key("r-1"));
+    assert!(!storage.get_beads_dir().join("issues.jsonl").exists());
+}
+
+#[test]
+fn equal_time_content_conflicts_are_reported_without_overwriting_either_copy() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    let issue = create(&storage, "r-1", "markdown title").unwrap();
+    let mut remote = issue.clone();
+    remote.title = "JSONL title".into();
+    let markdown_path = storage.get_beads_dir().join("issues/r-1.md");
+    let jsonl_path = storage.get_beads_dir().join("issues.jsonl");
+    let jsonl_bytes = serde_json::to_vec(&remote).unwrap();
+    fs::write(&jsonl_path, &jsonl_bytes).unwrap();
+    filetime::set_file_mtime(
+        &markdown_path,
+        filetime::FileTime::from_system_time(issue.updated_at.into()),
+    )
+    .unwrap();
+    let original_markdown = fs::read(&markdown_path).unwrap();
+    let output = run_cli(&storage, &["sync"]);
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["skipped_conflicts"], 1);
+    assert!(report["errors"][0].as_str().unwrap().contains("Conflict"));
+    assert_eq!(fs::read(markdown_path).unwrap(), original_markdown);
+    assert_eq!(fs::read(jsonl_path).unwrap(), jsonl_bytes);
+}
+
+#[test]
+fn jsonl_sync_ignores_timestamp_and_label_order_when_content_is_unchanged() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "same content").unwrap();
+    let issue = storage
+        .set_labels("r-1", vec!["alpha".into(), "beta".into()])
+        .unwrap();
+    let mut jsonl_issue = issue.clone();
+    jsonl_issue.labels.reverse();
+    jsonl_issue.updated_at += chrono::Duration::hours(1);
+    let jsonl_path = storage.get_beads_dir().join("issues.jsonl");
+    fs::write(&jsonl_path, serde_json::to_vec(&jsonl_issue).unwrap()).unwrap();
+    let output = run_cli(&storage, &["sync", "--dry-run"]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["updated_jsonl"], 0);
+    assert_eq!(report["updated_markdown"], 0);
+    assert_eq!(report["skipped_conflicts"], 0);
+}
+
+#[test]
+fn duplicate_records_are_rejected_before_sync() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    let issue = create(&storage, "r-1", "keep").unwrap();
+    let record = serde_json::to_string(&issue).unwrap();
+    let jsonl_path = storage.get_beads_dir().join("issues.jsonl");
+    fs::write(&jsonl_path, format!("{record}\n{record}\n")).unwrap();
+    assert!(minibeads::sync::load_jsonl_issues(&jsonl_path).is_err());
+    let duplicate_dir = storage.get_beads_dir().join("issues/duplicate");
+    fs::create_dir_all(&duplicate_dir).unwrap();
+    fs::copy(
+        storage.get_beads_dir().join("issues/r-1.md"),
+        duplicate_dir.join("r-1.md"),
+    )
+    .unwrap();
+    assert!(minibeads::sync::load_markdown_issues(&storage.get_beads_dir()).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn an_unsuccessful_jsonl_write_returns_failure() {
+    let (temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "keep").unwrap();
+    let path = temp.path().join("readonly.jsonl");
+    fs::write(&path, "").unwrap();
+    let original_permissions = fs::metadata(&path).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&path, readonly).unwrap();
+    let output = run_cli(&storage, &["sync", "--jsonl", path.to_str().unwrap()]);
+    fs::set_permissions(&path, original_permissions).unwrap();
+    assert!(!output.status.success());
+    assert!(fs::read(path).unwrap().is_empty());
+}

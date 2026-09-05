@@ -3071,7 +3071,7 @@ fn run() -> Result<()> {
 
             // Create sync engine and analyze
             let engine = sync::SyncEngine::new();
-            let plan = engine.analyze(markdown_issues.clone(), jsonl_issues.clone())?;
+            let plan = engine.analyze_ref(&markdown_issues, &jsonl_issues)?;
 
             // Filter plan based on direction
             let filtered_plan = match direction.as_str() {
@@ -3143,11 +3143,12 @@ fn run() -> Result<()> {
             }
 
             // Apply sync
-            let report = engine.apply(
+            let report = engine.apply_to_path(
                 &filtered_plan,
                 &markdown_issues,
                 &jsonl_issues,
                 &beads_dir,
+                &jsonl_path,
                 dry_run,
             )?;
 
@@ -3182,6 +3183,11 @@ fn run() -> Result<()> {
                     }
                 }
             }
+            anyhow::ensure!(
+                report.errors.is_empty(),
+                "Sync completed with {} unresolved errors",
+                report.errors.len()
+            );
             Ok(())
         }
 

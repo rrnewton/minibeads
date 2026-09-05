@@ -549,7 +549,7 @@ impl Storage {
         Ok(self.existing_issue_path(id)?.is_some())
     }
 
-    fn existing_or_configured_issue_path(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn existing_or_configured_issue_path(&self, id: &str) -> Result<PathBuf> {
         match self.existing_issue_path(id)? {
             Some(path) => Ok(path),
             None => self.configured_issue_path(id),
@@ -2706,7 +2706,7 @@ impl Storage {
 /// issue's ID and path. Free function so it can be used before a `Storage` is
 /// fully constructed (see `infer_prefix_from_issues_dir`, used while
 /// bootstrapping `config.yaml`); `Storage::issue_file_paths` delegates here.
-fn issue_file_paths_in(issues_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn issue_file_paths_in(issues_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     if !issues_dir.exists() {
         return Ok(Vec::new());
     }

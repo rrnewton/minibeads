@@ -40,6 +40,7 @@ struct Backup {
 pub(crate) struct FileTransaction<'a> {
     root: &'a Path,
     desired: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    modified: BTreeMap<PathBuf, std::time::SystemTime>,
 }
 
 impl<'a> FileTransaction<'a> {
@@ -47,11 +48,16 @@ impl<'a> FileTransaction<'a> {
         Self {
             root,
             desired: BTreeMap::new(),
+            modified: BTreeMap::new(),
         }
     }
 
     pub(crate) fn write(&mut self, path: PathBuf, content: Vec<u8>) {
         self.desired.insert(path, Some(content));
+    }
+
+    pub(crate) fn set_mtime(&mut self, path: PathBuf, modified: std::time::SystemTime) {
+        self.modified.insert(path, modified);
     }
 
     pub(crate) fn remove(&mut self, path: PathBuf) {
@@ -126,6 +132,12 @@ impl<'a> FileTransaction<'a> {
             for (index, (path, content)) in self.desired.iter().enumerate() {
                 ensure_contained(self.root, path)?;
                 replace_or_remove(path, content.as_deref())?;
+                if let Some(modified) = self.modified.get(path) {
+                    filetime::set_file_mtime(
+                        path,
+                        filetime::FileTime::from_system_time(*modified),
+                    )?;
+                }
                 after_write(index)?;
             }
             fs::remove_file(&journal)?;
