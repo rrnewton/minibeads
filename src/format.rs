@@ -104,14 +104,10 @@ fn sanitize_section_content(content: &str) -> String {
 
 /// Parse markdown format into an Issue
 pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
-    // Split frontmatter and body
-    let parts: Vec<&str> = content.splitn(3, "---\n").collect();
-    if parts.len() < 3 {
-        anyhow::bail!("Invalid markdown format: missing frontmatter");
-    }
+    let (frontmatter, body) = split_frontmatter(content)?;
 
     // Parse frontmatter
-    let fm: Frontmatter = serde_yaml::from_str(parts[1]).map_err(|e| {
+    let fm: Frontmatter = serde_yaml::from_str(frontmatter).map_err(|e| {
         // Try to provide helpful context about what field might be missing
         let yaml_error = e.to_string();
         let mut error_msg = format!(
@@ -121,28 +117,28 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
 
         // Show the frontmatter content for debugging
         error_msg.push_str("\n\nFrontmatter content (between --- markers):\n");
-        for (i, line) in parts[1].lines().enumerate() {
+        for (i, line) in frontmatter.lines().enumerate() {
             error_msg.push_str(&format!("{:3}: {}\n", i + 1, line));
         }
 
         // Check for common issues
         let mut missing_fields = Vec::new();
-        if !parts[1].contains("title:") {
+        if !frontmatter.contains("title:") {
             missing_fields.push("title");
         }
-        if !parts[1].contains("status:") {
+        if !frontmatter.contains("status:") {
             missing_fields.push("status");
         }
-        if !parts[1].contains("priority:") {
+        if !frontmatter.contains("priority:") {
             missing_fields.push("priority");
         }
-        if !parts[1].contains("issue_type:") {
+        if !frontmatter.contains("issue_type:") {
             missing_fields.push("issue_type");
         }
-        if !parts[1].contains("created_at:") {
+        if !frontmatter.contains("created_at:") {
             missing_fields.push("created_at");
         }
-        if !parts[1].contains("updated_at:") {
+        if !frontmatter.contains("updated_at:") {
             missing_fields.push("updated_at");
         }
 
@@ -165,7 +161,8 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
     })?;
 
     // Parse body sections
-    let (description, design, acceptance_criteria, notes) = parse_sections(parts[2]);
+    let (description, design, acceptance_criteria, notes) =
+        parse_sections(body).with_context(|| format!("Cannot safely parse {issue_id}.md"))?;
 
     // Build Issue
     let mut issue = Issue {
@@ -203,12 +200,13 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
 }
 
 /// Parse markdown sections from the body
-fn parse_sections(body: &str) -> (String, String, String, String) {
+fn parse_sections(body: &str) -> Result<(String, String, String, String)> {
     let mut description = String::new();
     let mut design = String::new();
     let mut acceptance_criteria = String::new();
     let mut notes = String::new();
 
+    let mut seen = std::collections::HashSet::new();
     let mut current_section = "";
     let mut current_content = String::new();
 
@@ -220,6 +218,9 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
         // header. Trimming before this check used to eat such lines as unknown
         // section headers and silently drop everything after them.
         if let Some(header) = line.strip_prefix("# ").map(str::trim) {
+            anyhow::ensure!(matches!(header, "Description" | "Design" | "Acceptance Criteria" | "Notes"),
+                "Unknown Markdown section '# {header}'. Use Description, Design, Acceptance Criteria or Notes; use ## for a heading within a section. The file was not rewritten.");
+            anyhow::ensure!(seen.insert(header), "Duplicate Markdown section {header:?}; combine its content before updating the issue.");
             // Save previous section
             if !current_section.is_empty() {
                 let content = trim_blank_edge_lines(&current_content).to_string();
@@ -228,7 +229,7 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
                     "Design" => design = content,
                     "Acceptance Criteria" => acceptance_criteria = content,
                     "Notes" => notes = content,
-                    _ => {} // Ignore unknown sections
+                    _ => unreachable!("section headers were validated"),
                 }
             }
 
@@ -241,6 +242,8 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
                 current_content.push('\n');
             }
             current_content.push_str(line);
+        } else if !line.trim().is_empty() {
+            anyhow::bail!("Text before the first Markdown section would be lost; place it under # Description before updating the issue");
         }
     }
 
@@ -252,11 +255,11 @@ fn parse_sections(body: &str) -> (String, String, String, String) {
             "Design" => design = content,
             "Acceptance Criteria" => acceptance_criteria = content,
             "Notes" => notes = content,
-            _ => {}
+            _ => unreachable!("section headers were validated"),
         }
     }
 
-    (description, design, acceptance_criteria, notes)
+    Ok((description, design, acceptance_criteria, notes))
 }
 
 /// Trim leading/trailing BLANK lines (empty or whitespace-only) from section
@@ -306,6 +309,29 @@ fn parse_timestamp(s: &str) -> Result<DateTime<Utc>> {
     }
 
     anyhow::bail!("Failed to parse timestamp: {}", s)
+}
+
+/// Delimit frontmatter by complete lines, accepting native LF/CRLF files and a
+/// UTF-8 BOM. A "---" substring in a title or YAML value is not a delimiter.
+fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut lines = content.split_inclusive('\n');
+    let first = lines
+        .next()
+        .context("Invalid markdown format: missing frontmatter")?;
+    anyhow::ensure!(
+        first.trim_end_matches(['\r', '\n']) == "---",
+        "Invalid markdown format: missing opening frontmatter delimiter"
+    );
+    let start = first.len();
+    let mut offset = start;
+    for line in lines {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            return Ok((&content[start..offset], &content[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+    anyhow::bail!("Invalid markdown format: missing closing frontmatter delimiter")
 }
 
 #[cfg(test)]

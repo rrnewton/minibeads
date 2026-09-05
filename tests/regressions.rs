@@ -398,3 +398,54 @@ fn ready_filters_do_not_hide_a_prerequisite_in_another_assignee_or_priority() {
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, "r-2");
 }
+
+#[test]
+fn updates_refuse_unrecognized_or_ambiguous_sections_without_losing_text() {
+    for extra in [
+        "\n# User Report\n\nirreplaceable investigation\n",
+        "\n# Notes\n\nfirst notes\n\n# Notes\n\nsecond notes\n",
+    ] {
+        let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+        create(&storage, "r-1", "keep").unwrap();
+        let path = storage.get_beads_dir().join("issues/r-1.md");
+        let original = fs::read_to_string(&path).unwrap() + extra;
+        fs::write(&path, &original).unwrap();
+        let error = storage
+            .update_issue(
+                "r-1",
+                std::collections::HashMap::from([("priority".to_owned(), "1".to_owned())]),
+            )
+            .expect_err("a partial parse must not be rewritten");
+        assert!(format!("{error:#}").contains("Markdown section"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+}
+
+#[test]
+fn crlf_and_bom_frontmatter_survive_an_ordinary_update() {
+    for bom in ["", "\u{feff}"] {
+        let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+        create(&storage, "r-1", "Title ending in ---").unwrap();
+        let path = storage.get_beads_dir().join("issues/r-1.md");
+        let original = fs::read_to_string(&path).unwrap() + "\n# Description\n\n  indented text\n";
+        fs::write(&path, format!("{bom}{}", original.replace('\n', "\r\n"))).unwrap();
+        let updated = storage
+            .update_issue(
+                "r-1",
+                std::collections::HashMap::from([("priority".to_owned(), "1".to_owned())]),
+            )
+            .unwrap();
+        assert_eq!(updated.title, "Title ending in ---");
+        assert_eq!(updated.description, "  indented text");
+        assert_eq!(storage.get_issue("r-1").unwrap().unwrap().priority, 1);
+    }
+}
+
+#[test]
+fn unstructured_preamble_is_rejected_instead_of_discarded() {
+    let issue = Issue::new("r-1".into(), "title".into(), 2, IssueType::Task);
+    let markdown = minibeads::format::issue_to_markdown(&issue).unwrap();
+    let malformed = markdown + "\nimportant prose before any section\n";
+    let error = minibeads::format::markdown_to_issue("r-1", &malformed).unwrap_err();
+    assert!(format!("{error:#}").contains("before the first Markdown section"));
+}
