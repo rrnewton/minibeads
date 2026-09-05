@@ -451,7 +451,7 @@ impl Default for SyncEngine {
     }
 }
 
-fn canonical_issue(issue: &Issue) -> Result<serde_json::Value> {
+pub(crate) fn canonical_issue(issue: &Issue) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(issue)?;
     let object = value
         .as_object_mut()

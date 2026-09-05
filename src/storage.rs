@@ -19,6 +19,42 @@ pub struct Storage {
     issues_dir: PathBuf,
 }
 
+/// A checked issue snapshot with the database lock held. Destructive external
+/// reconciliation can inspect/delete comments without a nested lock or a rename
+/// changing ownership between the check and the external request.
+pub struct LockedIssue<'a> {
+    storage: &'a Storage,
+    issue: Issue,
+    _lock: Lock,
+}
+
+impl LockedIssue<'_> {
+    pub fn comments(&self) -> Result<Vec<Comment>> {
+        self.storage.read_comments_no_lock(&self.issue.id)
+    }
+
+    pub fn delete_comment(&self, comment_id: &str) -> Result<Comment> {
+        let mut comments = self.comments()?;
+        let index = comments
+            .iter()
+            .position(|comment| comment.id == comment_id)
+            .with_context(|| format!("Comment not found: {comment_id}"))?;
+        let removed = comments.remove(index);
+        self.storage
+            .write_comments_no_lock(&self.issue.id, &comments)?;
+        Ok(removed)
+    }
+
+    pub fn update(mut self, updates: HashMap<String, String>) -> Result<Issue> {
+        apply_issue_updates(&mut self.issue, updates)?;
+        let path = self
+            .storage
+            .existing_or_configured_issue_path(&self.issue.id)?;
+        self.storage.write_issue_to_path(&path, &self.issue)?;
+        Ok(self.issue)
+    }
+}
+
 /// Replace issue ID references in text fields using word boundaries
 ///
 /// This function replaces all occurrences of issue IDs in text, but only when they appear
@@ -874,6 +910,10 @@ impl Storage {
     /// Upsert comments imported from an external source.
     pub fn upsert_comments(&self, issue_id: &str, incoming: Vec<Comment>) -> Result<usize> {
         let _lock = Lock::acquire(&self.beads_dir)?;
+        anyhow::ensure!(
+            self.issue_exists_any_layout(issue_id)?,
+            "Issue not found: {issue_id}"
+        );
         let mut comments = self.read_comments_no_lock(issue_id)?;
         let mut changed = 0;
 
@@ -951,6 +991,38 @@ impl Storage {
         target_issue.dependents = dependents;
     }
 
+    /// Acquire the database lock only if all persisted issue fields still match
+    /// the analyzed version. Derived dependents and collection order are ignored.
+    pub fn lock_issue_snapshot(&self, expected: &Issue) -> Result<Option<LockedIssue<'_>>> {
+        let lock = Lock::acquire(&self.beads_dir)?;
+        let Some(path) = self.existing_issue_path(&expected.id)? else {
+            return Ok(None);
+        };
+        let current = markdown_to_issue(&expected.id, &fs::read_to_string(path)?)?;
+        if crate::sync::canonical_issue(&current)? != crate::sync::canonical_issue(expected)? {
+            return Ok(None);
+        }
+        Ok(Some(LockedIssue {
+            storage: self,
+            issue: current,
+            _lock: lock,
+        }))
+    }
+
+    pub fn issue_matches_snapshot(&self, expected: &Issue) -> Result<bool> {
+        Ok(self.lock_issue_snapshot(expected)?.is_some())
+    }
+
+    pub fn update_issue_if_unchanged(
+        &self,
+        expected: &Issue,
+        updates: HashMap<String, String>,
+    ) -> Result<Option<Issue>> {
+        self.lock_issue_snapshot(expected)?
+            .map(|locked| locked.update(updates))
+            .transpose()
+    }
+
     /// Update an issue
     pub fn update_issue(&self, id: &str, updates: HashMap<String, String>) -> Result<Issue> {
         let _lock = Lock::acquire(&self.beads_dir)?;
@@ -962,26 +1034,7 @@ impl Storage {
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
 
-        // Apply updates
-        for (key, value) in updates {
-            match key.as_str() {
-                "title" => issue.title = value,
-                "description" => issue.description = value,
-                "design" => issue.design = value,
-                "notes" => issue.notes = value,
-                "acceptance_criteria" => issue.acceptance_criteria = value,
-                "status" => issue.status = value.parse()?,
-                "priority" => issue.priority = value.parse()?,
-                "issue_type" => issue.issue_type = value.parse()?,
-                "assignee" => issue.assignee = value,
-                "external_ref" => {
-                    issue.external_ref = if value.is_empty() { None } else { Some(value) }
-                }
-                _ => {}
-            }
-        }
-
-        issue.updated_at = chrono::Utc::now();
+        apply_issue_updates(&mut issue, updates)?;
 
         self.write_issue_to_path(&issue_path, &issue)?;
 
@@ -3969,4 +4022,33 @@ fn has_unresolved_dependencies(issue: &Issue, closed_ids: &HashSet<String>) -> b
             .get_blocking_dependencies()
             .any(|id| !closed_ids.contains(id.as_str()))
     }
+}
+fn apply_issue_updates(issue: &mut Issue, updates: HashMap<String, String>) -> Result<()> {
+    let now = chrono::Utc::now();
+    for (key, value) in updates {
+        match key.as_str() {
+            "title" => issue.title = value,
+            "description" => issue.description = value,
+            "design" => issue.design = value,
+            "notes" => issue.notes = value,
+            "acceptance_criteria" => issue.acceptance_criteria = value,
+            "status" => {
+                issue.status = value.parse()?;
+                issue.closed_at = if issue.status == Status::Closed {
+                    issue.closed_at.or(Some(now))
+                } else {
+                    None
+                };
+            }
+            "priority" => issue.priority = value.parse()?,
+            "issue_type" => issue.issue_type = value.parse()?,
+            "assignee" => issue.assignee = value,
+            "external_ref" => {
+                issue.external_ref = if value.is_empty() { None } else { Some(value) }
+            }
+            _ => {}
+        }
+    }
+    issue.updated_at = now;
+    Ok(())
 }

@@ -609,3 +609,31 @@ fn an_unsuccessful_jsonl_write_returns_failure() {
     assert!(!output.status.success());
     assert!(fs::read(path).unwrap().is_empty());
 }
+
+#[test]
+fn conditional_updates_preserve_manual_edits_even_without_a_timestamp_change() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    let snapshot = create(&storage, "r-1", "original").unwrap();
+    let path = storage.get_beads_dir().join("issues/r-1.md");
+    let mut changed = snapshot.clone();
+    changed.description = "manually edited without touching updated_at".into();
+    fs::write(
+        &path,
+        minibeads::format::issue_to_markdown(&changed).unwrap(),
+    )
+    .unwrap();
+    let result = storage
+        .update_issue_if_unchanged(
+            &snapshot,
+            std::collections::HashMap::from([(
+                "description".to_owned(),
+                "remote overwrite".to_owned(),
+            )]),
+        )
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(
+        storage.get_issue("r-1").unwrap().unwrap().description,
+        changed.description
+    );
+}
