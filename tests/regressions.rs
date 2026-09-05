@@ -317,3 +317,84 @@ fn repacking_closed_issues_can_swap_their_ids_with_open_issues() {
         assert_eq!(closed.status, minibeads::types::Status::Closed);
     }
 }
+
+#[test]
+fn closing_and_reopening_prerequisites_updates_ready_blocked_and_stats() {
+    use minibeads::types::DependencyType;
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    for id in ["r-1", "r-2", "r-3", "r-4"] {
+        create(&storage, id, id).unwrap();
+    }
+    storage
+        .add_dependency("r-2", "r-1", DependencyType::Blocks)
+        .unwrap();
+    storage
+        .add_dependency("r-3", "r-missing", DependencyType::Blocks)
+        .unwrap();
+    storage
+        .add_dependency("r-4", "r-1", DependencyType::Related)
+        .unwrap();
+    assert_eq!(storage.get_stats().unwrap().blocked_issues, 2);
+    storage.close_issue("r-1", "done").unwrap();
+    let ready = storage.get_ready(None, None, None, "priority").unwrap();
+    assert!(ready.iter().any(|issue| issue.id == "r-2"));
+    assert!(ready.iter().any(|issue| issue.id == "r-4"));
+    assert!(!ready.iter().any(|issue| issue.id == "r-3"));
+    let blocked = storage.get_blocked().unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].issue.id, "r-3");
+    assert_eq!(blocked[0].blocked_by, ["r-missing"]);
+    let stats = storage.get_stats().unwrap();
+    assert_eq!(stats.ready_issues, ready.len());
+    assert_eq!(stats.blocked_issues, blocked.len());
+    storage.reopen_issue("r-1").unwrap();
+    let ready = storage.get_ready(None, None, None, "priority").unwrap();
+    assert!(!ready.iter().any(|issue| issue.id == "r-2"));
+    assert_eq!(storage.get_stats().unwrap().blocked_issues, 2);
+}
+
+#[test]
+fn ready_filters_do_not_hide_a_prerequisite_in_another_assignee_or_priority() {
+    use minibeads::types::DependencyType;
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    create(&storage, "r-1", "prerequisite").unwrap();
+    create(&storage, "r-2", "dependent").unwrap();
+    storage
+        .update_issue(
+            "r-1",
+            std::collections::HashMap::from([
+                ("priority".to_owned(), "0".to_owned()),
+                ("assignee".to_owned(), "other".to_owned()),
+            ]),
+        )
+        .unwrap();
+    storage
+        .update_issue(
+            "r-2",
+            std::collections::HashMap::from([("assignee".to_owned(), "worker".to_owned())]),
+        )
+        .unwrap();
+    storage
+        .add_dependency("r-2", "r-1", DependencyType::Blocks)
+        .unwrap();
+    assert!(storage
+        .get_ready(
+            Some("worker"),
+            Some(vec![2]),
+            Some(IssueType::Task),
+            "priority"
+        )
+        .unwrap()
+        .is_empty());
+    storage.close_issue("r-1", "done").unwrap();
+    let ready = storage
+        .get_ready(
+            Some("worker"),
+            Some(vec![2]),
+            Some(IssueType::Task),
+            "priority",
+        )
+        .unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, "r-2");
+}

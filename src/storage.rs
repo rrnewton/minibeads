@@ -1789,6 +1789,7 @@ impl Storage {
     pub fn get_stats(&self) -> Result<Stats> {
         let issues = self.list_issues(None, None, None, None, None)?;
 
+        let closed_ids = closed_issue_ids(&issues);
         let total = issues.len();
         let open = issues.iter().filter(|i| i.status == Status::Open).count();
         let in_progress = issues
@@ -1800,13 +1801,13 @@ impl Storage {
         // Calculate blocked issues (those with blocking dependencies)
         let blocked = issues
             .iter()
-            .filter(|i| i.status != Status::Closed && i.has_blocking_dependencies())
+            .filter(|i| i.status != Status::Closed && has_unresolved_dependencies(i, &closed_ids))
             .count();
 
         // Calculate ready issues
         let ready = issues
             .iter()
-            .filter(|i| i.status == Status::Open && !i.has_blocking_dependencies())
+            .filter(|i| i.status == Status::Open && !has_unresolved_dependencies(i, &closed_ids))
             .count();
 
         // Calculate average lead time for closed issues
@@ -1841,6 +1842,7 @@ impl Storage {
     pub fn get_blocked(&self) -> Result<Vec<BlockedIssue>> {
         let issues = self.list_issues(None, None, None, None, None)?;
 
+        let closed_ids = closed_issue_ids(&issues);
         let mut blocked = Vec::new();
         for issue in issues {
             if issue.status == Status::Closed {
@@ -1848,7 +1850,11 @@ impl Storage {
             }
 
             // Zero-copy: collect blocking dependencies directly without intermediate Vec
-            let blocked_by: Vec<String> = issue.get_blocking_dependencies().cloned().collect();
+            let blocked_by: Vec<String> = issue
+                .get_blocking_dependencies()
+                .filter(|id| !closed_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
 
             if !blocked_by.is_empty() {
                 let blocked_by_count = blocked_by.len();
@@ -1875,11 +1881,21 @@ impl Storage {
         issue_type: Option<IssueType>,
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
-        let issues = self.list_issues(Some(Status::Open), priority, issue_type, assignee, None)?;
-
+        // Resolve dependency status from the full snapshot before filtering:
+        // an assignee/priority/type filter must not hide a live prerequisite.
+        let issues = self.list_issues(None, None, None, None, None)?;
+        let closed_ids = closed_issue_ids(&issues);
         let mut ready: Vec<Issue> = issues
             .into_iter()
-            .filter(|i| !i.has_blocking_dependencies())
+            .filter(|issue| {
+                issue.status == Status::Open
+                    && priority
+                        .as_ref()
+                        .is_none_or(|priorities| priorities.contains(&issue.priority))
+                    && issue_type.is_none_or(|kind| issue.issue_type == kind)
+                    && assignee.is_none_or(|actor| issue.assignee == actor)
+                    && !has_unresolved_dependencies(issue, &closed_ids)
+            })
             .collect();
 
         // Apply sorting based on policy
@@ -3932,4 +3948,25 @@ fn remap_issue(issue: &mut Issue, mapping: &HashMap<String, String>) -> bool {
         }
     }
     changed
+}
+
+// Own only the closed IDs so callers can move Issue values into their results.
+fn closed_issue_ids(issues: &[Issue]) -> HashSet<String> {
+    issues
+        .iter()
+        .filter(|issue| issue.status == Status::Closed)
+        .map(|issue| issue.id.clone())
+        .collect()
+}
+
+fn has_unresolved_dependencies(issue: &Issue, closed_ids: &HashSet<String>) -> bool {
+    if closed_ids.is_empty() {
+        issue.has_blocking_dependencies()
+    } else {
+        // A missing target stays unresolved; only explicitly closed issues
+        // discharge a blocking dependency.
+        issue
+            .get_blocking_dependencies()
+            .any(|id| !closed_ids.contains(id.as_str()))
+    }
 }
