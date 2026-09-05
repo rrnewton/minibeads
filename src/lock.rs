@@ -127,7 +127,6 @@ fn is_process_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn is_process_alive(pid: u32) -> bool {
-    use std::ptr;
     use winapi::um::handleapi::CloseHandle;
     use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
@@ -152,30 +151,23 @@ fn is_process_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn test_lock_acquire_release() {
-        let temp_dir = env::temp_dir().join(format!("beads_test_{}", std::process::id()));
-        fs::create_dir_all(&temp_dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let temp_dir = temp.path();
 
-        let lock = Lock::acquire(&temp_dir).unwrap();
+        let lock = Lock::acquire(temp_dir).unwrap();
         assert!(temp_dir.join("minibeads.lock").exists());
 
         drop(lock);
         assert!(!temp_dir.join("minibeads.lock").exists());
-
-        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
     fn concurrent_acquisition_has_one_winner() {
-        let temp_dir = env::temp_dir().join(format!(
-            "beads_concurrent_lock_test_{}_{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        fs::create_dir_all(&temp_dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let temp_dir = temp.path();
         let lock_path = temp_dir.join("minibeads.lock");
         let contenders = 32;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(contenders));
@@ -201,7 +193,5 @@ mod tests {
             fs::read_to_string(&lock_path).unwrap().trim(),
             std::process::id().to_string()
         );
-
-        fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

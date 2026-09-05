@@ -467,7 +467,11 @@ mod tests {
                 "description round-trip for {:?}",
                 input
             );
-            assert_eq!(parsed.notes, "notes stay put", "notes leaked for {:?}", input);
+            assert_eq!(
+                parsed.notes, "notes stay put",
+                "notes leaked for {:?}",
+                input
+            );
 
             // A second cycle must be a fixpoint: nothing drifts further.
             let markdown2 = issue_to_markdown(&parsed).unwrap();

@@ -203,7 +203,7 @@ impl GithubStore {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn new_with_program(repo: Option<&str>, program: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(GithubStoreInner {
@@ -2207,6 +2207,7 @@ struct CommentDeletionOutcome {
 ///
 /// `remote` is updated in place so the subsequent import step does not re-import a
 /// comment we just deleted on GitHub.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_deleted_comments(
     storage: &Storage,
     issue: &Issue,
@@ -2868,6 +2869,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn state_with_pair(
         issue: &Issue,
         remote: &RemoteIssue,

@@ -55,9 +55,7 @@ fn migration_preserves_description_with_indented_code_block() {
     let (_changes, id_mapping) = storage
         .migrate_to_numeric_ids(false, true)
         .expect("migrate to numeric IDs");
-    let new_id = id_mapping
-        .get("ds-hkj8lo")
-        .expect("hash ID was renumbered");
+    let new_id = id_mapping.get("ds-hkj8lo").expect("hash ID was renumbered");
 
     let migrated = storage
         .get_issue(new_id)

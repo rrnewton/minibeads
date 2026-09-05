@@ -3373,7 +3373,7 @@ mod list_order_tests {
     #[test]
     fn numeric_cluster_first_then_hash() {
         let base = chrono::Utc::now();
-        let mut issues = vec![
+        let mut issues = [
             issue_at("minibeads-a3f9", base + Duration::seconds(1)),
             issue_at("minibeads-10", base + Duration::seconds(2)),
             issue_at("minibeads-2", base + Duration::seconds(3)),
