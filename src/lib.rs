@@ -7,6 +7,7 @@ pub mod beads_generator;
 pub mod format;
 pub mod hash;
 pub mod lock;
+mod paths;
 pub mod storage;
 pub mod sync;
 pub mod types;

@@ -1,6 +1,7 @@
 use crate::format::{issue_to_markdown, markdown_to_issue};
 use crate::hash;
 use crate::lock::Lock;
+use crate::paths::{ensure_contained, IssueId};
 use crate::types::{
     BlockedIssue, Comment, DependencyType, EditField, Issue, IssueType, Stats, Status,
 };
@@ -224,6 +225,9 @@ impl Storage {
         mb_hash_ids: bool,
         issue_layout: IssueStorageLayout,
     ) -> Result<Self> {
+        if let Some(value) = prefix.as_deref() {
+            IssueId::parse(value)?;
+        }
         // Create minibeads directory
         fs::create_dir_all(&beads_dir).context("Failed to create minibeads directory")?;
 
@@ -242,6 +246,7 @@ impl Storage {
             .or_else(|| infer_prefix(&beads_dir))
             .unwrap_or_else(|| "bd".to_string());
 
+        IssueId::parse(&prefix)?;
         // Create config.yaml with only upstream-compatible options
         let config_path = beads_dir.join("config.yaml");
         let mut config = HashMap::new();
@@ -278,7 +283,10 @@ impl Storage {
         // stores the prefix in its database; fall back to inferring it from the
         // existing issue filenames so we can operate on upstream-created repos.
         match config.get("issue-prefix") {
-            Some(prefix) => Ok(prefix.clone()),
+            Some(prefix) => {
+                IssueId::parse(prefix)?;
+                Ok(prefix.clone())
+            }
             None => self.infer_prefix_from_issues(),
         }
     }
@@ -302,6 +310,9 @@ impl Storage {
     /// Set a compatibility config value in config.yaml.
     pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
         let key = normalize_config_key(key);
+        if key == "issue-prefix" {
+            IssueId::parse(value)?;
+        }
         let config_path = self.config_path();
 
         if !config_path.exists() {
@@ -389,7 +400,10 @@ impl Storage {
     }
 
     fn configured_issue_path(&self, id: &str) -> Result<PathBuf> {
-        Ok(self.issue_path_for_layout(id, self.issue_storage_layout()?))
+        let id = IssueId::parse(id)?;
+        let path = self.issue_path_for_layout(id.as_str(), self.issue_storage_layout()?);
+        ensure_contained(&self.beads_dir, &path)?;
+        Ok(path)
     }
 
     fn existing_issue_path(&self, id: &str) -> Result<Option<PathBuf>> {
@@ -400,11 +414,13 @@ impl Storage {
 
         let flat_path = self.flat_issue_path(id);
         if flat_path.exists() {
+            ensure_contained(&self.beads_dir, &flat_path)?;
             return Ok(Some(flat_path));
         }
 
         let sharded_path = self.sharded_issue_path(id);
         if sharded_path.exists() {
+            ensure_contained(&self.beads_dir, &sharded_path)?;
             return Ok(Some(sharded_path));
         }
 
@@ -423,6 +439,8 @@ impl Storage {
     }
 
     fn write_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        IssueId::parse(&issue.id)?;
+        ensure_contained(&self.beads_dir, path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create issue directory: {}", parent.display())
@@ -441,6 +459,8 @@ impl Storage {
     /// caller print a fabricated "Created issue" success. `create_new(true)`
     /// makes that collision an explicit error instead.
     fn write_new_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        IssueId::parse(&issue.id)?;
+        ensure_contained(&self.beads_dir, path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create issue directory: {}", parent.display())
@@ -626,12 +646,15 @@ impl Storage {
         self.beads_dir.join("comments")
     }
 
-    fn comment_path(&self, issue_id: &str) -> PathBuf {
-        self.comments_dir().join(format!("{}.json", issue_id))
+    fn comment_path(&self, issue_id: &str) -> Result<PathBuf> {
+        let id = IssueId::parse(issue_id)?;
+        let path = self.comments_dir().join(format!("{}.json", id.as_str()));
+        ensure_contained(&self.beads_dir, &path)?;
+        Ok(path)
     }
 
     fn read_comments_no_lock(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let path = self.comment_path(issue_id);
+        let path = self.comment_path(issue_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -650,13 +673,14 @@ impl Storage {
 
     fn write_comments_no_lock(&self, issue_id: &str, comments: &[Comment]) -> Result<()> {
         let comments_dir = self.comments_dir();
+        ensure_contained(&self.beads_dir, &comments_dir)?;
         fs::create_dir_all(&comments_dir).context("Failed to create comments directory")?;
 
         let mut sorted = comments.to_vec();
         sorted.sort_by_key(|c| c.created_at);
         let content =
             serde_json::to_string_pretty(&sorted).context("Failed to serialize comments")?;
-        let path = self.comment_path(issue_id);
+        let path = self.comment_path(issue_id)?;
         fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
@@ -2008,6 +2032,7 @@ impl Storage {
     ) -> Result<Vec<String>> {
         let _lock = Lock::acquire(&self.beads_dir)?;
 
+        IssueId::parse(new_prefix)?;
         // Get current prefix
         let old_prefix = self.get_prefix()?;
 

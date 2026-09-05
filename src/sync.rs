@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::format::markdown_to_issue;
+use crate::paths::{ensure_contained, IssueId};
 use crate::types::Issue;
 
 /// Timestamped issue from markdown (with filesystem mtime)
@@ -178,18 +179,22 @@ fn issue_path_for_layout(beads_dir: &Path, id: &str, layout: IssueStorageLayout)
 }
 
 fn existing_or_configured_issue_path(beads_dir: &Path, id: &str) -> Result<PathBuf> {
+    let id = IssueId::parse(id)?.as_str();
     let configured = issue_path_for_layout(beads_dir, id, issue_storage_layout(beads_dir)?);
+    ensure_contained(beads_dir, &configured)?;
     if configured.exists() {
         return Ok(configured);
     }
 
     let flat = issue_path_for_layout(beads_dir, id, IssueStorageLayout::Flat);
     if flat.exists() {
+        ensure_contained(beads_dir, &flat)?;
         return Ok(flat);
     }
 
     let sharded = issue_path_for_layout(beads_dir, id, IssueStorageLayout::Sharded);
     if sharded.exists() {
+        ensure_contained(beads_dir, &sharded)?;
         return Ok(sharded);
     }
 
@@ -294,6 +299,8 @@ pub fn load_jsonl_issues(jsonl_path: &Path) -> Result<HashMap<String, JsonlIssue
             )
         })?;
 
+        IssueId::parse(&issue.id)
+            .with_context(|| format!("Invalid ID on JSONL line {}", line_num + 1))?;
         result.insert(
             issue.id.clone(),
             JsonlIssue {
@@ -414,6 +421,12 @@ impl SyncEngine {
         beads_dir: &Path,
         dry_run: bool,
     ) -> Result<SyncReport> {
+        for issue in jsonl_issues.values() {
+            IssueId::parse(&issue.issue.id)?;
+        }
+        for issue in markdown_issues.values() {
+            IssueId::parse(&issue.issue.id)?;
+        }
         let mut report = SyncReport::default();
         let issues_dir = beads_dir.join("issues");
         let jsonl_path = beads_dir.join("issues.jsonl");

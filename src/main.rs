@@ -3,6 +3,7 @@ mod format;
 mod github;
 mod hash;
 mod lock;
+mod paths;
 mod storage;
 mod sync;
 mod types;
