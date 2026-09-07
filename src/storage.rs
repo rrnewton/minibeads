@@ -1,6 +1,8 @@
 use crate::format::{issue_to_markdown, markdown_to_issue};
 use crate::hash;
 use crate::lock::Lock;
+use crate::paths::{ensure_contained, IssueId};
+use crate::transaction::{atomic_write, FileTransaction};
 use crate::types::{
     BlockedIssue, Comment, DependencyType, EditField, Issue, IssueType, Stats, Status,
 };
@@ -12,9 +14,52 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorageAccess {
+    ReadWrite,
+    ReadOnly,
+}
+
 pub struct Storage {
     beads_dir: PathBuf,
     issues_dir: PathBuf,
+    access: StorageAccess,
+}
+
+/// A checked issue snapshot with the database lock held. Destructive external
+/// reconciliation can inspect/delete comments without a nested lock or a rename
+/// changing ownership between the check and the external request.
+pub struct LockedIssue<'a> {
+    storage: &'a Storage,
+    issue: Issue,
+    _lock: Lock,
+}
+
+impl LockedIssue<'_> {
+    pub fn comments(&self) -> Result<Vec<Comment>> {
+        self.storage.read_comments_no_lock(&self.issue.id)
+    }
+
+    pub fn delete_comment(&self, comment_id: &str) -> Result<Comment> {
+        let mut comments = self.comments()?;
+        let index = comments
+            .iter()
+            .position(|comment| comment.id == comment_id)
+            .with_context(|| format!("Comment not found: {comment_id}"))?;
+        let removed = comments.remove(index);
+        self.storage
+            .write_comments_no_lock(&self.issue.id, &comments)?;
+        Ok(removed)
+    }
+
+    pub fn update(mut self, updates: HashMap<String, String>) -> Result<Issue> {
+        apply_issue_updates(&mut self.issue, updates)?;
+        let path = self
+            .storage
+            .existing_or_configured_issue_path(&self.issue.id)?;
+        self.storage.write_issue_to_path(&path, &self.issue)?;
+        markdown_to_issue(&self.issue.id, &fs::read_to_string(path)?)
+    }
 }
 
 /// Replace issue ID references in text fields using word boundaries
@@ -141,15 +186,6 @@ fn replace_issue_ids_in_text(text: &str, id_mapping: &HashMap<String, String>) -
     .to_string()
 }
 
-/// Apply ID replacements to all text fields of an issue
-fn replace_ids_in_issue_text(issue: &mut Issue, id_mapping: &HashMap<String, String>) {
-    issue.title = replace_issue_ids_in_text(&issue.title, id_mapping);
-    issue.description = replace_issue_ids_in_text(&issue.description, id_mapping);
-    issue.design = replace_issue_ids_in_text(&issue.design, id_mapping);
-    issue.acceptance_criteria = replace_issue_ids_in_text(&issue.acceptance_criteria, id_mapping);
-    issue.notes = replace_issue_ids_in_text(&issue.notes, id_mapping);
-}
-
 pub fn is_github_issue_ref(value: &str) -> bool {
     value.starts_with("https://github.com/") && value.contains("/issues/")
 }
@@ -166,6 +202,144 @@ impl Storage {
 }
 
 impl Storage {
+    /// Commit one complete ID permutation, preserving comment identity and
+    /// updating all stores that use the issue ID as ownership metadata.
+    fn apply_id_mapping(
+        &self,
+        all_issues: Vec<Issue>,
+        mapping: &HashMap<String, String>,
+        config_updates: &[(&str, &str, &str)],
+    ) -> Result<()> {
+        let mut destinations = HashSet::new();
+        for issue in &all_issues {
+            let destination = mapping.get(&issue.id).unwrap_or(&issue.id);
+            IssueId::parse(destination)?;
+            anyhow::ensure!(
+                destinations.insert(destination),
+                "ID mapping would overwrite issue {destination}"
+            );
+        }
+
+        let mut transaction = FileTransaction::new(&self.beads_dir);
+        let comment_sources: HashSet<PathBuf> = mapping
+            .keys()
+            .map(|id| self.comment_path(id))
+            .collect::<Result<_>>()?;
+        // Schedule removals first. Destination writes below take precedence in
+        // a swap or longer cycle; no iteration can delete an earlier result.
+        for (old_id, new_id) in mapping {
+            if old_id == new_id {
+                continue;
+            }
+            if let Some(path) = self.existing_issue_path(old_id)? {
+                transaction.remove(path);
+            }
+            let source = self.comment_path(old_id)?;
+            let destination = self.comment_path(new_id)?;
+            anyhow::ensure!(
+                !destination.exists() || comment_sources.contains(&destination),
+                "Renaming would overwrite orphaned comments for {new_id}"
+            );
+            if source.exists() {
+                transaction.remove(source);
+            }
+        }
+
+        for mut issue in all_issues {
+            let old_id = issue.id.clone();
+            if remap_issue(&mut issue, mapping) {
+                let source = self
+                    .existing_issue_path(&old_id)?
+                    .context("Migration source issue disappeared")?;
+                let modified = fs::metadata(source)?.modified()?;
+                let path = if old_id != issue.id {
+                    self.configured_issue_path(&issue.id)?
+                } else {
+                    self.existing_or_configured_issue_path(&issue.id)?
+                };
+                transaction.write_with_mtime(
+                    path,
+                    issue_to_markdown(&issue)?.into_bytes(),
+                    modified,
+                );
+            }
+            let mut comments = self.read_comments_no_lock(&old_id)?;
+            let mut comments_changed = old_id != issue.id && !comments.is_empty();
+            for comment in &mut comments {
+                if comment.issue_id != issue.id {
+                    comment.issue_id.clone_from(&issue.id);
+                    comments_changed = true;
+                }
+                // Comment IDs are stable identities; do not regenerate them
+                // just because their owning issue has a different ID.
+                let body = replace_issue_ids_in_text(&comment.body, mapping);
+                if body != comment.body {
+                    comment.body = body;
+                    comment.updated_at = chrono::Utc::now();
+                    comments_changed = true;
+                }
+            }
+            if comments_changed {
+                transaction.write(
+                    self.comment_path(&issue.id)?,
+                    serde_json::to_vec_pretty(&comments)?,
+                );
+            }
+        }
+
+        let state_path = self.beads_dir.join("github-sync-state.json");
+        ensure_contained(&self.beads_dir, &state_path)?;
+        if state_path.exists() {
+            let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+            let entries = state
+                .get_mut("issues")
+                .and_then(serde_json::Value::as_object_mut)
+                .context("Invalid GitHub sync ancestry")?;
+            let mut changed = false;
+            for entry in entries.values_mut() {
+                if let Some(new_id) = entry
+                    .get("local_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|old_id| mapping.get(old_id))
+                {
+                    entry["local_id"] = serde_json::Value::String(new_id.clone());
+                    changed = true;
+                }
+            }
+            if changed {
+                transaction.write(state_path, serde_json::to_vec_pretty(&state)?);
+            }
+        }
+
+        // Keep the default JSONL store from resurrecting old IDs at the next
+        // sync. Preserve its independently edited fields and timestamps.
+        let jsonl_path = self.beads_dir.join("issues.jsonl");
+        ensure_contained(&self.beads_dir, &jsonl_path)?;
+        if jsonl_path.exists() {
+            let mut issues = crate::sync::load_jsonl_issues(&jsonl_path)?;
+            let mut seen = HashSet::new();
+            let mut changed = false;
+            let mut lines = Vec::with_capacity(issues.len());
+            for record in issues.values_mut() {
+                changed |= remap_issue(&mut record.issue, mapping);
+                anyhow::ensure!(
+                    seen.insert(record.issue.id.as_str()),
+                    "ID mapping would overwrite a JSONL issue"
+                );
+                lines.push(serde_json::to_string(&record.issue)?);
+            }
+            if changed {
+                lines.sort();
+                transaction.write(jsonl_path, (lines.join("\n") + "\n").into_bytes());
+            }
+        }
+
+        for (file, key, value) in config_updates {
+            transaction.config(file, key, value)?;
+        }
+        transaction.commit()
+    }
+
     /// Open storage at the given minibeads directory
     pub fn open(beads_dir: PathBuf) -> Result<Self> {
         let issues_dir = beads_dir.join("issues");
@@ -214,7 +388,49 @@ impl Storage {
         Ok(Self {
             beads_dir,
             issues_dir,
+            access: StorageAccess::ReadWrite,
         })
+    }
+
+    /// Open existing storage without bootstrapping config or recovering writes.
+    /// Reads still take the transient database lock; this is a logical write
+    /// guard, not support for a filesystem mounted without write permission.
+    pub fn open_readonly(beads_dir: PathBuf) -> Result<Self> {
+        let issues_dir = beads_dir.join("issues");
+        anyhow::ensure!(
+            issues_dir.is_dir(),
+            "Existing issues directory required for --readonly"
+        );
+        ensure_contained(&beads_dir, &issues_dir)?;
+        let storage = Self {
+            beads_dir,
+            issues_dir,
+            access: StorageAccess::ReadOnly,
+        };
+        let _lock = storage.lock_for_read()?;
+        storage.list_config_values()?;
+        storage.issue_storage_layout()?;
+        Ok(storage)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.access == StorageAccess::ReadWrite,
+            "Storage is read-only"
+        );
+        Ok(())
+    }
+
+    fn lock_for_write(&self) -> Result<Lock> {
+        self.ensure_writable()?;
+        Lock::acquire(&self.beads_dir)
+    }
+
+    fn lock_for_read(&self) -> Result<Lock> {
+        match self.access {
+            StorageAccess::ReadWrite => Lock::acquire(&self.beads_dir),
+            StorageAccess::ReadOnly => Lock::acquire_without_recovery(&self.beads_dir),
+        }
     }
 
     /// Initialize a new minibeads database
@@ -224,6 +440,9 @@ impl Storage {
         mb_hash_ids: bool,
         issue_layout: IssueStorageLayout,
     ) -> Result<Self> {
+        if let Some(value) = prefix.as_deref() {
+            IssueId::parse(value)?;
+        }
         // Create minibeads directory
         fs::create_dir_all(&beads_dir).context("Failed to create minibeads directory")?;
 
@@ -242,6 +461,7 @@ impl Storage {
             .or_else(|| infer_prefix(&beads_dir))
             .unwrap_or_else(|| "bd".to_string());
 
+        IssueId::parse(&prefix)?;
         // Create config.yaml with only upstream-compatible options
         let config_path = beads_dir.join("config.yaml");
         let mut config = HashMap::new();
@@ -258,6 +478,7 @@ impl Storage {
         Ok(Self {
             beads_dir,
             issues_dir,
+            access: StorageAccess::ReadWrite,
         })
     }
 
@@ -278,7 +499,10 @@ impl Storage {
         // stores the prefix in its database; fall back to inferring it from the
         // existing issue filenames so we can operate on upstream-created repos.
         match config.get("issue-prefix") {
-            Some(prefix) => Ok(prefix.clone()),
+            Some(prefix) => {
+                IssueId::parse(prefix)?;
+                Ok(prefix.clone())
+            }
             None => self.infer_prefix_from_issues(),
         }
     }
@@ -301,7 +525,11 @@ impl Storage {
 
     /// Set a compatibility config value in config.yaml.
     pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
+        let _lock = self.lock_for_write()?;
         let key = normalize_config_key(key);
+        if key == "issue-prefix" {
+            IssueId::parse(value)?;
+        }
         let config_path = self.config_path();
 
         if !config_path.exists() {
@@ -368,11 +596,6 @@ impl Storage {
         }
     }
 
-    fn set_issue_storage_layout(&self, layout: IssueStorageLayout) -> Result<()> {
-        let config_path = self.beads_dir.join("config-minibeads.yaml");
-        update_yaml_key_value(&config_path, "issue-storage-layout", layout.as_str())
-    }
-
     fn flat_issue_path(&self, id: &str) -> PathBuf {
         self.issues_dir.join(format!("{}.md", id))
     }
@@ -389,7 +612,10 @@ impl Storage {
     }
 
     fn configured_issue_path(&self, id: &str) -> Result<PathBuf> {
-        Ok(self.issue_path_for_layout(id, self.issue_storage_layout()?))
+        let id = IssueId::parse(id)?;
+        let path = self.issue_path_for_layout(id.as_str(), self.issue_storage_layout()?);
+        ensure_contained(&self.beads_dir, &path)?;
+        Ok(path)
     }
 
     fn existing_issue_path(&self, id: &str) -> Result<Option<PathBuf>> {
@@ -400,11 +626,13 @@ impl Storage {
 
         let flat_path = self.flat_issue_path(id);
         if flat_path.exists() {
+            ensure_contained(&self.beads_dir, &flat_path)?;
             return Ok(Some(flat_path));
         }
 
         let sharded_path = self.sharded_issue_path(id);
         if sharded_path.exists() {
+            ensure_contained(&self.beads_dir, &sharded_path)?;
             return Ok(Some(sharded_path));
         }
 
@@ -415,7 +643,7 @@ impl Storage {
         Ok(self.existing_issue_path(id)?.is_some())
     }
 
-    fn existing_or_configured_issue_path(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn existing_or_configured_issue_path(&self, id: &str) -> Result<PathBuf> {
         match self.existing_issue_path(id)? {
             Some(path) => Ok(path),
             None => self.configured_issue_path(id),
@@ -423,13 +651,15 @@ impl Storage {
     }
 
     fn write_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        IssueId::parse(&issue.id)?;
+        ensure_contained(&self.beads_dir, path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create issue directory: {}", parent.display())
             })?;
         }
         let markdown = issue_to_markdown(issue)?;
-        fs::write(path, markdown)
+        atomic_write(path, markdown.as_bytes())
             .with_context(|| format!("Failed to write issue file: {}", path.display()))?;
         Ok(())
     }
@@ -441,6 +671,8 @@ impl Storage {
     /// caller print a fabricated "Created issue" success. `create_new(true)`
     /// makes that collision an explicit error instead.
     fn write_new_issue_to_path(&self, path: &Path, issue: &Issue) -> Result<()> {
+        IssueId::parse(&issue.id)?;
+        ensure_contained(&self.beads_dir, path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create issue directory: {}", parent.display())
@@ -558,7 +790,7 @@ impl Storage {
         id: Option<String>,
         deps: Vec<(String, DependencyType)>,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Generate ID if not provided
         let issue_id = if let Some(id) = id {
@@ -606,7 +838,7 @@ impl Storage {
 
     /// Get an issue by ID
     pub fn get_issue(&self, id: &str) -> Result<Option<Issue>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             return Ok(None);
@@ -626,12 +858,15 @@ impl Storage {
         self.beads_dir.join("comments")
     }
 
-    fn comment_path(&self, issue_id: &str) -> PathBuf {
-        self.comments_dir().join(format!("{}.json", issue_id))
+    fn comment_path(&self, issue_id: &str) -> Result<PathBuf> {
+        let id = IssueId::parse(issue_id)?;
+        let path = self.comments_dir().join(format!("{}.json", id.as_str()));
+        ensure_contained(&self.beads_dir, &path)?;
+        Ok(path)
     }
 
     fn read_comments_no_lock(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let path = self.comment_path(issue_id);
+        let path = self.comment_path(issue_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -650,20 +885,22 @@ impl Storage {
 
     fn write_comments_no_lock(&self, issue_id: &str, comments: &[Comment]) -> Result<()> {
         let comments_dir = self.comments_dir();
+        ensure_contained(&self.beads_dir, &comments_dir)?;
         fs::create_dir_all(&comments_dir).context("Failed to create comments directory")?;
 
         let mut sorted = comments.to_vec();
         sorted.sort_by_key(|c| c.created_at);
         let content =
             serde_json::to_string_pretty(&sorted).context("Failed to serialize comments")?;
-        let path = self.comment_path(issue_id);
-        fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+        let path = self.comment_path(issue_id)?;
+        atomic_write(&path, content.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
     /// Add a local comment to an issue.
     pub fn add_comment(&self, issue_id: &str, author: &str, body: &str) -> Result<Comment> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if !self.issue_exists_any_layout(issue_id)? {
             anyhow::bail!("Issue not found: {}", issue_id);
@@ -699,7 +936,7 @@ impl Storage {
 
     /// List comments for an issue.
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
         self.read_comments_no_lock(issue_id)
     }
 
@@ -709,7 +946,7 @@ impl Storage {
     /// no comment on `issue_id` has the given `comment_id`, so a typo or stale ID
     /// never silently succeeds.
     pub fn delete_comment(&self, issue_id: &str, comment_id: &str) -> Result<Comment> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let mut comments = self.read_comments_no_lock(issue_id)?;
         let pos = comments
@@ -730,7 +967,11 @@ impl Storage {
 
     /// Upsert comments imported from an external source.
     pub fn upsert_comments(&self, issue_id: &str, incoming: Vec<Comment>) -> Result<usize> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
+        anyhow::ensure!(
+            self.issue_exists_any_layout(issue_id)?,
+            "Issue not found: {issue_id}"
+        );
         let mut comments = self.read_comments_no_lock(issue_id)?;
         let mut changed = 0;
 
@@ -762,7 +1003,7 @@ impl Storage {
 
     /// Remove comments whose body contains the given marker string.
     pub fn remove_comments_containing(&self, issue_id: &str, marker: &str) -> Result<usize> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
         let comments = self.read_comments_no_lock(issue_id)?;
         let original_len = comments.len();
         let comments: Vec<Comment> = comments
@@ -808,9 +1049,41 @@ impl Storage {
         target_issue.dependents = dependents;
     }
 
+    /// Acquire the database lock only if all persisted issue fields still match
+    /// the analyzed version. Derived dependents and collection order are ignored.
+    pub fn lock_issue_snapshot(&self, expected: &Issue) -> Result<Option<LockedIssue<'_>>> {
+        let lock = self.lock_for_write()?;
+        let Some(path) = self.existing_issue_path(&expected.id)? else {
+            return Ok(None);
+        };
+        let current = markdown_to_issue(&expected.id, &fs::read_to_string(path)?)?;
+        if crate::sync::canonical_issue(&current)? != crate::sync::canonical_issue(expected)? {
+            return Ok(None);
+        }
+        Ok(Some(LockedIssue {
+            storage: self,
+            issue: current,
+            _lock: lock,
+        }))
+    }
+
+    pub fn issue_matches_snapshot(&self, expected: &Issue) -> Result<bool> {
+        Ok(self.lock_issue_snapshot(expected)?.is_some())
+    }
+
+    pub fn update_issue_if_unchanged(
+        &self,
+        expected: &Issue,
+        updates: HashMap<String, String>,
+    ) -> Result<Option<Issue>> {
+        self.lock_issue_snapshot(expected)?
+            .map(|locked| locked.update(updates))
+            .transpose()
+    }
+
     /// Update an issue
     pub fn update_issue(&self, id: &str, updates: HashMap<String, String>) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -819,26 +1092,7 @@ impl Storage {
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
 
-        // Apply updates
-        for (key, value) in updates {
-            match key.as_str() {
-                "title" => issue.title = value,
-                "description" => issue.description = value,
-                "design" => issue.design = value,
-                "notes" => issue.notes = value,
-                "acceptance_criteria" => issue.acceptance_criteria = value,
-                "status" => issue.status = value.parse()?,
-                "priority" => issue.priority = value.parse()?,
-                "issue_type" => issue.issue_type = value.parse()?,
-                "assignee" => issue.assignee = value,
-                "external_ref" => {
-                    issue.external_ref = if value.is_empty() { None } else { Some(value) }
-                }
-                _ => {}
-            }
-        }
-
-        issue.updated_at = chrono::Utc::now();
+        apply_issue_updates(&mut issue, updates)?;
 
         self.write_issue_to_path(&issue_path, &issue)?;
 
@@ -847,7 +1101,7 @@ impl Storage {
 
     /// Add a label to an issue, returning the updated issue.
     pub fn add_label(&self, id: &str, label: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -869,7 +1123,7 @@ impl Storage {
 
     /// Remove a label from an issue, returning the updated issue.
     pub fn remove_label(&self, id: &str, label: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -888,7 +1142,7 @@ impl Storage {
 
     /// Replace all labels on an issue.
     pub fn set_labels(&self, id: &str, labels: Vec<String>) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -938,7 +1192,7 @@ impl Storage {
         replace: &str,
         replace_all: bool,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if search.is_empty() {
             anyhow::bail!("--search text must not be empty");
@@ -988,7 +1242,7 @@ impl Storage {
     /// you only want to add to the end, and simpler than a search/replace that
     /// has to reproduce the field's trailing lines exactly.
     pub fn append_to_issue(&self, id: &str, field: EditField, text: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         if text.is_empty() {
             anyhow::bail!("--append text must not be empty");
@@ -1037,7 +1291,7 @@ impl Storage {
         claimed_until: chrono::DateTime<chrono::Utc>,
         extra_updates: &HashMap<String, String>,
     ) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1107,7 +1361,7 @@ impl Storage {
     /// Refuses to release a claim held by a different worker unless `force` is
     /// set (a stale claim can also simply be reclaimed via [`claim_issue`]).
     pub fn release_issue(&self, id: &str, actor: &str, force: bool) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1140,7 +1394,7 @@ impl Storage {
 
     /// Close an issue
     pub fn close_issue(&self, id: &str, _reason: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1160,7 +1414,7 @@ impl Storage {
 
     /// Reopen an issue
     pub fn reopen_issue(&self, id: &str) -> Result<Issue> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(id)? else {
             anyhow::bail!("Issue not found: {}", id);
@@ -1187,118 +1441,30 @@ impl Storage {
     /// - Updates all text mentions of the old ID in all issues (title, description, design, notes, acceptance_criteria)
     /// - Is atomic (all updates succeed or none)
     pub fn rename_issue(&self, old_id: &str, new_id: &str, dry_run: bool) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
-
-        // Validate old issue exists
-        let Some(old_path) = self.existing_issue_path(old_id)? else {
-            anyhow::bail!("Issue not found: {}", old_id);
-        };
-
-        // Validate new ID doesn't already exist
-        if self.issue_exists_any_layout(new_id)? {
-            anyhow::bail!("Target issue ID already exists: {}", new_id);
-        }
-        let new_path = self.configured_issue_path(new_id)?;
-
-        // Track all changes for dry-run mode
-        let mut changes = Vec::new();
-        changes.push(format!("Rename file: {}.md -> {}.md", old_id, new_id));
-
-        // Load the issue to rename
-        let content = fs::read_to_string(&old_path).context("Failed to read issue file")?;
-        let mut issue = markdown_to_issue(old_id, &content)?;
-
-        // Update the issue's ID
-        issue.id = new_id.to_string();
-        issue.updated_at = chrono::Utc::now();
-        changes.push(format!(
-            "Update ID in frontmatter: {} -> {}",
-            old_id, new_id
-        ));
-
-        // Build ID mapping for text replacement
-        let mut id_mapping = HashMap::new();
-        id_mapping.insert(old_id.to_string(), new_id.to_string());
-
-        // Apply text replacements to the renamed issue itself
-        replace_ids_in_issue_text(&mut issue, &id_mapping);
-
-        // Find all issues that reference the old ID (either in dependencies or text)
+        let _lock = self.lock_for_write()?;
+        anyhow::ensure!(
+            self.issue_exists_any_layout(old_id)?,
+            "Issue not found: {old_id}"
+        );
+        anyhow::ensure!(
+            !self.issue_exists_any_layout(new_id)?,
+            "Target issue ID already exists: {new_id}"
+        );
         let all_issues = self.list_all_issues_no_dependents()?;
-        let mut issues_to_update = Vec::new();
-
-        for other_issue in all_issues {
-            if other_issue.id == old_id {
-                continue; // Skip the renamed issue itself
-            }
-
-            let mut other_issue = other_issue;
-            let mut has_changes = false;
-
-            // Check if this issue has explicit dependency on the renamed issue
-            if other_issue.depends_on.contains_key(old_id) {
+        let mapping = HashMap::from([(old_id.to_owned(), new_id.to_owned())]);
+        let mut changes = vec![format!("Rename file: {old_id}.md -> {new_id}.md")];
+        for issue in &all_issues {
+            if issue.depends_on.contains_key(old_id) {
                 changes.push(format!(
-                    "Update dependency in {}: {} -> {}",
-                    other_issue.id, old_id, new_id
+                    "Update dependency in {}: {old_id} -> {new_id}",
+                    issue.id
                 ));
-                has_changes = true;
-            }
-
-            // Apply text replacements to all text fields
-            let old_title = other_issue.title.clone();
-            let old_description = other_issue.description.clone();
-            let old_design = other_issue.design.clone();
-            let old_notes = other_issue.notes.clone();
-            let old_acceptance = other_issue.acceptance_criteria.clone();
-
-            replace_ids_in_issue_text(&mut other_issue, &id_mapping);
-
-            // Check if any text fields changed
-            if other_issue.title != old_title
-                || other_issue.description != old_description
-                || other_issue.design != old_design
-                || other_issue.notes != old_notes
-                || other_issue.acceptance_criteria != old_acceptance
-            {
-                changes.push(format!(
-                    "Update text references in {}: {} -> {}",
-                    other_issue.id, old_id, new_id
-                ));
-                has_changes = true;
-            }
-
-            if has_changes {
-                issues_to_update.push(other_issue);
             }
         }
-
-        // If dry-run, return changes without applying
-        if dry_run {
-            return Ok(changes);
+        changes.push("Preserve comments and update synchronization ownership".to_owned());
+        if !dry_run {
+            self.apply_id_mapping(all_issues, &mapping, &[])?;
         }
-
-        // Apply changes atomically
-        // First, write all updated issues
-        for mut other_issue in issues_to_update {
-            // Update the explicit dependency reference
-            if let Some(dep_type) = other_issue.depends_on.remove(old_id) {
-                other_issue.depends_on.insert(new_id.to_string(), dep_type);
-            }
-            other_issue.updated_at = chrono::Utc::now();
-
-            // Write the updated issue
-            let other_path = self.existing_or_configured_issue_path(&other_issue.id)?;
-            self.write_issue_to_path(&other_path, &other_issue)
-                .context(format!("Failed to update issue: {}", other_issue.id))?;
-        }
-
-        // Write the renamed issue with new ID
-        self.write_issue_to_path(&new_path, &issue)
-            .context("Failed to write renamed issue")?;
-
-        // Remove the old file
-        fs::remove_file(&old_path).context("Failed to remove old issue file")?;
-
         Ok(changes)
     }
 
@@ -1306,7 +1472,7 @@ impl Storage {
     ///
     /// This scans all issues and removes references to nonexistent issues
     pub fn repair_references(&self, dry_run: bool) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let mut changes = Vec::new();
         let all_issues = self.list_all_issues_no_dependents()?;
@@ -1374,7 +1540,7 @@ impl Storage {
         to_id: &str,
         dep_type: DependencyType,
     ) -> Result<()> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
@@ -1396,7 +1562,7 @@ impl Storage {
     }
 
     pub fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let Some(issue_path) = self.existing_issue_path(from_id)? else {
             anyhow::bail!("Issue not found: {}", from_id);
@@ -1680,7 +1846,7 @@ impl Storage {
         assignee: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Issue>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_read()?;
 
         let mut issues = Vec::new();
         for (issue_id, path) in self.issue_file_paths()? {
@@ -1734,6 +1900,7 @@ impl Storage {
     pub fn get_stats(&self) -> Result<Stats> {
         let issues = self.list_issues(None, None, None, None, None)?;
 
+        let closed_ids = closed_issue_ids(&issues);
         let total = issues.len();
         let open = issues.iter().filter(|i| i.status == Status::Open).count();
         let in_progress = issues
@@ -1745,13 +1912,13 @@ impl Storage {
         // Calculate blocked issues (those with blocking dependencies)
         let blocked = issues
             .iter()
-            .filter(|i| i.status != Status::Closed && i.has_blocking_dependencies())
+            .filter(|i| i.status != Status::Closed && has_unresolved_dependencies(i, &closed_ids))
             .count();
 
         // Calculate ready issues
         let ready = issues
             .iter()
-            .filter(|i| i.status == Status::Open && !i.has_blocking_dependencies())
+            .filter(|i| i.status == Status::Open && !has_unresolved_dependencies(i, &closed_ids))
             .count();
 
         // Calculate average lead time for closed issues
@@ -1786,6 +1953,7 @@ impl Storage {
     pub fn get_blocked(&self) -> Result<Vec<BlockedIssue>> {
         let issues = self.list_issues(None, None, None, None, None)?;
 
+        let closed_ids = closed_issue_ids(&issues);
         let mut blocked = Vec::new();
         for issue in issues {
             if issue.status == Status::Closed {
@@ -1793,7 +1961,11 @@ impl Storage {
             }
 
             // Zero-copy: collect blocking dependencies directly without intermediate Vec
-            let blocked_by: Vec<String> = issue.get_blocking_dependencies().cloned().collect();
+            let blocked_by: Vec<String> = issue
+                .get_blocking_dependencies()
+                .filter(|id| !closed_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
 
             if !blocked_by.is_empty() {
                 let blocked_by_count = blocked_by.len();
@@ -1820,11 +1992,21 @@ impl Storage {
         issue_type: Option<IssueType>,
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
-        let issues = self.list_issues(Some(Status::Open), priority, issue_type, assignee, None)?;
-
+        // Resolve dependency status from the full snapshot before filtering:
+        // an assignee/priority/type filter must not hide a live prerequisite.
+        let issues = self.list_issues(None, None, None, None, None)?;
+        let closed_ids = closed_issue_ids(&issues);
         let mut ready: Vec<Issue> = issues
             .into_iter()
-            .filter(|i| !i.has_blocking_dependencies())
+            .filter(|issue| {
+                issue.status == Status::Open
+                    && priority
+                        .as_ref()
+                        .is_none_or(|priorities| priorities.contains(&issue.priority))
+                    && issue_type.is_none_or(|kind| issue.issue_type == kind)
+                    && assignee.is_none_or(|actor| issue.assignee == actor)
+                    && !has_unresolved_dependencies(issue, &closed_ids)
+            })
             .collect();
 
         // Apply sorting based on policy
@@ -1873,6 +2055,7 @@ impl Storage {
     ) -> Result<usize> {
         use std::io::Write;
 
+        self.ensure_writable()?;
         // Convert single priority to vector for list_issues
         let priority_list = priority.map(|p| vec![p]);
 
@@ -1904,7 +2087,7 @@ impl Storage {
     ) -> Result<(usize, usize, Vec<String>)> {
         use std::io::{BufRead, BufReader};
 
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Open input file
         let file = fs::File::open(input_path)
@@ -2006,8 +2189,9 @@ impl Storage {
         dry_run: bool,
         force: bool,
     ) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
+        IssueId::parse(new_prefix)?;
         // Get current prefix
         let old_prefix = self.get_prefix()?;
 
@@ -2090,79 +2274,11 @@ impl Storage {
             return Ok(changes);
         }
 
-        // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies + text replacements)
-        for issue in all_issues {
-            let mut updated_issue = issue.clone();
-            let mut issue_modified = false;
-
-            // Check if this issue's ID needs to be renamed
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                updated_issue.id = new_id.clone();
-                issue_modified = true;
-            }
-
-            // Update dependency references
-            let mut new_depends_on = HashMap::new();
-            for (dep_id, dep_type) in &updated_issue.depends_on {
-                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                if mapped_dep_id != dep_id {
-                    issue_modified = true;
-                }
-                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
-            }
-            updated_issue.depends_on = new_depends_on;
-
-            // Apply text replacements to all text fields
-            let old_title = updated_issue.title.clone();
-            let old_description = updated_issue.description.clone();
-            let old_design = updated_issue.design.clone();
-            let old_notes = updated_issue.notes.clone();
-            let old_acceptance = updated_issue.acceptance_criteria.clone();
-
-            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
-
-            // Check if any text fields changed
-            if updated_issue.title != old_title
-                || updated_issue.description != old_description
-                || updated_issue.design != old_design
-                || updated_issue.notes != old_notes
-                || updated_issue.acceptance_criteria != old_acceptance
-            {
-                issue_modified = true;
-            }
-
-            // Only write if the issue was modified
-            if issue_modified {
-                updated_issue.updated_at = chrono::Utc::now();
-
-                let new_path = if updated_issue.id != issue.id {
-                    self.configured_issue_path(&updated_issue.id)?
-                } else {
-                    self.existing_or_configured_issue_path(&updated_issue.id)?
-                };
-                self.write_issue_to_path(&new_path, &updated_issue)
-                    .context(format!(
-                        "Failed to write renamed issue: {}",
-                        updated_issue.id
-                    ))?;
-
-                // Remove old file if ID changed
-                if updated_issue.id != issue.id {
-                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
-                        fs::remove_file(&old_path)
-                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
-                    }
-                }
-            }
-        }
-
-        // Step 2: Update config.yaml with new prefix
-        let config_path = self.beads_dir.join("config.yaml");
-        let mut config = HashMap::new();
-        config.insert("issue-prefix".to_string(), new_prefix.to_string());
-        let config_yaml = serde_yaml::to_string(&config)?;
-        fs::write(&config_path, config_yaml).context("Failed to update config.yaml")?;
+        self.apply_id_mapping(
+            all_issues,
+            &id_mapping,
+            &[("config.yaml", "issue-prefix", new_prefix)],
+        )?;
 
         Ok(changes)
     }
@@ -2174,7 +2290,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<Vec<String>> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         let current_layout = self.issue_storage_layout()?;
         let issue_paths = self.issue_file_paths()?;
@@ -2231,24 +2347,25 @@ impl Storage {
             return Ok(changes);
         }
 
+        let mut transaction = FileTransaction::new(&self.beads_dir);
         for (_issue_id, old_path, new_path) in &moves {
-            if let Some(parent) = new_path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create issue directory: {}", parent.display())
-                })?;
-            }
-            fs::rename(old_path, new_path).with_context(|| {
-                format!(
-                    "Failed to move issue file: {} -> {}",
-                    old_path.display(),
-                    new_path.display()
-                )
-            })?;
+            ensure_contained(&self.beads_dir, old_path)?;
+            ensure_contained(&self.beads_dir, new_path)?;
+            transaction.remove(old_path.clone());
+            transaction.write_with_mtime(
+                new_path.clone(),
+                fs::read(old_path)?,
+                fs::metadata(old_path)?.modified()?,
+            );
         }
-
         if update_config {
-            self.set_issue_storage_layout(target_layout)?;
+            transaction.config(
+                "config-minibeads.yaml",
+                "issue-storage-layout",
+                target_layout.as_str(),
+            )?;
         }
+        transaction.commit()?;
 
         self.remove_empty_issue_dirs()?;
 
@@ -2305,7 +2422,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Check if already using hash IDs
         if self.use_hash_ids()? {
@@ -2385,78 +2502,12 @@ impl Storage {
             return Ok((changes, HashMap::new()));
         }
 
-        // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies + text replacements)
-        for issue in all_issues {
-            let mut updated_issue = issue.clone();
-            let mut issue_modified = false;
-
-            // Check if this issue's ID needs to be migrated
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                updated_issue.id = new_id.clone();
-                issue_modified = true;
-            }
-
-            // Update dependency references
-            let mut new_depends_on = HashMap::new();
-            for (dep_id, dep_type) in &updated_issue.depends_on {
-                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                if mapped_dep_id != dep_id {
-                    issue_modified = true;
-                }
-                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
-            }
-            updated_issue.depends_on = new_depends_on;
-
-            // Apply text replacements to all text fields
-            let old_title = updated_issue.title.clone();
-            let old_description = updated_issue.description.clone();
-            let old_design = updated_issue.design.clone();
-            let old_notes = updated_issue.notes.clone();
-            let old_acceptance = updated_issue.acceptance_criteria.clone();
-
-            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
-
-            // Check if any text fields changed
-            if updated_issue.title != old_title
-                || updated_issue.description != old_description
-                || updated_issue.design != old_design
-                || updated_issue.notes != old_notes
-                || updated_issue.acceptance_criteria != old_acceptance
-            {
-                issue_modified = true;
-            }
-
-            // Only write if the issue was modified
-            if issue_modified {
-                updated_issue.updated_at = chrono::Utc::now();
-
-                let new_path = if updated_issue.id != issue.id {
-                    self.configured_issue_path(&updated_issue.id)?
-                } else {
-                    self.existing_or_configured_issue_path(&updated_issue.id)?
-                };
-                self.write_issue_to_path(&new_path, &updated_issue)
-                    .context(format!(
-                        "Failed to write renamed issue: {}",
-                        updated_issue.id
-                    ))?;
-
-                // Remove old file if ID changed
-                if updated_issue.id != issue.id {
-                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
-                        fs::remove_file(&old_path)
-                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
-                    }
-                }
-            }
-        }
-
-        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: true (if requested)
-        if update_config {
-            let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
-            update_yaml_key_value(&minibeads_config_path, "mb-hash-ids", "true")?;
-        }
+        let configs = if update_config {
+            vec![("config-minibeads.yaml", "mb-hash-ids", "true")]
+        } else {
+            Vec::new()
+        };
+        self.apply_id_mapping(all_issues, &id_mapping, &configs)?;
 
         Ok((changes, id_mapping))
     }
@@ -2476,7 +2527,7 @@ impl Storage {
         dry_run: bool,
         update_config: bool,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Get current prefix
         let prefix = self.get_prefix()?;
@@ -2595,78 +2646,12 @@ impl Storage {
             return Ok((changes, HashMap::new()));
         }
 
-        // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies + text replacements)
-        for issue in all_issues {
-            let mut updated_issue = issue.clone();
-            let mut issue_modified = false;
-
-            // Check if this issue's ID needs to be migrated
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                updated_issue.id = new_id.clone();
-                issue_modified = true;
-            }
-
-            // Update dependency references
-            let mut new_depends_on = HashMap::new();
-            for (dep_id, dep_type) in &updated_issue.depends_on {
-                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                if mapped_dep_id != dep_id {
-                    issue_modified = true;
-                }
-                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
-            }
-            updated_issue.depends_on = new_depends_on;
-
-            // Apply text replacements to all text fields
-            let old_title = updated_issue.title.clone();
-            let old_description = updated_issue.description.clone();
-            let old_design = updated_issue.design.clone();
-            let old_notes = updated_issue.notes.clone();
-            let old_acceptance = updated_issue.acceptance_criteria.clone();
-
-            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
-
-            // Check if any text fields changed
-            if updated_issue.title != old_title
-                || updated_issue.description != old_description
-                || updated_issue.design != old_design
-                || updated_issue.notes != old_notes
-                || updated_issue.acceptance_criteria != old_acceptance
-            {
-                issue_modified = true;
-            }
-
-            // Only write if the issue was modified
-            if issue_modified {
-                updated_issue.updated_at = chrono::Utc::now();
-
-                let new_path = if updated_issue.id != issue.id {
-                    self.configured_issue_path(&updated_issue.id)?
-                } else {
-                    self.existing_or_configured_issue_path(&updated_issue.id)?
-                };
-                self.write_issue_to_path(&new_path, &updated_issue)
-                    .context(format!(
-                        "Failed to write renamed issue: {}",
-                        updated_issue.id
-                    ))?;
-
-                // Remove old file if ID changed
-                if updated_issue.id != issue.id {
-                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
-                        fs::remove_file(&old_path)
-                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
-                    }
-                }
-            }
-        }
-
-        // Step 2: Update config-minibeads.yaml to set mb-hash-ids: false (if requested)
-        if update_config {
-            let minibeads_config_path = self.beads_dir.join("config-minibeads.yaml");
-            update_yaml_key_value(&minibeads_config_path, "mb-hash-ids", "false")?;
-        }
+        let configs = if update_config {
+            vec![("config-minibeads.yaml", "mb-hash-ids", "false")]
+        } else {
+            Vec::new()
+        };
+        self.apply_id_mapping(all_issues, &id_mapping, &configs)?;
 
         Ok((changes, id_mapping))
     }
@@ -2693,7 +2678,7 @@ impl Storage {
         dry_run: bool,
         closed_issue_start: Option<u32>,
     ) -> Result<(Vec<String>, HashMap<String, String>)> {
-        let _lock = Lock::acquire(&self.beads_dir)?;
+        let _lock = self.lock_for_write()?;
 
         // Get current prefix
         let prefix = self.get_prefix()?;
@@ -2827,72 +2812,7 @@ impl Storage {
             return Ok((changes, HashMap::new()));
         }
 
-        // Apply changes atomically
-        // Step 1: Update all issue files (content + dependencies + text replacements)
-        for issue in all_issues {
-            let mut updated_issue = issue.clone();
-            let mut issue_modified = false;
-
-            // Check if this issue's ID needs to be repacked
-            if let Some(new_id) = id_mapping.get(&issue.id) {
-                updated_issue.id = new_id.clone();
-                issue_modified = true;
-            }
-
-            // Update dependency references
-            let mut new_depends_on = HashMap::new();
-            for (dep_id, dep_type) in &updated_issue.depends_on {
-                let mapped_dep_id = id_mapping.get(dep_id).unwrap_or(dep_id);
-                if mapped_dep_id != dep_id {
-                    issue_modified = true;
-                }
-                new_depends_on.insert(mapped_dep_id.clone(), *dep_type);
-            }
-            updated_issue.depends_on = new_depends_on;
-
-            // Apply text replacements to all text fields
-            let old_title = updated_issue.title.clone();
-            let old_description = updated_issue.description.clone();
-            let old_design = updated_issue.design.clone();
-            let old_notes = updated_issue.notes.clone();
-            let old_acceptance = updated_issue.acceptance_criteria.clone();
-
-            replace_ids_in_issue_text(&mut updated_issue, &id_mapping);
-
-            // Check if any text fields changed
-            if updated_issue.title != old_title
-                || updated_issue.description != old_description
-                || updated_issue.design != old_design
-                || updated_issue.notes != old_notes
-                || updated_issue.acceptance_criteria != old_acceptance
-            {
-                issue_modified = true;
-            }
-
-            // Only write if the issue was modified
-            if issue_modified {
-                updated_issue.updated_at = chrono::Utc::now();
-
-                let new_path = if updated_issue.id != issue.id {
-                    self.configured_issue_path(&updated_issue.id)?
-                } else {
-                    self.existing_or_configured_issue_path(&updated_issue.id)?
-                };
-                self.write_issue_to_path(&new_path, &updated_issue)
-                    .context(format!(
-                        "Failed to write repacked issue: {}",
-                        updated_issue.id
-                    ))?;
-
-                // Remove old file if ID changed
-                if updated_issue.id != issue.id {
-                    if let Some(old_path) = self.existing_issue_path(&issue.id)? {
-                        fs::remove_file(&old_path)
-                            .context(format!("Failed to remove old issue file: {}", issue.id))?;
-                    }
-                }
-            }
-        }
+        self.apply_id_mapping(all_issues, &id_mapping, &[])?;
 
         Ok((changes, id_mapping))
     }
@@ -2902,7 +2822,7 @@ impl Storage {
 /// issue's ID and path. Free function so it can be used before a `Storage` is
 /// fully constructed (see `infer_prefix_from_issues_dir`, used while
 /// bootstrapping `config.yaml`); `Storage::issue_file_paths` delegates here.
-fn issue_file_paths_in(issues_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn issue_file_paths_in(issues_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     if !issues_dir.exists() {
         return Ok(Vec::new());
     }
@@ -3063,7 +2983,12 @@ fn ensure_gitignore(beads_dir: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
 
     let gitignore_path = beads_dir.join(".gitignore");
-    let required_entries = ["minibeads.lock", "command_history.log"];
+    let required_entries = [
+        "minibeads.lock",
+        "command_history.log",
+        "minibeads-transaction.json",
+        ".mb-write-*",
+    ];
 
     // Read existing content if file exists
     let mut existing_lines = Vec::new();
@@ -3194,60 +3119,6 @@ fn find_max_numeric_id_before_gap(numeric_ids: &[u32], max_gap: u32) -> (u32, Ve
     (max_before_gap, ids_above_gap)
 }
 
-/// Update a single key-value pair in a YAML file while preserving comments and formatting
-///
-/// This function safely updates a YAML config file by:
-/// - Reading the file line by line
-/// - Finding the line with the specified key (format: "key: value")
-/// - Replacing only that line with the new value
-/// - Preserving all comments, blank lines, and other formatting
-///
-/// This approach is more reliable than parsing/serializing YAML for simple config files
-/// because it doesn't require a comment-preserving YAML library.
-fn update_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result<()> {
-    use std::io::{BufRead, BufReader};
-
-    // Read all lines
-    let file = fs::File::open(file_path)
-        .with_context(|| format!("Failed to open config file: {}", file_path.display()))?;
-    let reader = BufReader::new(file);
-    let mut lines: Vec<String> = reader
-        .lines()
-        .collect::<Result<_, _>>()
-        .with_context(|| format!("Failed to read config file: {}", file_path.display()))?;
-
-    // Find and update the line with the key
-    let key_prefix = format!("{}:", key);
-    let mut found = false;
-
-    for line in &mut lines {
-        let trimmed = line.trim();
-        // Check if this line starts with "key:" (ignoring leading whitespace)
-        if trimmed.starts_with(&key_prefix) {
-            // Preserve indentation by finding where non-whitespace starts
-            let indent = line.len() - line.trim_start().len();
-            *line = format!("{}{}: {}", " ".repeat(indent), key, new_value);
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        anyhow::bail!(
-            "Key '{}' not found in config file: {}",
-            key,
-            file_path.display()
-        );
-    }
-
-    // Write back all lines
-    let content = lines.join("\n") + "\n"; // Ensure file ends with newline
-    fs::write(file_path, content)
-        .with_context(|| format!("Failed to write config file: {}", file_path.display()))?;
-
-    Ok(())
-}
-
 fn upsert_yaml_key_value(file_path: &Path, key: &str, new_value: &str) -> Result<()> {
     use std::io::{BufRead, BufReader};
 
@@ -3373,7 +3244,7 @@ mod list_order_tests {
     #[test]
     fn numeric_cluster_first_then_hash() {
         let base = chrono::Utc::now();
-        let mut issues = vec![
+        let mut issues = [
             issue_at("minibeads-a3f9", base + Duration::seconds(1)),
             issue_at("minibeads-10", base + Duration::seconds(2)),
             issue_at("minibeads-2", base + Duration::seconds(3)),
@@ -4158,4 +4029,89 @@ mod search_replace_tests {
         let issue = storage.get_issue(&id).unwrap().unwrap();
         assert_eq!(issue.description, "body");
     }
+}
+
+fn remap_issue(issue: &mut Issue, mapping: &HashMap<String, String>) -> bool {
+    let mut changed = false;
+    if let Some(new_id) = mapping.get(&issue.id) {
+        if new_id != &issue.id {
+            issue.id.clone_from(new_id);
+            changed = true;
+        }
+    }
+    issue.depends_on = std::mem::take(&mut issue.depends_on)
+        .into_iter()
+        .map(|(id, kind)| {
+            if let Some(new_id) = mapping.get(&id) {
+                changed |= new_id != &id;
+                (new_id.clone(), kind)
+            } else {
+                (id, kind)
+            }
+        })
+        .collect();
+    for field in [
+        &mut issue.title,
+        &mut issue.description,
+        &mut issue.design,
+        &mut issue.acceptance_criteria,
+        &mut issue.notes,
+    ] {
+        let replaced = replace_issue_ids_in_text(field, mapping);
+        if replaced != *field {
+            *field = replaced;
+            changed = true;
+        }
+    }
+    changed
+}
+
+// Own only the closed IDs so callers can move Issue values into their results.
+fn closed_issue_ids(issues: &[Issue]) -> HashSet<String> {
+    issues
+        .iter()
+        .filter(|issue| issue.status == Status::Closed)
+        .map(|issue| issue.id.clone())
+        .collect()
+}
+
+fn has_unresolved_dependencies(issue: &Issue, closed_ids: &HashSet<String>) -> bool {
+    if closed_ids.is_empty() {
+        issue.has_blocking_dependencies()
+    } else {
+        // A missing target stays unresolved; only explicitly closed issues
+        // discharge a blocking dependency.
+        issue
+            .get_blocking_dependencies()
+            .any(|id| !closed_ids.contains(id.as_str()))
+    }
+}
+fn apply_issue_updates(issue: &mut Issue, updates: HashMap<String, String>) -> Result<()> {
+    let now = chrono::Utc::now();
+    for (key, value) in updates {
+        match key.as_str() {
+            "title" => issue.title = value,
+            "description" => issue.description = value,
+            "design" => issue.design = value,
+            "notes" => issue.notes = value,
+            "acceptance_criteria" => issue.acceptance_criteria = value,
+            "status" => {
+                issue.status = value.parse()?;
+                issue.closed_at = if issue.status == Status::Closed {
+                    issue.closed_at.or(Some(now))
+                } else {
+                    None
+                };
+            }
+            "priority" => issue.priority = value.parse()?,
+            "issue_type" => issue.issue_type = value.parse()?,
+            "assignee" => issue.assignee = value,
+            "external_ref" => {
+                issue.external_ref = if value.is_empty() { None } else { Some(value) }
+            }
+            _ => {}
+        }
+    }
+    issue.updated_at = now;
+    Ok(())
 }

@@ -6,7 +6,7 @@ issue_type: task
 labels:
 - human
 created_at: 2026-07-30T16:11:54.945437012+00:00
-updated_at: 2026-07-30T16:50:51.975175255+00:00
+updated_at: 2026-09-07T20:08:57.227012991+00:00
 ---
 
 # Description
@@ -84,3 +84,5 @@ PART 2 PROGRESS (2026-07-30): team-lead relayed ui-issue-workflow's live-verifie
 4. Separately flagged safety bug (mb create defaulting to prefix "tmp" when config.yaml is missing but real issues already exist): fixed by preferring inference from existing issue files over the directory-name guess in both Storage::open and Storage::init. Regression test added and confirmed to fail pre-fix.
 Screenshot/attachment field (lowest priority) not started.
 Bumping to 0.27.0 (CHANGELOG updated). Full test suite + clippy in progress before opening the PR (feature branch + PR only, no merge, no crates.io -- per standing constraint).
+
+2026-09-07_#225(f47b766cbf): Reviewed Brian/unormal cumulative PRs #15 through #24 with independent agents. Corrected migration timestamp precedence (#17), persisted-snapshot normalization (#21), and punctuation code-reference boundaries (#23); see ai_docs/pr-landing-review.md. Full corrected stack passes 203 debug tests on stable and Rust 1.87, fmt, strict all-target/all-feature Clippy, and security audit (zero warnings/vulnerabilities). Next: fast-forward review fixes to existing PR24, require final-head CI, merge stack atomically preserving original commit order, verify all PR states and archive branch tags. Earlier heads fail audit until #24, so do not land red intermediate states. No new issues created. The separate sync-overhaul prototype remains frozen and excluded; human plan review is required before further implementation. Review proposal: ai_docs/github-sync-plan.md in the owner working checkout.

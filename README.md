@@ -36,6 +36,8 @@ alias bd=mb
 
 ### Build from source
 
+Use Rust 1.87 or newer (required by the build-time metadata helper).
+
 ```bash
 # Clone the repository
 git clone https://github.com/rrnewton/minibeads.git

@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-07-11T10:35:12.059571606+00:00
+updated_at: 2026-09-07T20:08:57.234818702+00:00
 ---
 
 # Description
@@ -127,3 +127,5 @@ make stress-test's test_sync_stress fails deterministically (seed 12345) with an
 - Found flaky test: minibeads-36
   (github::tests::github_import_creates_only_unlinked_issues intermittently
   fails with "Text file busy" under parallel `cargo test`).
+
+2026-09-07_#225(f47b766cbf): Brian PR stack corrections validated: 203 tests pass on stable and Rust 1.87 (66 lib, 101 bin, 7 shell fixtures, 1 migration, 28 regressions). Added regressions cover migration timestamps versus newer JSONL, persisted GitHub snapshots, punctuation code references, cycles/line endings/permissions, multiline command history, and rollback boundaries. make -o purge validate runs every validation gate without the private-database purge; strict all-target/all-feature Clippy and audit --deny warnings also pass. Randomized release-hardcoded harness not run. Next: final corrected PR24 CI and atomic landing, tracked by minibeads-37. No new issues created.

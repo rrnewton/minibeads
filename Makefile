@@ -13,7 +13,7 @@ release:
 
 # Run all tests
 test: build
-	cargo test --lib --bins --test e2e_tests
+	cargo test --locked --lib --bins --test e2e_tests --test migration_description_truncation --test regressions
 
 # Run longer randomized/stress suites
 stress-test:

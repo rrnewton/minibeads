@@ -1,4 +1,6 @@
+#[cfg(unix)]
 use dir_test::Fixture;
+#[cfg(unix)]
 use std::process::Command;
 
 /// Test harness for running shell scripts
