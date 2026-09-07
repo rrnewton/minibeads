@@ -6,7 +6,7 @@ issue_type: task
 labels:
 - human
 created_at: 2026-07-30T16:11:54.945437012+00:00
-updated_at: 2026-09-07T20:16:29.411028849+00:00
+updated_at: 2026-09-07T20:31:27.393720446+00:00
 ---
 
 # Description
@@ -90,3 +90,5 @@ Bumping to 0.27.0 (CHANGELOG updated). Full test suite + clippy in progress befo
 2026-09-07_#226(25b963ff0c): Final corrected PR24 CI run 34158336503 passed all seven jobs: tests, coverage, fmt/Clippy, security audit, Linux, macOS, Windows. Merge preparation complete. Next: guarded normal merge of exact reviewed head 25b963ff0c; verify PR15–24 ancestry and archive branch tags. Overhaul implementation remains held for owner review; no new issues created.
 
 2026-09-07_#227(19fc71cfc1): LANDING COMPLETE. Brian/unormal PRs #15–#24 are all MERGED on GitHub through normal merge 19fc71cfc1. Final corrected head 25b963ff0c passed all seven CI jobs (run 34158336503). Verified every original head is an ancestor of origin/main and merged source matches tested tip. All ten completed codex/review-* branches archived as remote annotated .v1 tags and verified against their PR heads; fork branches retained. ai_docs/pr-landing-review.md records results. No new issues created. BLOCKED ONLY ON HUMAN PLAN REVIEW: ai_docs/github-sync-plan.md in owner working checkout covers issue/label scope, real common ancestors, deterministic prose merging, Unison model, concurrency and recovery. Existing experimental prototype is frozen/unapproved and excluded from the landing. Do not resume overhaul implementation until the requested review round is complete.
+
+2026-09-07_#228(3f467d063a): A post-merge macOS stress-harness flake was fixed separately under minibeads-3: parallel tests now initialize debug binaries exactly once instead of rebuilding executables while siblings use them. This adds five routine regressions (208 routine tests now) without changing synchronization behavior or the approved PR ancestry. The only remaining feature-work prerequisite is the requested human review of ai_docs/github-sync-plan.md; the prototype stays frozen. No new issues created.

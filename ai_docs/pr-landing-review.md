@@ -20,6 +20,31 @@ Verified at `2026-09-07_#227(19fc71cfc1)`:
   plan**, not further PR landing. The original dirty checkout/prototype is
   preserved separately; do not mistake it for this validated landing worktree.
 
+## Post-merge test-harness follow-up
+
+At `2026-09-07_#228(3f467d063a)`, the documentation-only handoff CI
+([34158790240](https://github.com/rrnewton/minibeads/actions/runs/34158790240))
+exposed an intermittent macOS `random_minibeads` failure: a worker could not
+spawn `mb` after several successful actions. The original corrected PR and its
+merge both passed all seven jobs. Parallel tests were independently rebuilding
+the shared binaries while other tests executed them.
+
+The follow-up caches one initialization result with `OnceLock`, builds both tools
+in a single locked **debug** Cargo invocation, and obtains executable paths from
+Cargo artifacts instead of assuming `target/release`. Five deterministic tests
+cover concurrent initialization, cached failures, one shared debug build, custom
+target paths/platform suffixes, and missing artifacts. They run in routine
+`make validate` and the existing cross-platform CI suite.
+
+Integrated validation passes **208 routine tests** (the earlier 203 plus these
+five), fmt, and strict all-target/all-feature Clippy. The native harness passes
+10 tests on stable and Rust 1.87 (five overlap the routine initialization tests).
+The reviewer also validated a custom target directory containing spaces and
+six seeded parallel runs totaling 602 iterations. Upstream comparisons were
+excluded from these native checks. This fixes test execution, not sync semantics;
+the overhaul remains on human-review hold. Final platform confirmation is recorded
+by the follow-up commit's GitHub Actions checks.
+
 ## Scope and order
 
 Brian (`unormal`) submitted ten cumulative PRs against `rrnewton/minibeads:main`.
