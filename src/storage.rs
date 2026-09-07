@@ -58,7 +58,7 @@ impl LockedIssue<'_> {
             .storage
             .existing_or_configured_issue_path(&self.issue.id)?;
         self.storage.write_issue_to_path(&path, &self.issue)?;
-        Ok(self.issue)
+        markdown_to_issue(&self.issue.id, &fs::read_to_string(path)?)
     }
 }
 
@@ -248,13 +248,20 @@ impl Storage {
         for mut issue in all_issues {
             let old_id = issue.id.clone();
             if remap_issue(&mut issue, mapping) {
-                issue.updated_at = chrono::Utc::now();
+                let source = self
+                    .existing_issue_path(&old_id)?
+                    .context("Migration source issue disappeared")?;
+                let modified = fs::metadata(source)?.modified()?;
                 let path = if old_id != issue.id {
                     self.configured_issue_path(&issue.id)?
                 } else {
                     self.existing_or_configured_issue_path(&issue.id)?
                 };
-                transaction.write(path, issue_to_markdown(&issue)?.into_bytes());
+                transaction.write_with_mtime(
+                    path,
+                    issue_to_markdown(&issue)?.into_bytes(),
+                    modified,
+                );
             }
             let mut comments = self.read_comments_no_lock(&old_id)?;
             let mut comments_changed = old_id != issue.id && !comments.is_empty();
@@ -2345,7 +2352,11 @@ impl Storage {
             ensure_contained(&self.beads_dir, old_path)?;
             ensure_contained(&self.beads_dir, new_path)?;
             transaction.remove(old_path.clone());
-            transaction.write(new_path.clone(), fs::read(old_path)?);
+            transaction.write_with_mtime(
+                new_path.clone(),
+                fs::read(old_path)?,
+                fs::metadata(old_path)?.modified()?,
+            );
         }
         if update_config {
             transaction.config(

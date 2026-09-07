@@ -319,6 +319,133 @@ fn repacking_closed_issues_can_swap_their_ids_with_open_issues() {
 }
 
 #[test]
+fn layout_migration_preserves_mtime_and_newer_jsonl_edits() {
+    use minibeads::sync::{load_jsonl_issues, load_markdown_issues, SyncEngine};
+    use std::time::{Duration, SystemTime};
+
+    for (source, target) in [
+        (IssueStorageLayout::Flat, IssueStorageLayout::Sharded),
+        (IssueStorageLayout::Sharded, IssueStorageLayout::Flat),
+    ] {
+        let (_temp, storage) = fixture(source);
+        let mut issue = create(&storage, "r-1", "original title").unwrap();
+        let root = storage.get_beads_dir();
+        let original_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let markdown = load_markdown_issues(&root).unwrap();
+        filetime::set_file_mtime(
+            &markdown[&issue.id].path,
+            filetime::FileTime::from_system_time(original_mtime),
+        )
+        .unwrap();
+        issue.title = "newer independently edited title".into();
+        issue.updated_at = (original_mtime + Duration::from_secs(60)).into();
+        let jsonl_path = root.join("issues.jsonl");
+        fs::write(&jsonl_path, serde_json::to_vec(&issue).unwrap()).unwrap();
+        let engine = SyncEngine::new();
+        let before = engine
+            .analyze(
+                load_markdown_issues(&root).unwrap(),
+                load_jsonl_issues(&jsonl_path).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(before.jsonl_newer, ["r-1"]);
+
+        storage
+            .migrate_issue_storage_layout(target, false, true)
+            .unwrap();
+
+        let markdown = load_markdown_issues(&root).unwrap();
+        assert_eq!(markdown[&issue.id].mtime, original_mtime);
+        let after = engine
+            .analyze(markdown, load_jsonl_issues(&jsonl_path).unwrap())
+            .unwrap();
+        assert_eq!(after.jsonl_newer, ["r-1"]);
+        assert!(after.markdown_newer.is_empty());
+    }
+}
+
+#[test]
+fn id_migrations_preserve_newer_independent_jsonl_edits() {
+    use minibeads::sync::{load_jsonl_issues, load_markdown_issues, SyncEngine};
+
+    enum Migration {
+        Rename,
+        Prefix,
+        Hash,
+        Numeric,
+        Repack,
+    }
+
+    for layout in [IssueStorageLayout::Flat, IssueStorageLayout::Sharded] {
+        for migration in [
+            Migration::Rename,
+            Migration::Prefix,
+            Migration::Hash,
+            Migration::Numeric,
+            Migration::Repack,
+        ] {
+            let (_temp, storage) = fixture(layout);
+            let old_id = if matches!(migration, Migration::Numeric) {
+                "r-abcd"
+            } else {
+                "r-2"
+            };
+            let mut independent = import_fixture_issues(&storage, &[old_id])
+                .into_iter()
+                .next()
+                .unwrap();
+            let original_updated_at = independent.updated_at;
+            let original_mtime = original_updated_at.into();
+            let root = storage.get_beads_dir();
+            let markdown = load_markdown_issues(&root).unwrap();
+            filetime::set_file_mtime(
+                &markdown[old_id].path,
+                filetime::FileTime::from_system_time(original_mtime),
+            )
+            .unwrap();
+            let original_mtime = fs::metadata(&markdown[old_id].path)
+                .unwrap()
+                .modified()
+                .unwrap();
+            independent.title = "newer independently edited title".into();
+            independent.updated_at += chrono::Duration::seconds(60);
+            let jsonl_path = root.join("issues.jsonl");
+            fs::write(&jsonl_path, serde_json::to_vec(&independent).unwrap()).unwrap();
+
+            match migration {
+                Migration::Rename => {
+                    storage.rename_issue(old_id, "r-9", false).unwrap();
+                }
+                Migration::Prefix => {
+                    storage.rename_prefix("new", false, false).unwrap();
+                }
+                Migration::Hash => {
+                    storage.migrate_to_hash_ids(false, true).unwrap();
+                }
+                Migration::Numeric => {
+                    storage.migrate_to_numeric_ids(false, true).unwrap();
+                }
+                Migration::Repack => {
+                    storage.repack_numeric_ids(false, None).unwrap();
+                }
+            }
+
+            let markdown = load_markdown_issues(&root).unwrap();
+            let migrated = markdown.values().next().unwrap();
+            assert_eq!(migrated.mtime, original_mtime);
+            assert_eq!(migrated.issue.updated_at, original_updated_at);
+            let jsonl = load_jsonl_issues(&jsonl_path).unwrap();
+            let record = &jsonl[&migrated.issue.id];
+            assert_eq!(record.issue.title, independent.title);
+            assert_eq!(record.updated_at, independent.updated_at);
+            let plan = SyncEngine::new().analyze(markdown, jsonl).unwrap();
+            assert_eq!(plan.jsonl_newer.len(), 1);
+            assert!(plan.markdown_newer.is_empty());
+        }
+    }
+}
+
+#[test]
 fn closing_and_reopening_prerequisites_updates_ready_blocked_and_stats() {
     use minibeads::types::DependencyType;
     let (_temp, storage) = fixture(IssueStorageLayout::Flat);
@@ -457,6 +584,32 @@ fn run_cli(storage: &Storage, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+#[test]
+fn checked_issue_update_returns_the_persisted_snapshot() {
+    for layout in [IssueStorageLayout::Flat, IssueStorageLayout::Sharded] {
+        let (_temp, storage) = fixture(layout);
+        create(&storage, "r-1", "original").unwrap();
+        for description in ["Remote body\n", "# Remote heading\n\nRemote body\n"] {
+            let before = storage.get_issue("r-1").unwrap().unwrap();
+            let updated = storage
+                .update_issue_if_unchanged(
+                    &before,
+                    std::collections::HashMap::from([(
+                        "description".to_owned(),
+                        description.to_owned(),
+                    )]),
+                )
+                .unwrap()
+                .unwrap();
+            assert!(storage.issue_matches_snapshot(&updated).unwrap());
+            assert_eq!(
+                updated.description,
+                storage.get_issue("r-1").unwrap().unwrap().description
+            );
+        }
+    }
 }
 
 #[test]
@@ -699,6 +852,30 @@ fn readonly_rejects_modifications_before_opening_storage() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!fresh.path().join(".minibeads").exists());
+}
+
+#[test]
+fn command_history_keeps_multiline_arguments_on_one_line() {
+    let (_temp, storage) = fixture(IssueStorageLayout::Flat);
+    let output = Command::new(env!("CARGO_BIN_EXE_mb"))
+        .arg("--mb-beads-dir")
+        .arg(storage.get_beads_dir())
+        .args([
+            "create",
+            "Multiline description",
+            "--description",
+            "first line\nsecond \"line\"\r\nthird line",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let history = fs::read_to_string(storage.get_beads_dir().join("command_history.log")).unwrap();
+    assert_eq!(history.lines().count(), 1);
+    assert!(history.contains(r#"first line\nsecond \"line\"\r\nthird line"#));
 }
 
 #[test]

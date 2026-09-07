@@ -11,10 +11,19 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 pub(crate) const JOURNAL: &str = "minibeads-transaction.json";
 
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_write_with_mtime(path, content, None)
+}
+
+fn atomic_write_with_mtime(
+    path: &Path,
+    content: &[u8],
+    modified: Option<SystemTime>,
+) -> Result<()> {
     let parent = path.parent().context("File has no parent directory")?;
     fs::create_dir_all(parent)?;
     let mut file = tempfile::Builder::new()
@@ -23,6 +32,13 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     file.write_all(content)?;
     if let Ok(metadata) = fs::metadata(path) {
         file.as_file().set_permissions(metadata.permissions())?;
+    }
+    if let Some(modified) = modified {
+        filetime::set_file_handle_times(
+            file.as_file(),
+            None,
+            Some(filetime::FileTime::from_system_time(modified)),
+        )?;
     }
     file.as_file().sync_all()?;
     file.persist(path)
@@ -58,6 +74,16 @@ impl<'a> FileTransaction<'a> {
 
     pub(crate) fn set_mtime(&mut self, path: PathBuf, modified: std::time::SystemTime) {
         self.modified.insert(path, modified);
+    }
+
+    pub(crate) fn write_with_mtime(
+        &mut self,
+        path: PathBuf,
+        content: Vec<u8>,
+        modified: SystemTime,
+    ) {
+        self.write(path.clone(), content);
+        self.set_mtime(path, modified);
     }
 
     pub(crate) fn remove(&mut self, path: PathBuf) {
@@ -131,12 +157,10 @@ impl<'a> FileTransaction<'a> {
         let result = (|| {
             for (index, (path, content)) in self.desired.iter().enumerate() {
                 ensure_contained(self.root, path)?;
-                replace_or_remove(path, content.as_deref())?;
-                if let Some(modified) = self.modified.get(path) {
-                    filetime::set_file_mtime(
-                        path,
-                        filetime::FileTime::from_system_time(*modified),
-                    )?;
+                if let Some(content) = content {
+                    atomic_write_with_mtime(path, content, self.modified.get(path).copied())?;
+                } else {
+                    replace_or_remove(path, None)?;
                 }
                 after_write(index)?;
             }
@@ -212,20 +236,47 @@ mod tests {
 
     #[test]
     fn a_failed_multi_file_commit_restores_every_original() {
-        let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("first.md");
-        let second = temp.path().join("second.md");
-        fs::write(&first, b"first original").unwrap();
-        fs::write(&second, b"second original").unwrap();
-        let mut transaction = FileTransaction::new(temp.path());
-        transaction.write(first.clone(), b"replacement".to_vec());
-        transaction.remove(second.clone());
-        assert!(transaction
-            .commit_with_hook(|_| anyhow::bail!("simulated write failure"))
-            .is_err());
-        assert_eq!(fs::read(&first).unwrap(), b"first original");
-        assert_eq!(fs::read(&second).unwrap(), b"second original");
-        assert!(!temp.path().join(JOURNAL).exists());
+        for failure_index in 0..3 {
+            let temp = tempfile::tempdir().unwrap();
+            let first = temp.path().join("first.md");
+            let second = temp.path().join("second.md");
+            let third = temp.path().join("third.md");
+            let original_mtime =
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+            fs::write(&first, b"first original").unwrap();
+            fs::write(&second, b"second original").unwrap();
+            for path in [&first, &second] {
+                filetime::set_file_mtime(
+                    path,
+                    filetime::FileTime::from_system_time(original_mtime),
+                )
+                .unwrap();
+            }
+            let mut transaction = FileTransaction::new(temp.path());
+            transaction.write_with_mtime(
+                first.to_path_buf(),
+                b"replacement".to_vec(),
+                original_mtime + std::time::Duration::from_secs(60),
+            );
+            transaction.remove(second.to_path_buf());
+            transaction.write_with_mtime(third.to_path_buf(), b"new file".to_vec(), original_mtime);
+            assert!(transaction
+                .commit_with_hook(|index| {
+                    anyhow::ensure!(index != failure_index, "simulated write failure");
+                    Ok(())
+                })
+                .is_err());
+            assert_eq!(fs::read(&first).unwrap(), b"first original");
+            assert_eq!(fs::read(&second).unwrap(), b"second original");
+            for path in [&first, &second] {
+                assert_eq!(
+                    fs::metadata(path).unwrap().modified().unwrap(),
+                    original_mtime
+                );
+            }
+            assert!(!third.exists());
+            assert!(!temp.path().join(JOURNAL).exists());
+        }
     }
 
     #[test]

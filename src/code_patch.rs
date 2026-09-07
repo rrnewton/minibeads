@@ -181,7 +181,10 @@ fn patch_code_mappings(
     }
     let mut patterns: Vec<_> = mapping.keys().map(|id| regex::escape(id)).collect();
     patterns.sort_by_key(|pattern| std::cmp::Reverse(pattern.len()));
-    let pattern = regex::Regex::new(&format!(r"\b(?:{})\b", patterns.join("|")))?;
+    let pattern = regex::Regex::new(&format!(
+        r"\b{{start-half}}(?:{})\b{{end-half}}",
+        patterns.join("|")
+    ))?;
     let mut prepared = BTreeMap::new();
     for file in references.matches.keys() {
         let path = references.repo_root.join(file);
@@ -375,6 +378,74 @@ mod tests {
             fs::read_to_string(directory.path().join("code.txt")).unwrap(),
             "r-2 r-1 r-10 pre_r-1 r-1tail\n"
         );
+    }
+
+    #[test]
+    fn patches_punctuation_ended_ids_only_at_git_word_boundaries() {
+        for (old_id, original, expected) in [
+            (
+                "r-1+",
+                "r-1+ r-1+tail pre_r-1+\n",
+                "r-2 r-1+tail pre_r-1+\n",
+            ),
+            (".r-1", ".r-1 x.r-1 .r-10\n", "r-2 x.r-1 .r-10\n"),
+        ] {
+            let directory = repository(&[("code.txt", original)]);
+            let references = find_code_references_in(directory.path(), old_id).unwrap();
+            assert_eq!(references.total_matches, 1);
+            assert_eq!(patch_code_files(old_id, "r-2", &references).unwrap(), 1);
+            assert_eq!(
+                fs::read_to_string(directory.path().join("code.txt")).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn migration_cycles_span_files_and_preserve_mixed_line_endings() {
+        let directory = repository(&[
+            ("first.txt", "r-1\r\nr-2\nr-3"),
+            ("second.txt", "r-3\rr-1\r\n"),
+        ]);
+        let mut references = find_code_references_in(directory.path(), "r-1").unwrap();
+        for old_id in ["r-2", "r-3"] {
+            let additional = find_code_references_in(directory.path(), old_id).unwrap();
+            references.total_matches += additional.total_matches;
+            for (file, matches) in additional.matches {
+                references.matches.entry(file).or_default().extend(matches);
+            }
+        }
+        let mapping = HashMap::from([
+            ("r-1".into(), "r-2".into()),
+            ("r-2".into(), "r-3".into()),
+            ("r-3".into(), "r-1".into()),
+        ]);
+        assert_eq!(patch_code_mappings(&mapping, &references).unwrap(), 2);
+        assert_eq!(
+            fs::read(directory.path().join("first.txt")).unwrap(),
+            b"r-2\r\nr-3\nr-1"
+        );
+        assert_eq!(
+            fs::read(directory.path().join("second.txt")).unwrap(),
+            b"r-1\rr-2\r\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_patching_preserves_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = repository(&[("script.sh", "#!/bin/sh\n# r-1")]);
+        let path = directory.path().join("script.sh");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o751)).unwrap();
+        let references = find_code_references_in(directory.path(), "r-1").unwrap();
+        patch_code_files("r-1", "r-2", &references).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        assert_eq!(fs::read(path).unwrap(), b"#!/bin/sh\n# r-2");
     }
 
     #[cfg(unix)]

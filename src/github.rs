@@ -2381,12 +2381,14 @@ fn remember_state(
     remote: &RemoteIssue,
     comments: &[Comment],
 ) -> Result<()> {
+    let markdown = crate::format::issue_to_markdown(issue)?;
+    let issue = crate::format::markdown_to_issue(&issue.id, &markdown)?;
     let storage = Storage::open(beads_dir.to_path_buf())?;
     let _locked = storage
-        .lock_issue_snapshot(issue)?
+        .lock_issue_snapshot(&issue)?
         .context("Issue changed before recording GitHub sync state")?;
     let mut state = load_state(beads_dir)?;
-    update_state_entry(&mut state, issue, remote, comments);
+    update_state_entry(&mut state, &issue, remote, comments);
     save_state(beads_dir, &state)
 }
 
@@ -2916,6 +2918,40 @@ mod tests {
             )
             .unwrap();
         (temp, storage, issue)
+    }
+
+    #[test]
+    fn importing_an_open_issue_with_a_trailing_newline_records_ancestry() {
+        let (_temp, storage, mut issue) = storage_with_issue();
+        issue.external_ref = Some("https://github.com/example/repo/issues/1".into());
+        issue.description = "Remote body\n".into();
+        let response = remote_json_for(&issue);
+        let store = GithubStore::new_with_handler(move |args| {
+            anyhow::ensure!(args[0] == "issue", "Unexpected command");
+            match args[1].as_str() {
+                "list" => Ok(format!("[{response}]")),
+                "view" => Ok(response.to_string()),
+                "comment" => Ok(String::new()),
+                _ => anyhow::bail!("Unexpected remote mutation"),
+            }
+        });
+        let report = block_on_github(import_issues_with_store(
+            &storage,
+            &GithubImportOptions::default(),
+            &store,
+        ))
+        .unwrap();
+        assert_eq!(report.imported, 1);
+        let imported = storage
+            .get_issue(report.issues[0].issue_id.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported.description, "Remote body");
+        let state = load_state(&storage.get_beads_dir()).unwrap();
+        let entry = &state.issues[imported.external_ref.as_ref().unwrap()];
+        assert_eq!(entry.local_id, imported.id);
+        assert_eq!(entry.local_hash, hash_local_issue(&imported));
+        assert_eq!(entry.local_hash, entry.remote_hash);
     }
 
     #[test]
