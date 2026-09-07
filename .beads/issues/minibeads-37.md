@@ -6,7 +6,7 @@ issue_type: task
 labels:
 - human
 created_at: 2026-07-30T16:11:54.945437012+00:00
-updated_at: 2026-09-07T20:08:57.227012991+00:00
+updated_at: 2026-09-07T20:16:29.411028849+00:00
 ---
 
 # Description
@@ -86,3 +86,7 @@ Screenshot/attachment field (lowest priority) not started.
 Bumping to 0.27.0 (CHANGELOG updated). Full test suite + clippy in progress before opening the PR (feature branch + PR only, no merge, no crates.io -- per standing constraint).
 
 2026-09-07_#225(f47b766cbf): Reviewed Brian/unormal cumulative PRs #15 through #24 with independent agents. Corrected migration timestamp precedence (#17), persisted-snapshot normalization (#21), and punctuation code-reference boundaries (#23); see ai_docs/pr-landing-review.md. Full corrected stack passes 203 debug tests on stable and Rust 1.87, fmt, strict all-target/all-feature Clippy, and security audit (zero warnings/vulnerabilities). Next: fast-forward review fixes to existing PR24, require final-head CI, merge stack atomically preserving original commit order, verify all PR states and archive branch tags. Earlier heads fail audit until #24, so do not land red intermediate states. No new issues created. The separate sync-overhaul prototype remains frozen and excluded; human plan review is required before further implementation. Review proposal: ai_docs/github-sync-plan.md in the owner working checkout.
+
+2026-09-07_#226(25b963ff0c): Final corrected PR24 CI run 34158336503 passed all seven jobs: tests, coverage, fmt/Clippy, security audit, Linux, macOS, Windows. Merge preparation complete. Next: guarded normal merge of exact reviewed head 25b963ff0c; verify PR15–24 ancestry and archive branch tags. Overhaul implementation remains held for owner review; no new issues created.
+
+2026-09-07_#227(19fc71cfc1): LANDING COMPLETE. Brian/unormal PRs #15–#24 are all MERGED on GitHub through normal merge 19fc71cfc1. Final corrected head 25b963ff0c passed all seven CI jobs (run 34158336503). Verified every original head is an ancestor of origin/main and merged source matches tested tip. All ten completed codex/review-* branches archived as remote annotated .v1 tags and verified against their PR heads; fork branches retained. ai_docs/pr-landing-review.md records results. No new issues created. BLOCKED ONLY ON HUMAN PLAN REVIEW: ai_docs/github-sync-plan.md in owner working checkout covers issue/label scope, real common ancestors, deterministic prose merging, Unison model, concurrency and recovery. Existing experimental prototype is frozen/unapproved and excluded from the landing. Do not resume overhaul implementation until the requested review round is complete.

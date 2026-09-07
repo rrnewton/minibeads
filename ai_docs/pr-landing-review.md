@@ -3,6 +3,23 @@
 Snapshot: `2026-09-07_#225(f47b766cbf)`, with the reviewed corrections described
 below applied on top. Tracking: minibeads-37 and minibeads-3.
 
+## Completed landing
+
+Verified at `2026-09-07_#227(19fc71cfc1)`:
+
+- Correction commit `25b963ff0c` passed all seven jobs in GitHub Actions run
+  [34158336503](https://github.com/rrnewton/minibeads/actions/runs/34158336503).
+- A normal merge of #24 produced `19fc71cfc1`. GitHub reports **all ten PRs
+  #15–#24 merged**, and every reviewed head is an ancestor of `origin/main`.
+- The merged code, tests, dependencies, Makefile, and workflows match the tested
+  tip. No force push, squash, or experimental overhaul code was used.
+- All ten branches in the table have remote annotated archives named
+  `codex/<suffix>.v1`; each dereferenced tag was checked against its PR head.
+  Brian's fork branches were not deleted.
+- Remaining work in minibeads-37 is the **human review of the sync-overhaul
+  plan**, not further PR landing. The original dirty checkout/prototype is
+  preserved separately; do not mistake it for this validated landing worktree.
+
 ## Scope and order
 
 Brian (`unormal`) submitted ten cumulative PRs against `rrnewton/minibeads:main`.

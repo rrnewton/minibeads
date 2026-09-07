@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-09-07T20:08:57.234818702+00:00
+updated_at: 2026-09-07T20:16:29.419188700+00:00
 ---
 
 # Description
@@ -129,3 +129,5 @@ make stress-test's test_sync_stress fails deterministically (seed 12345) with an
   fails with "Text file busy" under parallel `cargo test`).
 
 2026-09-07_#225(f47b766cbf): Brian PR stack corrections validated: 203 tests pass on stable and Rust 1.87 (66 lib, 101 bin, 7 shell fixtures, 1 migration, 28 regressions). Added regressions cover migration timestamps versus newer JSONL, persisted GitHub snapshots, punctuation code references, cycles/line endings/permissions, multiline command history, and rollback boundaries. make -o purge validate runs every validation gate without the private-database purge; strict all-target/all-feature Clippy and audit --deny warnings also pass. Randomized release-hardcoded harness not run. Next: final corrected PR24 CI and atomic landing, tracked by minibeads-37. No new issues created.
+
+2026-09-07_#227(19fc71cfc1): Brian PR15–24 landing verified. Final-head CI 34158336503 passed all seven jobs, including Linux/macOS/Windows, test suite, coverage, lint, security audit. Local stable and Rust 1.87 debug totals are 203 each. Final source matches tested tip. New work is gated on human review under minibeads-37; keep review-hold prototype tests separate from landed-test counts. No new issues created.
