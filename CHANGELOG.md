@@ -6,6 +6,15 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mb ready`, `mb blocked` and `mb stats` no longer treat a `blocks` dependency on
+  a closed issue as still blocking.** Closing a blocker now makes its dependents
+  ready, matching upstream `bd ready` semantics; the dependency edge is retained
+  as history. Previously every `blocks` edge counted forever, so an issue chain
+  never surfaced in `mb ready` after its predecessor closed. A blocker ID that
+  does not resolve to any issue still blocks.
+
 ## [0.27.0] - 2026-07-30
 
 ### Fixed
