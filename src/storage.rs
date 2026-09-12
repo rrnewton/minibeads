@@ -1741,17 +1741,18 @@ impl Storage {
             .filter(|i| i.status == Status::InProgress)
             .count();
         let closed = issues.iter().filter(|i| i.status == Status::Closed).count();
+        let closed_ids = Self::closed_ids_of(&issues);
 
-        // Calculate blocked issues (those with blocking dependencies)
+        // Calculate blocked issues (those with a blocking dependency that is still open)
         let blocked = issues
             .iter()
-            .filter(|i| i.status != Status::Closed && i.has_blocking_dependencies())
+            .filter(|i| i.status != Status::Closed && i.has_open_blocking_dependencies(&closed_ids))
             .count();
 
         // Calculate ready issues
         let ready = issues
             .iter()
-            .filter(|i| i.status == Status::Open && !i.has_blocking_dependencies())
+            .filter(|i| i.status == Status::Open && !i.has_open_blocking_dependencies(&closed_ids))
             .count();
 
         // Calculate average lead time for closed issues
@@ -1782,9 +1783,25 @@ impl Storage {
         })
     }
 
-    /// Get blocked issues
+    /// IDs of every closed issue in `issues`; a closed blocker no longer blocks.
+    fn closed_ids_of(issues: &[Issue]) -> HashSet<String> {
+        issues
+            .iter()
+            .filter(|i| i.status == Status::Closed)
+            .map(|i| i.id.clone())
+            .collect()
+    }
+
+    /// IDs of every closed issue in the store.
+    fn closed_issue_ids(&self) -> Result<HashSet<String>> {
+        let closed = self.list_issues(Some(Status::Closed), None, None, None, None)?;
+        Ok(Self::closed_ids_of(&closed))
+    }
+
+    /// Get blocked issues (those with at least one blocking dependency that is still open)
     pub fn get_blocked(&self) -> Result<Vec<BlockedIssue>> {
         let issues = self.list_issues(None, None, None, None, None)?;
+        let closed_ids = Self::closed_ids_of(&issues);
 
         let mut blocked = Vec::new();
         for issue in issues {
@@ -1792,8 +1809,11 @@ impl Storage {
                 continue;
             }
 
-            // Zero-copy: collect blocking dependencies directly without intermediate Vec
-            let blocked_by: Vec<String> = issue.get_blocking_dependencies().cloned().collect();
+            // Zero-copy: collect open blocking dependencies directly without intermediate Vec
+            let blocked_by: Vec<String> = issue
+                .get_open_blocking_dependencies(&closed_ids)
+                .cloned()
+                .collect();
 
             if !blocked_by.is_empty() {
                 let blocked_by_count = blocked_by.len();
@@ -1821,10 +1841,11 @@ impl Storage {
         sort_policy: &str,
     ) -> Result<Vec<Issue>> {
         let issues = self.list_issues(Some(Status::Open), priority, issue_type, assignee, None)?;
+        let closed_ids = self.closed_issue_ids()?;
 
         let mut ready: Vec<Issue> = issues
             .into_iter()
-            .filter(|i| !i.has_blocking_dependencies())
+            .filter(|i| !i.has_open_blocking_dependencies(&closed_ids))
             .collect();
 
         // Apply sorting based on policy
@@ -3444,6 +3465,57 @@ mod ready_tests {
         let mut ready = storage.get_ready(None, None, None, "hybrid").unwrap();
         ready.truncate(5);
         assert_eq!(ready.len(), 5);
+    }
+
+    #[test]
+    fn closing_a_blocker_makes_the_dependent_ready() {
+        let (_tmp, storage) = storage_with_open_issues(2);
+        let mut ids: Vec<String> = storage
+            .list_issues(None, None, None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        ids.sort();
+        let (blocker, dependent) = (ids[0].clone(), ids[1].clone());
+        storage
+            .add_dependency(&dependent, &blocker, DependencyType::Blocks)
+            .unwrap();
+
+        // While the blocker is open, the dependent is blocked and not ready.
+        let ready: Vec<String> = storage
+            .get_ready(None, None, None, "hybrid")
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ready, vec![blocker.clone()]);
+        let blocked = storage.get_blocked().unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].issue.id, dependent);
+        assert_eq!(blocked[0].blocked_by, vec![blocker.clone()]);
+        let stats = storage.get_stats().unwrap();
+        assert_eq!((stats.ready_issues, stats.blocked_issues), (1, 1));
+
+        // Closing the blocker satisfies the dependency; the edge itself is retained.
+        storage.close_issue(&blocker, "done").unwrap();
+        let ready: Vec<String> = storage
+            .get_ready(None, None, None, "hybrid")
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ready, vec![dependent.clone()]);
+        assert!(storage.get_blocked().unwrap().is_empty());
+        let stats = storage.get_stats().unwrap();
+        assert_eq!((stats.ready_issues, stats.blocked_issues), (1, 0));
+        let dependent_issue = storage
+            .get_issue(&dependent)
+            .unwrap()
+            .expect("dependent exists");
+        assert!(dependent_issue
+            .get_blocking_dependencies()
+            .any(|id| *id == blocker));
     }
 }
 

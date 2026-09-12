@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Default lifetime of a claim when no explicit duration is given (48 hours).
 ///
@@ -536,6 +536,24 @@ impl Issue {
         self.depends_on
             .values()
             .any(|dep_type| *dep_type == DependencyType::Blocks)
+    }
+
+    /// Blocking dependencies whose blocker is not closed. A `blocks` edge on a
+    /// closed issue is satisfied and must not keep the dependent out of `ready`
+    /// (matching upstream `bd ready` semantics). Dangling blocker IDs still block.
+    pub fn get_open_blocking_dependencies<'a>(
+        &'a self,
+        closed_ids: &'a HashSet<String>,
+    ) -> impl Iterator<Item = &'a String> + 'a {
+        self.get_blocking_dependencies()
+            .filter(move |id| !closed_ids.contains(id.as_str()))
+    }
+
+    /// Check whether any blocking dependency is still open (or unresolved).
+    pub fn has_open_blocking_dependencies(&self, closed_ids: &HashSet<String>) -> bool {
+        self.get_open_blocking_dependencies(closed_ids)
+            .next()
+            .is_some()
     }
 }
 
