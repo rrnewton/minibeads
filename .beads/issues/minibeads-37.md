@@ -6,7 +6,7 @@ issue_type: task
 labels:
 - human
 created_at: 2026-07-30T16:11:54.945437012+00:00
-updated_at: 2026-09-15T20:22:17.469008597+00:00
+updated_at: 2026-09-15T20:24:28.076700878+00:00
 ---
 
 # Description
@@ -96,3 +96,5 @@ Bumping to 0.27.0 (CHANGELOG updated). Full test suite + clippy in progress befo
 2026-09-15: Owner approved the reviewed GitHub sync plan with "Get to work". Implementation restarted from landed main 6e30bdc7a8 in isolated worktree /tmp/minibeads-sync-overhaul.NLLkth; the old prototype remains untouched. Baseline make -o purge validate passes. Parallel work is scoped to new prose_merge and github_ancestor modules while the parent integrates label/ID selection, full three-way field reconciliation, checked local/remote writes, legacy-state handling, and acceptance tests. No new issue created.
 
 2026-09-15_#229(6e30bdc7a8): APPROVED SYNC OVERHAUL IMPLEMENTED AND READY FOR OWNER PATCH REVIEW. Added repeatable local-label AND filtering intersected with IDs/--since; versioned per-issue common-content ancestors; full title/body/open-state three-way reconciliation; deterministic bounded prose merge; per-issue sync leases; checked local writes; bounded local/remote race retries; atomic ancestor + comment-state transactions; conservative legacy/future-schema handling; ownership-safe relinking; and ID-migration ancestry updates. Two independent adversarial reviews initially found fourteen safety gaps; all were fixed with regressions, including repeated-paragraph data loss, structured Markdown overlap, replay stability, comparison/work determinism, stale concurrent checkpoints, duplicate comment export, lock-held network I/O, dry-run recovery writes, split checkpoints, and relink ownership. Final local evidence: make -o purge validate passes 296 debug tests (66 lib, 189 bin, 7 shell, 1 migration, 28 regressions, 5 harness), fmt, and Clippy; strict all-target/all-feature Clippy passes; Rust 1.87 passes 303 executed tests with 1 ignored stress test. Design/recommendation: ai_docs/github-sync-design.md. Next and only gate: owner reviews the resulting patch/PR before merge; no crates.io release and no live GitHub stress writes were performed.
+
+2026-09-15_#230(5328deb9ae): Draft owner-review PR opened: https://github.com/rrnewton/minibeads/pull/26 at exact reviewed implementation head 5328deb9ae4562f901bd592fb76355396cb612e9. Branch feature/github-sync-three-way is pushed; PR remains draft by design. CI started. Do not merge or release until owner patch review.
