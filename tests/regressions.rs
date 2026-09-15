@@ -219,6 +219,8 @@ fn repacking_swaps_and_cycles_preserves_all_issues_dependencies_and_comments() {
 
 #[test]
 fn every_id_migration_preserves_comment_ownership_ancestry_and_jsonl_ids() {
+    use sha2::{Digest, Sha256};
+
     for mode in ["rename", "prefix", "hash", "numeric", "repack"] {
         let (_temp, storage) = fixture(IssueStorageLayout::Flat);
         let old_id = if mode == "numeric" { "r-abcd" } else { "r-2" };
@@ -226,13 +228,35 @@ fn every_id_migration_preserves_comment_ownership_ancestry_and_jsonl_ids() {
         let comment = storage
             .add_comment(old_id, "review", "keep my identity")
             .unwrap();
-        let state = serde_json::json!({"issues": {"https://github.com/review/fixture/issues/1": {
+        let remote_url = "https://github.com/review/fixture/issues/1";
+        let state = serde_json::json!({"issues": {remote_url: {
             "local_id": old_id,
             "synced_comments": [{"local_id": comment.id, "remote_id": "101"}]
         }}});
         fs::write(
             storage.get_beads_dir().join("github-sync-state.json"),
             serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let ancestor_directory = storage.get_beads_dir().join("sync_ancestors/github");
+        fs::create_dir_all(&ancestor_directory).unwrap();
+        let ancestor_path = ancestor_directory.join(format!(
+            "sha256-{:x}.json",
+            Sha256::digest(remote_url.as_bytes())
+        ));
+        let ancestor = serde_json::json!({
+            "schema_version": 1,
+            "remote": remote_url,
+            "local_id": old_id,
+            "common": {
+                "title": "Common title",
+                "body": "Common body",
+                "status": "open"
+            }
+        });
+        fs::write(
+            &ancestor_path,
+            serde_json::to_vec_pretty(&ancestor).unwrap(),
         )
         .unwrap();
         fs::write(
@@ -268,6 +292,11 @@ fn every_id_migration_preserves_comment_ownership_ancestry_and_jsonl_ids() {
             ancestry["synced_comments"][0]["local_id"], comment.id,
             "{mode}"
         );
+        let ancestor: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ancestor_path).unwrap()).unwrap();
+        assert_eq!(ancestor["local_id"], new_id, "{mode}");
+        assert_eq!(ancestor["remote"], remote_url, "{mode}");
+        assert_eq!(ancestor["common"]["body"], "Common body", "{mode}");
         let jsonl =
             minibeads::sync::load_jsonl_issues(&storage.get_beads_dir().join("issues.jsonl"))
                 .unwrap();
@@ -930,7 +959,14 @@ fn readonly_reads_do_not_bootstrap_or_log_and_refuse_recovery() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires recovery"));
     assert_eq!(
-        fs::read_to_string(journal).unwrap(),
+        fs::read_to_string(&journal).unwrap(),
+        "pending recovery sentinel"
+    );
+    let output = run_cli(&storage, &["github", "sync", "--dry-run"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires recovery"));
+    assert_eq!(
+        fs::read_to_string(&journal).unwrap(),
         "pending recovery sentinel"
     );
 }

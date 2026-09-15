@@ -9,6 +9,10 @@ Use debug builds for local development and validation.
   cleanup. This still runs all validation gates.
 - `cargo test --locked --test regressions` exercises CLI/storage integration
   regressions in isolated temporary databases.
+- `cargo test --locked --bin mb github::sync_tests` exercises mocked GitHub
+  three-way merges, scoped selection, dry-run, concurrency, and recovery without
+  writing to a live repository. Prose and ancestor unit suites run in the same
+  binary test target.
 - `cargo test --locked --test random_minibeads harness_initialization` checks
   concurrent test-binary initialization without running the stress workload.
 - `cargo test --locked --test random_minibeads minibeads` runs the native

@@ -31,3 +31,5 @@ TRASH
 
 # Export artifacts
 .beads/*.jsonl
+.beads/sync_ancestors/
+.minibeads/sync_ancestors/

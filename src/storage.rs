@@ -310,6 +310,7 @@ impl Storage {
                 transaction.write(state_path, serde_json::to_vec_pretty(&state)?);
             }
         }
+        self.stage_github_ancestor_id_migrations(mapping, &mut transaction)?;
 
         // Keep the default JSONL store from resurrecting old IDs at the next
         // sync. Preserve its independently edited fields and timestamps.
@@ -338,6 +339,69 @@ impl Storage {
             transaction.config(file, key, value)?;
         }
         transaction.commit()
+    }
+
+    fn stage_github_ancestor_id_migrations(
+        &self,
+        mapping: &HashMap<String, String>,
+        transaction: &mut FileTransaction<'_>,
+    ) -> Result<()> {
+        let directory = self.beads_dir.join("sync_ancestors/github");
+        ensure_contained(&self.beads_dir, &directory)?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to inspect GitHub ancestors in {}",
+                        directory.display()
+                    )
+                });
+            }
+        };
+        for entry in entries {
+            let path = entry?.path();
+            ensure_contained(&self.beads_dir, &path)?;
+            anyhow::ensure!(
+                path.is_file(),
+                "Unexpected GitHub ancestor entry {}",
+                path.display()
+            );
+            let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)
+                .with_context(|| format!("Corrupt GitHub ancestor {}", path.display()))?;
+            anyhow::ensure!(
+                record
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1),
+                "Unsupported GitHub ancestor schema in {}",
+                path.display()
+            );
+            let remote = record
+                .get("remote")
+                .and_then(serde_json::Value::as_str)
+                .context("GitHub ancestor is missing its remote URL")?;
+            let expected_name = format!("sha256-{:x}.json", Sha256::digest(remote.as_bytes()));
+            anyhow::ensure!(
+                path.file_name().and_then(std::ffi::OsStr::to_str) == Some(expected_name.as_str()),
+                "GitHub ancestor URL/key mismatch in {}",
+                path.display()
+            );
+            let local_id = record
+                .get("local_id")
+                .and_then(serde_json::Value::as_str)
+                .context("GitHub ancestor is missing its local issue ID")?;
+            let Some(next_id) = mapping.get(local_id) else {
+                continue;
+            };
+            IssueId::parse(next_id)?;
+            record["local_id"] = serde_json::Value::String(next_id.clone());
+            let mut content = serde_json::to_vec_pretty(&record)?;
+            content.push(b'\n');
+            transaction.write(path, content);
+        }
+        Ok(())
     }
 
     /// Open storage at the given minibeads directory
@@ -1069,6 +1133,15 @@ impl Storage {
 
     pub fn issue_matches_snapshot(&self, expected: &Issue) -> Result<bool> {
         Ok(self.lock_issue_snapshot(expected)?.is_some())
+    }
+
+    pub fn issue_matches_snapshot_readonly(&self, expected: &Issue) -> Result<bool> {
+        let _lock = self.lock_for_read()?;
+        let Some(path) = self.existing_issue_path(&expected.id)? else {
+            return Ok(false);
+        };
+        let current = markdown_to_issue(&expected.id, &fs::read_to_string(path)?)?;
+        Ok(crate::sync::canonical_issue(&current)? == crate::sync::canonical_issue(expected)?)
     }
 
     pub fn update_issue_if_unchanged(
@@ -2988,6 +3061,7 @@ fn ensure_gitignore(beads_dir: &Path) -> Result<()> {
         "command_history.log",
         "minibeads-transaction.json",
         ".mb-write-*",
+        "sync_ancestors/",
     ];
 
     // Read existing content if file exists

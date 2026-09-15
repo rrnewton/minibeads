@@ -1,9 +1,12 @@
 mod code_patch;
 mod format;
 mod github;
+mod github_ancestor;
+mod github_merge;
 mod hash;
 mod lock;
 mod paths;
+mod prose_merge;
 mod storage;
 mod sync;
 mod transaction;
@@ -832,11 +835,11 @@ impl Commands {
             },
             Self::Github { command, .. } => match command {
                 GithubCommands::List => true,
-                GithubCommands::Link { .. }
-                | GithubCommands::Publish { .. }
-                | GithubCommands::Import { .. }
-                | GithubCommands::Sync { .. }
-                | GithubCommands::StressTest { .. } => false,
+                GithubCommands::Link { dry_run, .. }
+                | GithubCommands::Publish { dry_run, .. }
+                | GithubCommands::Import { dry_run, .. }
+                | GithubCommands::Sync { dry_run, .. } => *dry_run,
+                GithubCommands::StressTest { .. } => false,
             },
             Self::Init { .. }
             | Self::Create { .. }
@@ -1044,28 +1047,32 @@ enum GithubCommands {
     /// Sync all linked issues, or only the provided issue IDs
     Sync {
         issue_ids: Vec<String>,
+        /// Only sync issues carrying every supplied local label. Repeating this
+        /// option intersects labels, explicit issue IDs, and --since.
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<github::GithubSyncLabel>,
         /// GitHub repository override, e.g. owner/repo
         #[arg(short = 'R', long)]
         repo: Option<String>,
         /// Preview changes without applying them
         #[arg(long)]
         dry_run: bool,
-        /// Pull GitHub title/body/status/comments into minibeads without writing anything to GitHub.
-        /// If an issue's title/body/status changed locally since the last sync, --pull-only
-        /// refuses to overwrite it (prints the discarded local text and skips) unless --force
-        /// is also given.
+        /// Pull GitHub fields/comments without writing to GitHub. Refuses to
+        /// discard local fields or divergent content without a common ancestor
+        /// unless --force is also given.
         #[arg(long)]
         pull_only: bool,
-        /// With --pull-only, overwrite local title/body/status even if they changed locally
-        /// since the last sync (GitHub wins). Has no effect without --pull-only, since the
-        /// default bidirectional sync already detects and reports genuine conflicts.
+        /// With --pull-only, explicitly choose GitHub even after local changes or
+        /// without a common ancestor. Also confirms paired local comment deletion
+        /// when its GitHub counterpart disappeared. Does not override ordinary
+        /// bidirectional field conflicts.
         #[arg(long)]
         force: bool,
         /// Only sync issues whose local record changed at/after this time (minibeads-specific).
         /// Accepts an RFC3339 timestamp (e.g. '2026-07-30T00:00:00Z') or a relative duration
         /// like '24h', '2d', '90m'. Combines with explicit issue IDs (intersection). Cheap
-        /// incremental mode so a large linked set doesn't need a full walk every time; omit to
-        /// sync everything.
+        /// incremental mode so a large linked set doesn't need a full walk every time. This
+        /// does not discover remote-only changes; omit it when those must be found.
         #[arg(long)]
         since: Option<SyncSince>,
         /// Print only the one-line summary
@@ -2839,9 +2846,17 @@ fn run() -> Result<()> {
         }
 
         Commands::Github { token, command } => {
-            let storage = get_storage(mb_beads_dir, db, readonly)?;
+            let github_preview = match &command {
+                GithubCommands::List => false,
+                GithubCommands::Link { dry_run, .. }
+                | GithubCommands::Publish { dry_run, .. }
+                | GithubCommands::Import { dry_run, .. }
+                | GithubCommands::Sync { dry_run, .. } => *dry_run,
+                GithubCommands::StressTest { .. } => false,
+            };
+            let storage = get_storage(mb_beads_dir, db, readonly || github_preview)?;
 
-            if !mb_no_cmd_logging {
+            if !mb_no_cmd_logging && !github_preview {
                 let _ = log_command(&storage.get_beads_dir(), &env::args().collect::<Vec<_>>());
             }
 
@@ -2941,6 +2956,7 @@ fn run() -> Result<()> {
                 }
                 GithubCommands::Sync {
                     issue_ids,
+                    labels,
                     repo,
                     dry_run,
                     pull_only,
@@ -2957,7 +2973,10 @@ fn run() -> Result<()> {
                         dry_run,
                         pull_only,
                         force,
-                        since.map(|SyncSince(dt)| dt),
+                        github::GithubSyncFilter {
+                            labels: &labels,
+                            since: since.map(|SyncSince(dt)| dt),
+                        },
                     )?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3831,6 +3850,48 @@ Run mb create "My first issue" to create your first issue.
 mod body_input_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn github_sync_parses_intersecting_selection_flags() {
+        let cli = Cli::try_parse_from([
+            "mb",
+            "github",
+            "sync",
+            "minibeads-42",
+            "minibeads-43",
+            "--label",
+            "documentation",
+            "--label",
+            "review",
+            "--since",
+            "24h",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(cli.command.is_read_only());
+        let Commands::Github {
+            command:
+                GithubCommands::Sync {
+                    issue_ids,
+                    labels,
+                    since,
+                    dry_run,
+                    ..
+                },
+            ..
+        } = cli.command
+        else {
+            panic!("expected GitHub sync command");
+        };
+        assert_eq!(issue_ids, ["minibeads-42", "minibeads-43"]);
+        assert!(labels
+            .iter()
+            .map(github::GithubSyncLabel::as_str)
+            .eq(["documentation", "review"]));
+        assert!(since.is_some());
+        assert!(dry_run);
+        assert!(Cli::try_parse_from(["mb", "github", "sync", "--label", " "]).is_err());
+    }
 
     /// Inline stays inline when no file is given.
     #[test]

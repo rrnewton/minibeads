@@ -6,6 +6,31 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Added
+
+- **Full ancestor-based GitHub issue field merging.** Versioned per-issue
+  checkpoints under `.minibeads/sync_ancestors/github/` retain the last common
+  title, body, and open/closed state. Independent field and prose edits merge;
+  competing edits, structured Markdown overlap, ambiguous alignment, and work
+  limits remain explicit conflicts.
+- **`mb github sync --label LABEL`** is repeatable and requires every supplied
+  local label. Labels intersect explicit issue IDs and `--since`; an empty
+  selection performs no GitHub calls and never expands to all issues.
+
+### Changed
+
+- Divergent GitHub/local issue fields without a provable common ancestor no
+  longer pick a winner during ordinary sync. Matching replicas establish a
+  baseline, legacy equal hashes can prove one-sided changes, and
+  `--pull-only --force` explicitly chooses GitHub when requested.
+- GitHub field writes refresh the remote snapshot before mutation, verify
+  convergence afterward, and retry racing local/remote changes. Per-issue leases
+  prevent duplicate concurrent comment export; ancestor and comment ancestry
+  commit together before moving to the next issue. Local ID migrations update
+  ancestor ownership transactionally, and future sync-state schemas fail closed.
+- GitHub dry runs open storage read-only and do not bootstrap ignore/config
+  files. `--since` help now states that it cannot discover remote-only changes.
+
 ## [0.27.0] - 2026-07-30
 
 ### Fixed
