@@ -3063,7 +3063,7 @@ fn ensure_gitignore(beads_dir: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
 
     let gitignore_path = beads_dir.join(".gitignore");
-    let required_entries = ["minibeads.lock", "command_history.log"];
+    let required_entries = ["minibeads.lock", "command_history.log", "sync_ancestors/"];
 
     // Read existing content if file exists
     let mut existing_lines = Vec::new();
@@ -3373,7 +3373,7 @@ mod list_order_tests {
     #[test]
     fn numeric_cluster_first_then_hash() {
         let base = chrono::Utc::now();
-        let mut issues = vec![
+        let mut issues = [
             issue_at("minibeads-a3f9", base + Duration::seconds(1)),
             issue_at("minibeads-10", base + Duration::seconds(2)),
             issue_at("minibeads-2", base + Duration::seconds(3)),

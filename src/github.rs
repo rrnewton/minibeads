@@ -1,5 +1,6 @@
 //! GitHub Issues sync using the authenticated `gh` CLI.
 
+use crate::prose_merge::merge_prose;
 use crate::storage::{IssueStorageLayout, Storage};
 use crate::types::{Comment, Issue, IssueType, Status};
 use anyhow::{anyhow, Context, Result};
@@ -8,8 +9,10 @@ use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +20,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 
+#[cfg(test)]
+#[path = "github_sync_tests.rs"]
+mod sync_tests;
+
 const MARKER: &str = "MB_DO_NOT_SYNC";
+type SyncSchemaVersion = u32;
+const SYNC_SCHEMA_VERSION: SyncSchemaVersion = 1;
 static TRACE_GH_CALLS: AtomicBool = AtomicBool::new(false);
 
 pub struct GhTraceGuard {
@@ -115,10 +124,21 @@ pub struct GithubImportedIssueReport {
     pub details: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubSyncState {
     #[serde(default)]
+    schema_version: SyncSchemaVersion,
+    #[serde(default)]
     issues: BTreeMap<String, GithubIssueState>,
+}
+
+impl Default for GithubSyncState {
+    fn default() -> Self {
+        Self {
+            schema_version: SYNC_SCHEMA_VERSION,
+            issues: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +147,8 @@ struct GithubIssueState {
     local_hash: String,
     remote_hash: String,
     synced_at: DateTime<Utc>,
+    #[serde(default)]
+    ancestor: Option<GithubIssueFields>,
     #[serde(default)]
     synced_local_comment_ids: Vec<String>,
     #[serde(default)]
@@ -138,6 +160,159 @@ struct GithubIssueState {
     /// never synced, so deletions can be propagated instead of resurrected.
     #[serde(default)]
     synced_comments: Vec<SyncedComment>,
+}
+
+pub type IssueLabel = String;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GithubSyncFilter<'a> {
+    pub labels: &'a [IssueLabel],
+    pub since: Option<DateTime<Utc>>,
+}
+
+type IssueTitle = String;
+type IssueDescription = String;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GithubStatus {
+    Open,
+    Closed,
+}
+
+impl GithubStatus {
+    fn from_local(status: Status) -> Self {
+        if status == Status::Closed {
+            Self::Closed
+        } else {
+            Self::Open
+        }
+    }
+
+    fn from_remote(state: &str) -> Self {
+        if state.eq_ignore_ascii_case("closed") {
+            Self::Closed
+        } else {
+            Self::Open
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+
+    fn local_status(self, current: Status) -> Status {
+        match (self, current) {
+            (Self::Closed, _) => Status::Closed,
+            (Self::Open, Status::Closed) => Status::Open,
+            (Self::Open, current) => current,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GithubIssueFields {
+    title: IssueTitle,
+    description: IssueDescription,
+    status: GithubStatus,
+}
+
+struct MergedGithubIssueFields<'a> {
+    title: &'a str,
+    description: Cow<'a, str>,
+    status: GithubStatus,
+}
+
+impl MergedGithubIssueFields<'_> {
+    fn hash(&self) -> String {
+        hash_fields(&[self.title, &self.description, self.status.as_str()])
+    }
+
+    fn into_owned(self) -> GithubIssueFields {
+        GithubIssueFields {
+            title: self.title.to_owned(),
+            description: self.description.into_owned(),
+            status: self.status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictingField {
+    Title,
+    Description,
+    Status,
+}
+
+impl GithubIssueFields {
+    fn from_local(issue: &Issue) -> Self {
+        Self {
+            title: canonical_text(&issue.title).to_owned(),
+            description: canonical_text(&issue.description).to_owned(),
+            status: GithubStatus::from_local(issue.status),
+        }
+    }
+
+    fn merge<'a>(
+        &'a self,
+        local: &'a Issue,
+        remote: &'a RemoteIssue,
+    ) -> std::result::Result<MergedGithubIssueFields<'a>, ConflictingField> {
+        let title = merge_scalar(
+            self.title.as_str(),
+            canonical_text(&local.title),
+            canonical_text(&remote.title),
+        )
+        .ok_or(ConflictingField::Title)?;
+        let status = merge_scalar(
+            self.status,
+            GithubStatus::from_local(local.status),
+            GithubStatus::from_remote(&remote.state),
+        )
+        .ok_or(ConflictingField::Status)?;
+        let description = merge_prose(
+            &self.description,
+            canonical_text(&local.description),
+            canonical_text(&remote.body),
+        )
+        .map_err(|_| ConflictingField::Description)?;
+        Ok(MergedGithubIssueFields {
+            title,
+            description,
+            status,
+        })
+    }
+
+    fn hash(&self) -> String {
+        hash_fields(&[&self.title, &self.description, self.status.as_str()])
+    }
+
+    fn apply_to(self, issue: &mut Issue) {
+        issue.title = self.title;
+        issue.description = self.description;
+        issue.status = self.status.local_status(issue.status);
+    }
+}
+
+fn merge_scalar<Value: PartialEq + Copy>(
+    ancestor: Value,
+    local: Value,
+    remote: Value,
+) -> Option<Value> {
+    if local == remote || remote == ancestor {
+        Some(local)
+    } else if local == ancestor {
+        Some(remote)
+    } else {
+        None
+    }
+}
+
+fn canonical_text(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,10 +836,10 @@ pub fn sync_linked(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
 ) -> Result<GithubSyncReport> {
     block_on_github(sync_linked_async(
-        storage, issue_ids, repo, dry_run, pull_only, force, since,
+        storage, issue_ids, repo, dry_run, pull_only, force, filter,
     ))
 }
 
@@ -850,10 +1025,13 @@ async fn sync_linked_async(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
 ) -> Result<GithubSyncReport> {
     let store = GithubStore::new(repo);
-    sync_linked_with_store(storage, issue_ids, dry_run, pull_only, force, since, &store).await
+    sync_linked_with_store(
+        storage, issue_ids, dry_run, pull_only, force, filter, &store,
+    )
+    .await
 }
 
 async fn sync_linked_with_store(
@@ -862,7 +1040,7 @@ async fn sync_linked_with_store(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
     store: &GithubStore,
 ) -> Result<GithubSyncReport> {
     let beads_dir = storage.get_beads_dir();
@@ -881,7 +1059,13 @@ async fn sync_linked_with_store(
     };
 
     let mut issues = storage.list_issues(None, None, None, None, None)?;
-    if let Some(since) = since {
+    issues.retain(|issue| {
+        filter
+            .labels
+            .iter()
+            .all(|label| issue.labels.contains(label))
+    });
+    if let Some(since) = filter.since {
         // Incremental mode: only walk issues whose local record changed at/after
         // the cutoff, so a linked set in the hundreds doesn't need a full pass
         // every time. This looks at the LOCAL updated_at only (cheap, no GitHub
@@ -905,16 +1089,10 @@ async fn sync_linked_with_store(
 
         let handle = store.issue(&url);
         let mut remote = handle.get().await?;
-        if !dry_run && !pull_only {
-            handle.ensure_marker(&issue).await?;
-        }
-        let removed_marker_comments = if dry_run {
-            0
-        } else {
-            purge_local_marker_comments(storage, &issue.id)?
-        };
-        let local_comments = storage.list_comments(&issue.id)?;
-        let old_state = state.issues.get(&url);
+        let old_state = state
+            .issues
+            .get(&url)
+            .filter(|entry| entry.local_id == issue.id);
         let local_hash = hash_local_issue(&issue);
         let remote_hash = hash_remote_issue(&remote);
         let state_has_common_base = old_state
@@ -938,16 +1116,10 @@ async fn sync_linked_with_store(
         };
         let mut remote_written = false;
         let mut field_conflict = false;
-        if removed_marker_comments > 0 {
-            item.details.push(format!(
-                "removed {} local marker comment(s)",
-                removed_marker_comments
-            ));
-        }
-
         if pull_only {
             let local_changed_since_last_sync = old_state.is_some() && local_changed;
-            if local_hash != remote_hash && local_changed_since_last_sync && !force {
+            let has_safe_pull_base = state_has_common_base && !local_changed;
+            if local_hash != remote_hash && !has_safe_pull_base && !force {
                 // The title/body/status changed locally since the last recorded sync, and
                 // --pull-only would otherwise silently overwrite that edit with GitHub's
                 // version (one-directional by design, but not at the cost of losing local
@@ -955,7 +1127,7 @@ async fn sync_linked_with_store(
                 // --force overrides.
                 let warning = format!(
                     "refusing to overwrite local edits on {} ({}) with --pull-only: \
-                     local title/description/status changed since the last sync. \
+                     local title/description/status changed or no common ancestor is available. \
                      Re-run with --force to let GitHub win, or use plain `mb github sync` \
                      to push the local edit instead.\n  discarded local title: {}\n  \
                      discarded local description:\n{}\n",
@@ -964,7 +1136,7 @@ async fn sync_linked_with_store(
                 eprintln!("{warning}");
                 item.action = "conflict-local-changed".to_string();
                 item.conflict = Some(format!(
-                    "{} / {}: local changed since last sync; --pull-only skipped it (use --force to overwrite)",
+                    "{} / {}: local changes or missing common ancestor; --pull-only skipped it (use --force to overwrite)",
                     issue.id, url
                 ));
                 item.details.push(
@@ -1014,6 +1186,59 @@ async fn sync_linked_with_store(
                 item.details
                     .push("pull-only: issue fields already match GitHub".to_string());
             }
+        } else if let Some(ancestor) = old_state.and_then(|entry| entry.ancestor.as_ref()) {
+            match ancestor.merge(&issue, &remote) {
+                Ok(merged) => {
+                    let merged_hash = merged.hash();
+                    let push = merged_hash != remote_hash;
+                    let pull = merged_hash != local_hash;
+                    if !dry_run && (push || pull) {
+                        let merged = merged.into_owned();
+                        if push {
+                            ensure_remote_unchanged(&handle, &remote).await?;
+                        }
+                        merged.apply_to(&mut issue);
+                        if push {
+                            handle.edit_fields(&issue).await?;
+                            handle.set_state(issue.status).await?;
+                            remote_written = true;
+                        }
+                        if pull {
+                            let mut updates = HashMap::new();
+                            updates.insert("title".to_string(), std::mem::take(&mut issue.title));
+                            updates.insert(
+                                "description".to_string(),
+                                std::mem::take(&mut issue.description),
+                            );
+                            updates.insert("status".to_string(), issue.status.to_string());
+                            storage.update_issue(&issue.id, updates)?;
+                            issue = storage.get_issue(&issue.id)?.ok_or_else(|| {
+                                anyhow!("Issue not found after merge: {}", issue.id)
+                            })?;
+                        }
+                    }
+                    item.action = match (push, pull, dry_run) {
+                        (true, true, true) => "would-merge",
+                        (true, true, false) => "merged",
+                        (true, false, true) => "would-push",
+                        (true, false, false) => "pushed",
+                        (false, true, true) => "would-pull",
+                        (false, true, false) => "pulled",
+                        (false, false, _) => "unchanged",
+                    }
+                    .to_string();
+                    item.details.push("compared title, description, and status against the last common content ancestor".to_string());
+                    report.pushed_issues += usize::from(push);
+                    report.pulled_issues += usize::from(pull);
+                }
+                Err(field) => {
+                    let conflict = format!("{} / {}: conflicting {:?} edits against the common ancestor; leaving issue unchanged", issue.id, url, field);
+                    item.action = "conflict".to_string();
+                    item.conflict = Some(conflict.clone());
+                    report.conflicts.push(conflict);
+                    field_conflict = true;
+                }
+            }
         } else {
             match (
                 old_state.is_some(),
@@ -1021,55 +1246,17 @@ async fn sync_linked_with_store(
                 local_changed,
                 remote_changed,
             ) {
-                (false, _, _, _) => {
-                    if !dry_run {
-                        handle.edit_fields(&issue).await?;
-                        handle.set_state(issue.status).await?;
-                        remote_written = true;
-                    }
-                    item.action = if dry_run {
-                        "would-initialize-push".to_string()
-                    } else {
-                        "initialized-pushed".to_string()
-                    };
+                _ if local_hash == remote_hash => {
                     item.details.push(
-                        "no previous GitHub sync state; pushed local issue fields to GitHub as initial common base"
-                            .to_string(),
+                        "issue fields match; recording their common content ancestor".to_string(),
                     );
-                    report.pushed_issues += 1;
                 }
-                (true, true, false, false) => {
-                    if local_hash != remote_hash {
-                        if !dry_run {
-                            handle.edit_fields(&issue).await?;
-                            handle.set_state(issue.status).await?;
-                            remote_written = true;
-                        }
-                        item.action = if dry_run {
-                            "would-repair-divergence".to_string()
-                        } else {
-                            "repaired-divergence".to_string()
-                        };
-                        item.details.push(
-                            "previous sync state recorded divergent local/remote hashes; pushed local issue fields to establish a common base"
-                                .to_string(),
-                        );
-                        if issue.status == Status::Closed
-                            && !remote.state.eq_ignore_ascii_case("closed")
-                        {
-                            item.details.push("closed GitHub issue".to_string());
-                        } else if issue.status != Status::Closed
-                            && remote.state.eq_ignore_ascii_case("closed")
-                        {
-                            item.details.push("reopened GitHub issue".to_string());
-                        }
-                        report.pushed_issues += 1;
-                    } else {
-                        item.details.push(
-                            "previous divergent sync state has already converged; recording common base"
-                                .to_string(),
-                        );
-                    }
+                (false, _, _, _) | (true, true, _, _) => {
+                    let conflict = format!("{} / {}: no common content ancestor; leaving divergent issue fields unchanged. Reconcile both copies, or use --pull-only --force to explicitly choose GitHub", issue.id, url);
+                    item.action = "conflict-no-ancestor".to_string();
+                    item.conflict = Some(conflict.clone());
+                    report.conflicts.push(conflict);
+                    field_conflict = true;
                 }
                 (true, _, true, true) if local_hash != remote_hash => {
                     let conflict = format!(
@@ -1086,6 +1273,7 @@ async fn sync_linked_with_store(
                 }
                 (_, _, true, false) => {
                     if !dry_run {
+                        ensure_remote_unchanged(&handle, &remote).await?;
                         handle.edit_fields(&issue).await?;
                         handle.set_state(issue.status).await?;
                         remote_written = true;
@@ -1131,15 +1319,34 @@ async fn sync_linked_with_store(
             }
         }
 
+        if field_conflict {
+            item.details.push("left the issue, comments, and GitHub sync ancestry unchanged until the conflict is resolved".to_string());
+            report.issues.push(item);
+            continue;
+        }
+        if !dry_run && !pull_only {
+            handle.ensure_marker(&issue).await?;
+        }
+        if !dry_run {
+            let removed = purge_local_marker_comments(storage, &issue.id)?;
+            if removed > 0 {
+                item.details
+                    .push(format!("removed {} local marker comment(s)", removed));
+            }
+        }
+        let local_comments = storage.list_comments(&issue.id)?;
+
         let deletions = reconcile_deleted_comments(
             storage,
             &issue,
             &handle,
             &mut remote,
             old_state,
-            dry_run,
-            pull_only,
-            force,
+            CommentDeletionOptions {
+                dry_run,
+                pull_only,
+                force,
+            },
         )
         .await?;
         if deletions.remote_written {
@@ -1232,10 +1439,18 @@ async fn sync_linked_with_store(
 
         if !dry_run && !field_conflict {
             let remote = if remote_written {
-                handle.snapshot_for_state().await?
+                handle.refresh().await?
             } else {
                 remote
             };
+            if hash_local_issue(&issue) != hash_remote_issue(&remote) {
+                let conflict = format!("{} / {}: replicas did not converge after sync; retained previous ancestor for recovery", issue.id, url);
+                item.action = "conflict-verification".to_string();
+                item.conflict = Some(conflict.clone());
+                report.conflicts.push(conflict);
+                report.issues.push(item);
+                continue;
+            }
             let comments = storage.list_comments(&issue.id)?;
             if pull_only {
                 let synced_comments = comments
@@ -1248,17 +1463,15 @@ async fn sync_linked_with_store(
             } else {
                 update_state_entry(&mut state, &issue, &remote, &comments);
             }
+            save_state(&beads_dir, &state)?;
         } else if field_conflict {
             item.details.push(
-                "left GitHub sync ancestry unchanged until the conflict is resolved".to_string(),
+                "left GitHub sync ancestry unchanged until the comment conflict is resolved"
+                    .to_string(),
             );
         }
 
         report.issues.push(item);
-    }
-
-    if !dry_run {
-        save_state(&beads_dir, &state)?;
     }
 
     Ok(report)
@@ -1469,7 +1682,7 @@ pub fn stress_test(
                 false,
                 false,
                 false,
-                None,
+                GithubSyncFilter::default(),
             )
             .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
@@ -1491,7 +1704,7 @@ pub fn stress_test(
                 false,
                 false,
                 false,
-                None,
+                GithubSyncFilter::default(),
             )
             .with_context(|| {
                 format!("stress no-op sync failed for {} at step {}", issue.id, step)
@@ -1525,7 +1738,7 @@ pub fn stress_test(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("stress close sync failed for {}", issue.id))?;
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
@@ -1656,7 +1869,7 @@ fn stress_test_adversarial(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
@@ -1669,7 +1882,7 @@ fn stress_test_adversarial(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
@@ -2101,12 +2314,9 @@ fn apply_remote_to_local(storage: &Storage, issue: &Issue, remote: &RemoteIssue)
     updates.insert("description".to_string(), remote.body.clone());
     updates.insert(
         "status".to_string(),
-        if remote.state.eq_ignore_ascii_case("closed") {
-            Status::Closed
-        } else {
-            Status::Open
-        }
-        .to_string(),
+        GithubStatus::from_remote(&remote.state)
+            .local_status(issue.status)
+            .to_string(),
     );
     storage.update_issue(&issue.id, updates)?;
     Ok(())
@@ -2180,6 +2390,13 @@ struct CommentDeletionOutcome {
     skipped_local_deletions: Vec<Comment>,
 }
 
+#[derive(Default)]
+struct CommentDeletionOptions {
+    dry_run: bool,
+    pull_only: bool,
+    force: bool,
+}
+
 /// Reconcile comment deletions using the last-synced ancestry pairs.
 ///
 /// A pair `{local_id, remote_id}` recorded at the previous sync means the comment
@@ -2213,10 +2430,13 @@ async fn reconcile_deleted_comments(
     handle: &GithubIssueHandle,
     remote: &mut RemoteIssue,
     old_state: Option<&GithubIssueState>,
-    dry_run: bool,
-    pull_only: bool,
-    force: bool,
+    options: CommentDeletionOptions,
 ) -> Result<CommentDeletionOutcome> {
+    let CommentDeletionOptions {
+        dry_run,
+        pull_only,
+        force,
+    } = options;
     let mut outcome = CommentDeletionOutcome::default();
     let Some(state) = old_state else {
         return Ok(outcome);
@@ -2335,11 +2555,15 @@ fn update_state_entry(
             })
         })
         .collect();
+    let local_hash = hash_local_issue(issue);
+    let remote_hash = hash_remote_issue(remote);
+    let ancestor = (local_hash == remote_hash).then(|| GithubIssueFields::from_local(issue));
     let mut next = GithubIssueState {
         local_id: issue.id.clone(),
-        local_hash: hash_local_issue(issue),
-        remote_hash: hash_remote_issue(remote),
+        local_hash,
+        remote_hash,
         synced_at: Utc::now(),
+        ancestor,
         synced_local_comment_ids,
         synced_remote_comment_ids,
         synced_comments,
@@ -2348,6 +2572,7 @@ fn update_state_entry(
         let only_synced_at_would_change = previous.local_id == next.local_id
             && previous.local_hash == next.local_hash
             && previous.remote_hash == next.remote_hash
+            && previous.ancestor == next.ancestor
             && previous.synced_local_comment_ids == next.synced_local_comment_ids
             && previous.synced_remote_comment_ids == next.synced_remote_comment_ids
             && previous.synced_comments == next.synced_comments;
@@ -2362,24 +2587,75 @@ fn update_state_entry(
 }
 
 fn load_state(beads_dir: &Path) -> Result<GithubSyncState> {
-    let path = beads_dir.join("github-sync-state.json");
-    if !path.exists() {
+    let archive_path = beads_dir.join("sync_ancestors/github.json");
+    let archive_exists = archive_path.try_exists()?;
+    let path = if archive_exists {
+        archive_path
+    } else {
+        beads_dir.join("github-sync-state.json")
+    };
+    if !path.try_exists()? {
         return Ok(GithubSyncState::default());
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
+    let mut state: GithubSyncState = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    if (archive_exists && state.schema_version != SYNC_SCHEMA_VERSION)
+        || state.schema_version > SYNC_SCHEMA_VERSION
+    {
+        return Err(anyhow!(
+            "Unsupported GitHub sync ancestor schema {} in {}",
+            state.schema_version,
+            path.display()
+        ));
+    }
+    for entry in state.issues.values() {
+        if let Some(ancestor) = &entry.ancestor {
+            let hash = ancestor.hash();
+            if entry.local_hash != hash || entry.remote_hash != hash {
+                return Err(anyhow!("Inconsistent GitHub sync ancestor for {} in {}; refusing to overwrite either replica", entry.local_id, path.display()));
+            }
+        }
+    }
+    state.schema_version = SYNC_SCHEMA_VERSION;
+    Ok(state)
 }
 
 fn save_state(beads_dir: &Path, state: &GithubSyncState) -> Result<()> {
-    let path = beads_dir.join("github-sync-state.json");
+    let directory = beads_dir.join("sync_ancestors");
+    let path = directory.join("github.json");
     let content =
         serde_json::to_string_pretty(state).context("Failed to serialize GitHub sync state")?;
-    std::fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&directory).context("Failed to create sync ancestor directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    temporary.write_all(content.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .with_context(|| format!("Failed to atomically save {}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::File::open(&directory)?.sync_all()?;
+    Ok(())
 }
 
 fn hash_local_issue(issue: &Issue) -> String {
-    hash_fields(&[&issue.title, &issue.description, issue.status.as_str()])
+    hash_fields(&[
+        &issue.title,
+        &issue.description,
+        GithubStatus::from_local(issue.status).as_str(),
+    ])
+}
+
+async fn ensure_remote_unchanged(handle: &GithubIssueHandle, expected: &RemoteIssue) -> Result<()> {
+    let current = handle.refresh().await?;
+    if hash_remote_issue(&current) != hash_remote_issue(expected) {
+        return Err(anyhow!("GitHub issue {} changed during sync; no issue-field write attempted, retry to merge its latest version", expected.url));
+    }
+    Ok(())
 }
 
 fn hash_remote_issue(issue: &RemoteIssue) -> String {
@@ -2879,6 +3155,7 @@ mod tests {
             local_hash: hash_local_issue(issue),
             remote_hash: hash_remote_issue(remote),
             synced_at: Utc::now(),
+            ancestor: None,
             synced_local_comment_ids: vec![local_id.to_string()],
             synced_remote_comment_ids: vec![remote_id.to_string()],
             synced_comments: vec![SyncedComment {
@@ -3106,9 +3383,7 @@ mod tests {
             &handle,
             &mut remote,
             Some(&old_state),
-            false,
-            false,
-            false,
+            CommentDeletionOptions::default(),
         ))
         .unwrap();
 
@@ -3158,9 +3433,7 @@ mod tests {
             &handle,
             &mut remote,
             Some(&old_state),
-            false,
-            false,
-            false,
+            CommentDeletionOptions::default(),
         ))
         .unwrap();
 
@@ -3202,9 +3475,10 @@ mod tests {
             &handle,
             &mut remote,
             Some(&old_state),
-            false,
-            false,
-            true,
+            CommentDeletionOptions {
+                force: true,
+                ..Default::default()
+            },
         ))
         .unwrap();
 
@@ -3238,9 +3512,10 @@ mod tests {
             &handle,
             &mut remote,
             Some(&old_state),
-            false,
-            true,
-            false,
+            CommentDeletionOptions {
+                pull_only: true,
+                ..Default::default()
+            },
         ))
         .unwrap();
 
@@ -3361,8 +3636,8 @@ mod tests {
             std::slice::from_ref(&issue.id),
             false,
             true,
-            false,
-            None,
+            true,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3396,7 +3671,7 @@ mod tests {
             .iter()
             .any(|id| id == &local_comment.id));
         assert_eq!(entry.local_hash, entry.remote_hash);
-        let state_path = storage.get_beads_dir().join("github-sync-state.json");
+        let state_path = storage.get_beads_dir().join("sync_ancestors/github.json");
         let state_before_second_sync = std::fs::read_to_string(&state_path).unwrap();
 
         let second_report = block_on_github(sync_linked_with_store(
@@ -3405,7 +3680,7 @@ mod tests {
             false,
             true,
             false,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3478,14 +3753,14 @@ mod tests {
             std::slice::from_ref(&issue.id),
             false,
             true,
-            false,
-            None,
+            true,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
         let baseline = storage.get_issue(&issue.id).unwrap().unwrap();
         assert_eq!(baseline.description, "Remote body");
-        let state_path = storage.get_beads_dir().join("github-sync-state.json");
+        let state_path = storage.get_beads_dir().join("sync_ancestors/github.json");
         let state_after_baseline = std::fs::read_to_string(&state_path).unwrap();
 
         // Now the user edits the description locally. GitHub's content (per the
@@ -3504,7 +3779,7 @@ mod tests {
             false,
             true,
             false,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3544,7 +3819,7 @@ mod tests {
             false,
             true,
             true,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();

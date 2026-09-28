@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-07-11T10:35:12.059571606+00:00
+updated_at: 2026-09-07T20:37:27.453290803+00:00
 ---
 
 # Description
@@ -127,3 +127,11 @@ make stress-test's test_sync_stress fails deterministically (seed 12345) with an
 - Found flaky test: minibeads-36
   (github::tests::github_import_creates_only_unlinked_issues intermittently
   fails with "Text file busy" under parallel `cargo test`).
+
+2026-09-07_#215(9437f50c1a): minibeads-37 sync draft adds 24 prose tests, 27 mocked-GitHub sync tests, and 1 CLI selection test. Debug suite totals: 64 library + 137 binary + 7 shell e2e = 208 passing tests. Coverage includes missing/corrupt/legacy ancestors, conflicts without mutation, label/ID/since intersections, partial batches, pre/post-write remote changes, and stale-ancestor paragraph replay. All new tests run through the existing validation target and CI. Full validation is NOT green: existing format differences at src/format.rs and tests/migration_description_truncation.rs, plus existing strict-Clippy too_many_arguments and useless_vec warnings. New/changed-file formatting passes; Clippy passes with only those two existing categories allowed. Live GitHub CI remains unavailable. No duplicate tracking issues created.
+
+2026-09-07_#215(9437f50c1a), continuation update superseding prior formatting/lint failures: make -o purge validate now passes all build/test/fmt/Clippy gates (208 routine tests), and strict all-target/all-feature Clippy passes without lint allowances. One standalone migration test additionally passes. Gate fixes are formatting-only plus an array instead of an unnecessary test Vec and named CommentDeletionOptions replacing existing positional flags. The private-database purge remains intentionally skipped. GitHub live CI remains unverified; minibeads-37 tracks the remaining landing work.
+
+2026-09-07_#215(9437f50c1a): Remote PR15–24 stack landing verified at merge 19fc71cfc1. Corrected stack totals: 203 tests on each of stable and Rust 1.87, strict Clippy and audit clean; all seven final-head CI jobs green. Earlier 208+1 results here describe only the frozen/unapproved prototype, not the landed stack. See minibeads-37 for the human plan-review hold.
+
+2026-09-07_#215(9437f50c1a): Final remote main 6e30bdc7a8 passes all seven CI jobs (34159742387). A post-merge macOS ENOENT stress-harness race was corrected by building shared debug tools once; five deterministic initialization regressions now run in make validate and CI. Routine suite 208 passed; native harness 10 passed on stable and Rust 1.87 (five overlap routine checks). This supersedes the earlier post-landing CI failure; no release iteration or sync-overhaul implementation was performed.

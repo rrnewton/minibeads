@@ -3,6 +3,7 @@ mod format;
 mod github;
 mod hash;
 mod lock;
+mod prose_merge;
 mod storage;
 mod sync;
 mod types;
@@ -986,6 +987,9 @@ enum GithubCommands {
     /// Sync all linked issues, or only the provided issue IDs
     Sync {
         issue_ids: Vec<String>,
+        /// Only sync issues carrying every supplied local label (intersects issue IDs and --since)
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<github::IssueLabel>,
         /// GitHub repository override, e.g. owner/repo
         #[arg(short = 'R', long)]
         repo: Option<String>,
@@ -993,14 +997,14 @@ enum GithubCommands {
         #[arg(long)]
         dry_run: bool,
         /// Pull GitHub title/body/status/comments into minibeads without writing anything to GitHub.
-        /// If an issue's title/body/status changed locally since the last sync, --pull-only
+        /// If local fields changed or there is no common baseline, --pull-only
         /// refuses to overwrite it (prints the discarded local text and skips) unless --force
         /// is also given.
         #[arg(long)]
         pull_only: bool,
-        /// With --pull-only, overwrite local title/body/status even if they changed locally
-        /// since the last sync (GitHub wins). Has no effect without --pull-only, since the
-        /// default bidirectional sync already detects and reports genuine conflicts.
+        /// With --pull-only, overwrite local title/body/status even without a common baseline
+        /// or after local changes (GitHub wins). Does not override bidirectional field conflicts.
+        /// Also confirms deleting local comments whose GitHub counterparts are missing.
         #[arg(long)]
         force: bool,
         /// Only sync issues whose local record changed at/after this time (minibeads-specific).
@@ -2878,6 +2882,7 @@ fn run() -> Result<()> {
                 }
                 GithubCommands::Sync {
                     issue_ids,
+                    labels,
                     repo,
                     dry_run,
                     pull_only,
@@ -2894,7 +2899,10 @@ fn run() -> Result<()> {
                         dry_run,
                         pull_only,
                         force,
-                        since.map(|SyncSince(dt)| dt),
+                        github::GithubSyncFilter {
+                            labels: &labels,
+                            since: since.map(|SyncSince(dt)| dt),
+                        },
                     )?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3737,6 +3745,43 @@ Run mb create "My first issue" to create your first issue.
 mod body_input_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn github_sync_parses_intersecting_selection_flags() {
+        let cli = Cli::try_parse_from([
+            "mb",
+            "github",
+            "sync",
+            "minibeads-42",
+            "minibeads-43",
+            "--label",
+            "documentation",
+            "--label",
+            "review",
+            "--since",
+            "24h",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Commands::Github {
+            command:
+                GithubCommands::Sync {
+                    issue_ids,
+                    labels,
+                    since,
+                    dry_run,
+                    ..
+                },
+            ..
+        } = cli.command
+        else {
+            panic!("expected GitHub sync command");
+        };
+        assert_eq!(issue_ids, ["minibeads-42", "minibeads-43"]);
+        assert_eq!(labels, ["documentation", "review"]);
+        assert!(since.is_some());
+        assert!(dry_run);
+    }
 
     /// Inline stays inline when no file is given.
     #[test]

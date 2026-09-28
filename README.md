@@ -97,7 +97,8 @@ directory.
 │   ├── myproject-1.md   # Issue files with YAML frontmatter
 │   └── myproject-2.md
 ├── comments/            # Optional per-issue comment JSON files
-└── github-sync-state.json # Last-synced GitHub ancestry state, when used
+└── sync_ancestors/      # Git-ignored, local synchronization history
+    └── github.json     # Versioned common issue contents and comment pairings
 ```
 
 ### Issue Format
@@ -242,21 +243,53 @@ issues are ignored.
 - `mb github list` - Show current minibeads-to-GitHub issue links
 - `mb github import [-R owner/repo] [--state open|closed|all] [--label LABEL] [--assignee USER] [--author USER] [--mention USER] [--milestone M] [--app APP] [--search QUERY] [--limit N] [--dry-run] [--quiet|--verbose]` - Import matching GitHub issues that are not already linked to minibeads issues
 - `mb github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
-- `mb github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
+- `mb github sync [ISSUE_ID...] [--label LABEL...] [-R owner/repo] [--since CUTOFF] [--dry-run] [--pull-only] [--force] [--quiet|--verbose]` - Sync selected linked issues
 - `mb github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
 Synced fields are title, description/body, open/closed state, and comments.
-minibeads keeps `.minibeads/github-sync-state.json` as the last-synced ancestry
-record so it can distinguish local-only changes, GitHub-only changes, and
-both-sides conflicts. Labels, priority, assignee, dependencies, and other
-minibeads-specific metadata remain local for now.
+minibeads keeps the last common title, body, and GitHub open/closed state in
+`.minibeads/sync_ancestors/github.json` (or the selected legacy `.beads` directory).
+It uses content-based three-way merging, not timestamp winner selection. Edits
+to different fields merge independently; non-overlapping prose edits merge,
+while incompatible edits to the same text remain conflicts. Local statuses
+such as `in_progress` survive when GitHub remains open. Labels, priority,
+assignee, dependencies, and other minibeads-specific metadata remain local.
 
-Comment sync propagates deletions in both directions. The sync state pairs each
-synced local comment with its GitHub comment id, so deleting a comment on one
-side (for example with `mb comments delete`) deletes its counterpart on the
-other side on the next sync, rather than re-importing it. Pull-only sync
-(`--pull-only`) applies GitHub-side deletions locally but never deletes on
-GitHub.
+Repeat `--label` to require **all** supplied local labels. Labels, explicit IDs,
+and `--since` intersect; an empty selection does not turn into a full sync:
+
+```bash
+mb github sync minibeads-42 --dry-run
+mb github sync --label documentation --label review
+mb github sync minibeads-42 minibeads-43 --label documentation
+```
+
+`--since` examines **local** modification times only. Omit it when remote-only
+changes must be discovered. `--label` does not filter GitHub's remote labels.
+
+The archive is atomically replaced after each successfully converged issue;
+conflicts and dry runs do not advance its ancestor. Legacy
+`github-sync-state.json` is read when no new archive exists. Matching replicas
+establish a baseline automatically; a legacy common hash can establish one
+after a proven one-sided update. Missing history plus divergent content never
+silently chooses a winner. Reconcile both replicas manually, or explicitly use
+`mb github sync ISSUE_ID --pull-only --force` to **discard local synced fields
+and choose GitHub**. Ordinary `--pull-only` also refuses unproven overwrites.
+
+Remote fields are checked again before a push and verified after writes.
+The `gh` interface does not offer an atomic compare-and-swap for this workflow,
+so this narrows, but cannot eliminate, concurrent remote-edit races. Avoid
+simultaneous edits during a sync. See
+[the prose-merging and Unison-inspired design](ai_docs/github-sync-design.md)
+for guarantees, limitations, and further work. Local Markdown/JSONL `mb sync`
+is a separate, still timestamp-based mechanism.
+
+Comment sync tracks local/GitHub ID pairings separately from issue fields.
+Deleting a local comment (for example with `mb comments delete`) deletes its
+GitHub counterpart on the next bidirectional sync. A missing remote comment
+is treated cautiously: deleting the local copy requires `--force`, because
+remote ID changes can resemble deletions. Pull-only sync never deletes comments
+on GitHub. Comment bodies do not yet use the prose three-way merger.
 
 Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
 viewing the GitHub issue can see which local minibeads issue owns the sync. That
