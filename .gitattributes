@@ -1,0 +1,4 @@
+.minibeads/issues/**/*.md merge=mb
+.minibeads/comments/*.json merge=mb
+.beads/issues/**/*.md merge=mb
+.beads/comments/*.json merge=mb

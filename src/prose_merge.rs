@@ -803,6 +803,14 @@ fn merge_overlap(
                 StructuredOverlapReason::MarkdownSource,
             ));
         }
+        // Word-level merging is only sound inside one paragraph. Across
+        // paragraph breaks the token alignment can anchor on text repeated in
+        // an inserted paragraph and emit that paragraph twice.
+        for text in [original, local, remote] {
+            if Pieces::new(text, Level::Paragraphs, budget.piece_limit)?.len() > 1 {
+                return Err(MergeError::Competing(CompetingEditReason::OverlappingEdits));
+            }
+        }
         return merge_level(original, local, remote, Level::Tokens, budget, output);
     }
 
@@ -1201,6 +1209,19 @@ mod tests {
             ProseMergeResult::WorkExhausted(failure) => failure.reason(),
             unexpected => panic!("expected work exhaustion, got {unexpected:?}"),
         }
+    }
+
+    #[test]
+    fn overlap_spanning_paragraphs_never_duplicates_an_insertion() {
+        // Found by the issue-merge re-merge property: the local side rewrote
+        // P0 and carries the remote's inserted paragraph, whose words repeat
+        // P0's. A token merge across the break emitted the insertion twice.
+        assert_competing_in_both_roles(
+            "P0 Golf hotel india.\n\nP1 Mike.\n",
+            "Golf hotel india. (ours)\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
+            "P0 Golf hotel india.\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
+            CompetingEditReason::OverlappingEdits,
+        );
     }
 
     #[test]

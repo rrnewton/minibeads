@@ -9,3 +9,5 @@ substitutes for the project vision, maintained user documentation, or issue trac
   invariants, and acceptance gates for scoped ancestor-based synchronization.
 - [GitHub sync and prose merging](github-sync-design.md): design-space analysis,
   Unison comparison, deterministic prose recommendation, and recovery model.
+- [Git merge driver](merge-driver-design.md): `mb merge-driver` contract, field
+  and comment merge rules, precise conflict rendering, tests, and follow-ups.

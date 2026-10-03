@@ -6,8 +6,25 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-03
+
 ### Added
 
+- **`mb merge-driver`: three-way git merges of issue and comment files.**
+  `mb merge-driver install` registers the driver (`git config merge.mb.*`) and
+  routes `.minibeads/`/`.beads/` issue and comment files to it via
+  `.gitattributes`; `run` implements git's `%O %A %B %L %P` protocol and `show`
+  prints the setup. Every issue field merges against the merge base: scalars
+  take the changed side, labels merge as a set, dependencies per target,
+  timestamps by rule (earliest created, latest updated, derived closed), and
+  all four prose sections through the paragraph/word merger. Comments merge as
+  an append-only set keyed by stable comment ID -- never dropped (a one-sided
+  deletion is kept and reported) and never duplicated. Conflicts are standard
+  diff3 hunks with fixed `ours`/`base`/`theirs` labels confined to the
+  conflicting field, paragraph, or comment, plus one
+  `mb merge-driver: CONFLICT <path>: <subject>: <reason>` line each.
+  Non-canonical input is never re-serialized (byte-exact one-sided take, else a
+  textual merge).
 - **Full ancestor-based GitHub issue field merging.** Versioned per-issue
   checkpoints under `.minibeads/sync_ancestors/github/` retain the last common
   title, body, and open/closed state. Independent field and prose edits merge;
@@ -19,6 +36,9 @@ issue tracker; the binary is named `mb`.
 
 ### Changed
 
+- `mb` refuses to read or write an issue file containing a complete git
+  conflict hunk outside a code fence, so an unresolved merge is reported
+  instead of being parsed as prose.
 - Divergent GitHub/local issue fields without a provable common ancestor no
   longer pick a winner during ordinary sync. Matching replicas establish a
   baseline, legacy equal hashes can prove one-sided changes, and
@@ -30,6 +50,24 @@ issue tracker; the binary is named `mb`.
   ancestor ownership transactionally, and future sync-state schemas fail closed.
 - GitHub dry runs open storage read-only and do not bootstrap ignore/config
   files. `--since` help now states that it cannot discover remote-only changes.
+
+### Fixed
+
+- Dependencies are written in sorted order. They were serialized from a hash
+  map, so issues with two or more dependencies were rewritten in random order,
+  producing spurious diffs and merge conflicts (Markdown and JSONL export).
+- The prose merger no longer refines an overlap that spans several paragraphs
+  to word level; doing so could emit an inserted paragraph twice. Such overlaps
+  are now reported as competing edits.
+
+## [0.28.0] - 2026-09-02
+
+### Fixed
+
+- Section parsing no longer truncates descriptions containing indented `# `
+  lines (for example shell comments in code blocks). Header detection is
+  anchored to column 0, matching the writer's escape rule. (Entry backfilled in
+  0.29.0; the release commit did not update this file.)
 
 ## [0.27.0] - 2026-07-30
 

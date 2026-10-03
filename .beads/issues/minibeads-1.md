@@ -5,7 +5,7 @@ priority: 0
 issue_type: epic
 assignee: claude
 created_at: 2025-10-30T13:22:12.679166235+00:00
-updated_at: 2025-10-31T04:26:26.036565348+00:00
+updated_at: 2026-10-03T06:41:37.458366568+00:00
 ---
 
 # Description
@@ -63,3 +63,7 @@ Main tracking issue for minibeads - a minimal, filesystem-based issue tracker in
 **Checked up-to-date as of 2025-10-31_#71(0692919)**
 
 All stats verified, architecture clarifications added for sync issues.
+
+## Git-level 3-way merge (0.29.0, 2026-10-03)
+- minibeads-38: mb merge-driver (issue fields, prose sections, append-only comment set, precise diff3 hunks) - see ai_docs/merge-driver-design.md
+- Follow-ups: minibeads-39 (github-sync-state.json merge), minibeads-40 (export/import comment duplicate)

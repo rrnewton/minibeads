@@ -2,13 +2,18 @@
 
 Use debug builds for local development and validation.
 
-- `make validate` runs the routine Rust tests, seven shell-test fixtures,
+- `make validate` runs the routine Rust tests, eight shell-test fixtures,
   migration/regression suites, deterministic harness-initialization checks,
   formatting, and Clippy. Its `purge` prerequisite removes upstream artifacts;
   use `make -o purge validate` when the private-database boundary prohibits that
   cleanup. This still runs all validation gates.
 - `cargo test --locked --test regressions` exercises CLI/storage integration
   regressions in isolated temporary databases.
+- `cargo test --locked --bin mb issue_merge diff3 merge_driver` runs the git
+  merge-driver suites: explicit conflict cases plus seeded property tests
+  (commutativity, one-side identity, re-merge idempotence, machine-resolvable
+  hunks, and no lost or duplicated comments over thousands of generated edit
+  pairs). `merge_driver.sh` drives real `git merge`s through an installed driver.
 - `cargo test --locked --bin mb github::sync_tests` exercises mocked GitHub
   three-way merges, scoped selection, dry-run, concurrency, and recovery without
   writing to a live repository. Prose and ancestor unit suites run in the same

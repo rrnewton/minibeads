@@ -2,7 +2,7 @@ use crate::types::{DependencyType, Issue};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Frontmatter for markdown issues
 #[derive(Debug, Serialize, Deserialize)]
@@ -17,8 +17,10 @@ pub struct Frontmatter {
     pub external_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub depends_on: HashMap<String, String>,
+    /// Sorted so that rewriting an issue never reorders its dependency lines,
+    /// which would otherwise create spurious diffs and merge conflicts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub depends_on: BTreeMap<String, String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,11 +31,53 @@ pub struct Frontmatter {
     pub claimed_until: Option<String>,
 }
 
-/// Convert an Issue to markdown format
-pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
-    let mut output = String::new();
+/// The Markdown body sections of an issue file, in the order they are written.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Section {
+    Description,
+    Design,
+    AcceptanceCriteria,
+    Notes,
+}
 
-    // Build frontmatter
+impl Section {
+    pub const ALL: [Section; 4] = [
+        Section::Description,
+        Section::Design,
+        Section::AcceptanceCriteria,
+        Section::Notes,
+    ];
+
+    pub const fn heading(self) -> &'static str {
+        match self {
+            Section::Description => "Description",
+            Section::Design => "Design",
+            Section::AcceptanceCriteria => "Acceptance Criteria",
+            Section::Notes => "Notes",
+        }
+    }
+
+    pub fn content(self, issue: &Issue) -> &str {
+        match self {
+            Section::Description => &issue.description,
+            Section::Design => &issue.design,
+            Section::AcceptanceCriteria => &issue.acceptance_criteria,
+            Section::Notes => &issue.notes,
+        }
+    }
+
+    pub fn content_mut(self, issue: &mut Issue) -> &mut String {
+        match self {
+            Section::Description => &mut issue.description,
+            Section::Design => &mut issue.design,
+            Section::AcceptanceCriteria => &mut issue.acceptance_criteria,
+            Section::Notes => &mut issue.notes,
+        }
+    }
+}
+
+/// Serialize the YAML frontmatter of an issue (without the `---` delimiters).
+pub fn frontmatter_yaml(issue: &Issue) -> Result<String> {
     let fm = Frontmatter {
         title: issue.title.clone(),
         status: issue.status.to_string(),
@@ -53,42 +97,44 @@ pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
         claimed_at: issue.claimed_at.map(|t| t.to_rfc3339()),
         claimed_until: issue.claimed_until.map(|t| t.to_rfc3339()),
     };
+    serde_yaml::to_string(&fm).context("Failed to serialize frontmatter")
+}
 
-    // Write YAML frontmatter
+/// Append the blank-line-delimited heading that opens `section`.
+pub fn push_section_heading(output: &mut String, section: Section) {
+    output.push_str("\n# ");
+    output.push_str(section.heading());
+    output.push_str("\n\n");
+}
+
+/// Convert an Issue to markdown format
+pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
+    let mut output = String::new();
     output.push_str("---\n");
-    output.push_str(&serde_yaml::to_string(&fm).context("Failed to serialize frontmatter")?);
+    output.push_str(&frontmatter_yaml(issue)?);
     output.push_str("---\n");
 
-    // Write markdown sections
-    if !issue.description.is_empty() {
-        output.push_str("\n# Description\n\n");
-        output.push_str(&sanitize_section_content(&issue.description));
-        output.push('\n');
+    for section in Section::ALL {
+        let content = section.content(issue);
+        if !content.is_empty() {
+            push_section_heading(&mut output, section);
+            output.push_str(&sanitize_section_content(content));
+            output.push('\n');
+        }
     }
 
-    if !issue.design.is_empty() {
-        output.push_str("\n# Design\n\n");
-        output.push_str(&sanitize_section_content(&issue.design));
-        output.push('\n');
+    if let Some(line) = find_conflict_hunk(&output) {
+        anyhow::bail!(
+            "{} would be written with a git conflict hunk at line {line}, which mb refuses to \
+             read back; resolve it, or put the text in a ``` code fence",
+            issue.id
+        );
     }
-
-    if !issue.acceptance_criteria.is_empty() {
-        output.push_str("\n# Acceptance Criteria\n\n");
-        output.push_str(&sanitize_section_content(&issue.acceptance_criteria));
-        output.push('\n');
-    }
-
-    if !issue.notes.is_empty() {
-        output.push_str("\n# Notes\n\n");
-        output.push_str(&sanitize_section_content(&issue.notes));
-        output.push('\n');
-    }
-
     Ok(output)
 }
 
 /// Sanitize section content to prevent top-level headers from breaking the format
-fn sanitize_section_content(content: &str) -> String {
+pub fn sanitize_section_content(content: &str) -> String {
     content
         .lines()
         .map(|line| {
@@ -102,8 +148,62 @@ fn sanitize_section_content(content: &str) -> String {
         .join("\n")
 }
 
+/// 1-based line number in an issue file.
+pub type LineNumber = usize;
+
+fn marker_run(line: &str, marker: char) -> Option<&str> {
+    let rest = line.trim_start_matches(marker);
+    (line.len() - rest.len() >= 7).then_some(rest)
+}
+
+/// First line of an unresolved `git merge` conflict hunk (`<<<<<<<`, then
+/// `=======`, then `>>>>>>>`, each at least 7 long), ignoring fenced code
+/// blocks so documentation about conflicts stays legal.
+pub fn find_conflict_hunk(content: &str) -> Option<LineNumber> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Outside,
+        Opened(LineNumber),
+        Separated(LineNumber),
+    }
+    let mut state = State::Outside;
+    let mut in_fence = false;
+    for (index, line) in content.lines().enumerate() {
+        if line.starts_with("# ") {
+            // Column-0 "# " is always a section heading (content is escaped
+            // to "## "), so an unclosed fence cannot hide later sections.
+            in_fence = false;
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let is_label = |rest: &str| rest.is_empty() || rest.starts_with(' ');
+        state = match state {
+            _ if marker_run(line, '<').is_some_and(is_label) => State::Opened(index + 1),
+            State::Opened(start) if marker_run(line, '=') == Some("") => State::Separated(start),
+            State::Separated(start) if marker_run(line, '>').is_some_and(is_label) => {
+                return Some(start)
+            }
+            other => other,
+        };
+    }
+    None
+}
+
 /// Parse markdown format into an Issue
 pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
+    if let Some(line) = find_conflict_hunk(content) {
+        anyhow::bail!(
+            "{issue_id}.md has an unresolved merge conflict starting at line {line}; \
+             keep one side of each <<<<<<< ... >>>>>>> hunk and delete the markers"
+        );
+    }
     let (frontmatter, body) = split_frontmatter(content)?;
 
     // Parse frontmatter
@@ -267,7 +367,7 @@ fn parse_sections(body: &str) -> Result<(String, String, String, String)> {
 /// `str::trim` here would strip the leading whitespace of an indented first
 /// line (e.g. the opening line of an indented code block), which the next
 /// write would then mis-escape as a top-level header.
-fn trim_blank_edge_lines(content: &str) -> &str {
+pub fn trim_blank_edge_lines(content: &str) -> &str {
     let mut s = content;
     while let Some(i) = s.find('\n') {
         if !s[..i].trim().is_empty() {
@@ -338,6 +438,45 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
 mod tests {
     use super::*;
     use crate::types::IssueType;
+
+    #[test]
+    fn unresolved_conflict_hunks_are_rejected_outside_code_fences() {
+        let mut issue = Issue::new("test-1".into(), "T".into(), 2, IssueType::Task);
+        issue.description =
+            "Before.\n\n<<<<<<< ours\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> theirs\n\nAfter."
+                .into();
+        let error = issue_to_markdown(&issue).unwrap_err().to_string();
+        assert!(error.contains("conflict hunk at line 14"), "{error}");
+        let clean = std::mem::take(&mut issue.description);
+        let markdown = format!(
+            "{}\n# Description\n\n{clean}\n",
+            issue_to_markdown(&issue).unwrap()
+        );
+        let error = markdown_to_issue("test-1", &markdown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unresolved merge conflict"), "{error}");
+        assert_eq!(
+            find_conflict_hunk(&markdown),
+            markdown
+                .lines()
+                .position(|line| line == "<<<<<<< ours")
+                .map(|index| index + 1)
+        );
+
+        issue.description =
+            "Git writes:\n\n```\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n```".into();
+        let markdown = issue_to_markdown(&issue).unwrap();
+        assert_eq!(
+            markdown_to_issue("test-1", &markdown).unwrap().description,
+            issue.description
+        );
+        assert_eq!(find_conflict_hunk("<<<<<<< ours\n=======\n"), None);
+        assert_eq!(
+            find_conflict_hunk("<<<<<<<<<\n=========\n>>>>>>>>>\n"),
+            Some(1)
+        );
+    }
 
     #[test]
     fn test_issue_roundtrip() {

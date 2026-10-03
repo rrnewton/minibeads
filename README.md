@@ -172,7 +172,8 @@ src/
 ├── storage.rs   # File-based storage operations
 ├── format.rs    # Markdown serialization/deserialization
 ├── types.rs     # Core data structures (Issue, Status, etc.)
-└── lock.rs      # Coarse-grained file locking
+├── lock.rs      # Coarse-grained file locking
+└── merge_driver.rs, issue_merge.rs, diff3.rs  # Git merge driver (see src/README.md)
 
 tests/
 ├── e2e_tests.rs           # Test harness
@@ -307,6 +308,87 @@ vendored version. minibeads uses the same `external_ref` idea for the URL and
 keeps synchronization history outside issue Markdown to avoid churning normal
 issue fields. Local Markdown/JSONL `mb sync` is a separate timestamp-based
 protocol; the GitHub common-content archive does not change that behavior.
+
+### Git Merge Driver
+
+Issue files and comment files are ordinary files under version control, so two
+branches that touch the same issue meet in `git merge`. Git's line merge handles
+them poorly: both sides always change `updated_at:`, two appended comments
+collide at the end of the JSON array, and two edits to one long prose line
+conflict. `mb merge-driver` replaces it with a field-aware three-way merge that
+uses the merge base git already computed.
+
+Install it once per clone (or with `--global` once per machine):
+
+```bash
+mb merge-driver install            # git config merge.mb.* + .gitattributes lines
+mb merge-driver install --command /path/to/mb   # pin an executable instead of PATH lookup
+mb merge-driver show               # print the config and attributes without changing anything
+```
+
+`install` writes `merge.mb.name` and `merge.mb.driver` into the local git config
+and appends any missing routing lines to the repository's `.gitattributes`
+(commit that file so every clone routes the same paths; each clone still needs
+the `git config` part, because git never runs drivers named by the repository
+alone). The equivalent manual setup is:
+
+```bash
+git config merge.mb.name "minibeads three-way issue and comment merge"
+git config merge.mb.driver "mb merge-driver run %O %A %B --marker-size %L --path %P"
+cat >> .gitattributes <<'ATTRS'
+.minibeads/issues/**/*.md merge=mb
+.minibeads/comments/*.json merge=mb
+.beads/issues/**/*.md merge=mb
+.beads/comments/*.json merge=mb
+ATTRS
+```
+
+Merge rules:
+
+- **Scalar fields** (title, status, priority, type, assignee, external ref,
+  claim window) take the side that changed; two different changes conflict.
+- **Labels** merge as a set (additions and removals from both sides).
+  **Dependencies** merge per target issue; changing a dependency's type on one
+  side while removing it on the other conflicts.
+- **Timestamps** never conflict: `created_at` keeps the earliest, `updated_at`
+  the latest, and `closed_at` follows the merged status.
+- **Prose sections** (Description, Design, Acceptance Criteria, Notes) use the
+  same bounded paragraph/word merger as GitHub sync. Edits to different
+  paragraphs merge; competing edits conflict.
+- **Comments** are an append-only set keyed by comment ID: comments added on
+  either side are all kept, exactly once, in `created_at` order. A comment
+  deleted on only one side is **kept** (with a `NOTICE` on stderr); one deleted
+  on both sides stays deleted. A GitHub-imported comment edited on both sides
+  takes the newer GitHub revision; a local comment edited on both sides merges
+  its body as prose or conflicts.
+- Files with no merge base (both branches created the same ID) merge only when
+  identical; otherwise the whole file is one conflict.
+- Input that is not exactly what `mb` writes (hand-edited YAML, unknown keys)
+  is never re-serialized: if only one side changed it is taken byte for byte,
+  otherwise the file falls back to a plain line merge.
+
+Conflicts are written as standard diff3 hunks with fixed labels, confined to
+the lines of the conflicting field, paragraph, or comment:
+
+```
+<<<<<<< ours
+title: Main title
+||||||| base
+title: Original title
+=======
+title: Feature title
+>>>>>>> theirs
+```
+
+Everything outside the hunks is already merged, so a tool can resolve a file
+by keeping one section of each hunk. The driver also prints one
+`mb merge-driver: CONFLICT <path>: <field or comment>: <reason>` line per
+conflict. `mb` refuses to read an issue file that still contains a hunk
+outside a code fence, so a hunk accidentally committed is reported instead of
+silently parsed as prose.
+
+`mb merge-driver run BASE OURS THEIRS --path REPO/PATH --stdout` previews a
+merge without writing any file.
 
 ### Options
 

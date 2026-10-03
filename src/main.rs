@@ -1,10 +1,13 @@
 mod code_patch;
+mod diff3;
 mod format;
 mod github;
 mod github_ancestor;
 mod github_merge;
 mod hash;
+mod issue_merge;
 mod lock;
+mod merge_driver;
 mod paths;
 mod prose_merge;
 mod storage;
@@ -770,6 +773,12 @@ enum Commands {
     #[command(alias = "v")]
     Version,
 
+    /// Git merge driver for issue and comment files (minibeads-specific)
+    MergeDriver {
+        #[command(subcommand)]
+        command: MergeDriverCommands,
+    },
+
     /// Migrate between numeric and hash-based IDs (minibeads-specific)
     MbMigrate {
         /// Migration direction: 'hash', 'numeric', 'sharded', or 'flat'
@@ -811,6 +820,12 @@ impl Commands {
             | Self::Ready { .. }
             | Self::Quickstart
             | Self::Version
+            | Self::MergeDriver {
+                command: MergeDriverCommands::Show,
+            }
+            | Self::MergeDriver {
+                command: MergeDriverCommands::Run { stdout: true, .. },
+            }
             | Self::Migrate { .. } => true,
             Self::Export {
                 output,
@@ -850,9 +865,49 @@ impl Commands {
             | Self::MbRename { .. }
             | Self::RenamePrefix { .. }
             | Self::Sync { .. }
-            | Self::MbMigrate { .. } => false,
+            | Self::MbMigrate { .. }
+            | Self::MergeDriver { .. } => false,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum MergeDriverCommands {
+    /// Merge one file (invoked by git as `merge.mb.driver`). Writes the result to
+    /// OURS and exits 0 when clean, 1 when conflict hunks were written.
+    Run {
+        /// Common ancestor version (git's %O)
+        base: PathBuf,
+        /// Our version, overwritten with the result (git's %A)
+        ours: PathBuf,
+        /// Their version (git's %B)
+        theirs: PathBuf,
+        /// Conflict marker length (git's %L)
+        #[arg(long, default_value_t = 7)]
+        marker_size: usize,
+        /// Repository path of the merged file (git's %P); selects issue,
+        /// comment, or plain-text merging. Defaults to OURS.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Print the merge result instead of overwriting OURS
+        #[arg(long)]
+        stdout: bool,
+    },
+    /// Register the driver in git config and route minibeads files to it in
+    /// .gitattributes
+    Install {
+        /// Executable git should run as the driver
+        #[arg(long, default_value = "mb")]
+        command: String,
+        /// Write the driver to the user's global git config instead of the repository's
+        #[arg(long)]
+        global: bool,
+        /// Do not modify .gitattributes
+        #[arg(long)]
+        no_gitattributes: bool,
+    },
+    /// Print the git config and .gitattributes lines the driver needs
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -1794,6 +1849,60 @@ impl IssueFilters<'_> {
                     .get(parent_id)
                     .is_some_and(|dep_type| *dep_type == DependencyType::ParentChild)
             });
+        }
+    }
+}
+
+fn run_merge_driver_command(command: MergeDriverCommands) -> Result<()> {
+    match command {
+        MergeDriverCommands::Run {
+            base,
+            ours,
+            theirs,
+            marker_size,
+            path,
+            stdout,
+        } => {
+            let outcome = merge_driver::run_driver(&merge_driver::DriverRun {
+                base: &base,
+                ours: &ours,
+                theirs: &theirs,
+                path: path.as_deref(),
+                size: diff3::MarkerSize::new(marker_size),
+                stdout,
+            })?;
+            if outcome == merge_driver::DriverOutcome::Conflicted {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        MergeDriverCommands::Install {
+            command,
+            global,
+            no_gitattributes,
+        } => {
+            let report = merge_driver::install(&merge_driver::InstallOptions {
+                executable: &command,
+                global,
+                skip_gitattributes: no_gitattributes,
+            })?;
+            for line in report {
+                println!("{line}");
+            }
+            println!("Installed the minibeads merge driver.");
+            Ok(())
+        }
+        MergeDriverCommands::Show => {
+            println!(
+                "git config merge.{}.driver '{}'",
+                merge_driver::DRIVER_NAME,
+                merge_driver::driver_command("mb")
+            );
+            println!("# .gitattributes");
+            for line in merge_driver::gitattributes_lines() {
+                println!("{line}");
+            }
+            Ok(())
         }
     }
 }
@@ -3353,6 +3462,8 @@ fn run() -> Result<()> {
             println!("mb version {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+
+        Commands::MergeDriver { command } => run_merge_driver_command(command),
 
         Commands::MbMigrate {
             to,

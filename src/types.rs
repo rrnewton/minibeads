@@ -376,7 +376,8 @@ pub struct Comment {
     pub source_id: Option<String>,
 }
 
-/// Custom serialization for depends_on HashMap -> dependencies array
+/// Custom serialization for depends_on HashMap -> dependencies array, sorted by
+/// ID so exports are deterministic.
 fn serialize_dependencies<S>(
     map: &HashMap<String, DependencyType>,
     serializer: S,
@@ -384,8 +385,10 @@ fn serialize_dependencies<S>(
 where
     S: Serializer,
 {
-    let deps: Vec<Dependency> = map
-        .iter()
+    let mut sorted: Vec<(&String, &DependencyType)> = map.iter().collect();
+    sorted.sort_unstable_by_key(|(id, _)| *id);
+    let deps: Vec<Dependency> = sorted
+        .into_iter()
         .map(|(id, dep_type)| Dependency {
             id: id.clone(),
             dep_type: dep_type.to_string(),
