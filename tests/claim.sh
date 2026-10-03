@@ -60,7 +60,7 @@ assert_contains() {
     local haystack="$1"
     local needle="$2"
     local message="${3:-Assertion failed}"
-    if echo "$haystack" | grep -qF -- "$needle"; then
+    if grep -qF -- "$needle" <<<"$haystack"; then
         success "$message"
     else
         fail "$message (expected to find: '$needle' in output)"
