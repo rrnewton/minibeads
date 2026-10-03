@@ -133,34 +133,48 @@ fn byte_conflict(base: &[u8], ours: &[u8], theirs: &[u8], size: MarkerSize) -> V
     output
 }
 
-/// Merge three raw inputs: as text when all are UTF-8, otherwise as one hunk.
+/// Merge three raw inputs: as text when all are UTF-8, otherwise whole, taking
+/// the side that changed or writing one hunk when both changed differently.
 fn merge_bytes(
     kind: MergeFileKind,
     path: &Path,
     [base, ours, theirs]: [&[u8]; 3],
     size: MarkerSize,
 ) -> (Vec<u8>, FileMerge) {
-    match (
+    if let (Ok(base), Ok(ours), Ok(theirs)) = (
         std::str::from_utf8(base),
         std::str::from_utf8(ours),
         std::str::from_utf8(theirs),
     ) {
-        (Ok(base), Ok(ours), Ok(theirs)) => {
-            let mut merged = merge_file(kind, path, MergeInputs { base, ours, theirs }, size);
-            (std::mem::take(&mut merged.text).into_bytes(), merged)
-        }
-        _ => (
-            byte_conflict(base, ours, theirs, size),
-            FileMerge {
-                text: String::new(),
-                conflicts: vec![MergeConflict {
-                    subject: ConflictSubject::WholeFile,
-                    reason: ConflictReason::NotUtf8,
-                }],
-                notices: Vec::new(),
-            },
-        ),
+        let mut merged = merge_file(kind, path, MergeInputs { base, ours, theirs }, size);
+        return (std::mem::take(&mut merged.text).into_bytes(), merged);
     }
+    let taken = |side: &[u8]| {
+        let merge = FileMerge {
+            text: String::new(),
+            conflicts: Vec::new(),
+            notices: Vec::new(),
+        };
+        (side.to_vec(), merge)
+    };
+    if ours == theirs || theirs == base {
+        return taken(ours);
+    }
+    if ours == base {
+        return taken(theirs);
+    }
+    let size = size.longer_than_markers_in_bytes([base, ours, theirs]);
+    (
+        byte_conflict(base, ours, theirs, size),
+        FileMerge {
+            text: String::new(),
+            conflicts: vec![MergeConflict {
+                subject: ConflictSubject::WholeFile,
+                reason: ConflictReason::NotUtf8,
+            }],
+            notices: Vec::new(),
+        },
+    )
 }
 
 /// Paths and options of one driver invocation.
@@ -394,6 +408,30 @@ mod tests {
                 reason: ConflictReason::NotUtf8,
             }]
         );
+        // Markers outgrow marker-like lines here too.
+        let (bytes, _) = merge_bytes(
+            MergeFileKind::Issue,
+            Path::new(".minibeads/issues/x-1.md"),
+            [b"=======\n", b"=======\nours \xff\n", b"=======\ntheirs\n"],
+            MarkerSize::DEFAULT,
+        );
+        assert!(bytes.starts_with(b"<<<<<<<< ours\n=======\nours \xff\n"));
+    }
+
+    #[test]
+    fn non_utf8_inputs_changed_on_one_side_merge_cleanly() {
+        let path = Path::new(".minibeads/issues/x-1.md");
+        let (old, new) = (&b"old \xff\n"[..], &b"new \xfe\n"[..]);
+        for (sides, expected) in [
+            ([old, new, old], new),
+            ([old, old, new], new),
+            ([old, new, new], new),
+        ] {
+            let (bytes, merged) =
+                merge_bytes(MergeFileKind::Issue, path, sides, MarkerSize::DEFAULT);
+            assert_eq!(bytes, expected);
+            assert!(merged.conflicts.is_empty());
+        }
     }
 
     #[test]

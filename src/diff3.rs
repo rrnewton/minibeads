@@ -31,16 +31,19 @@ impl MarkerSize {
     /// conflict). A resolver can then tell every marker from content by its
     /// exact length.
     pub(crate) fn longer_than_markers_in(self, texts: [&str; 3]) -> Self {
+        self.longer_than_markers_in_bytes(texts.map(str::as_bytes))
+    }
+
+    /// [`Self::longer_than_markers_in`] for inputs that need not be UTF-8.
+    pub(crate) fn longer_than_markers_in_bytes(self, texts: [&[u8]; 3]) -> Self {
         let longest = texts
             .into_iter()
-            .flat_map(str::lines)
+            .flat_map(|text| text.split(|byte| *byte == b'\n'))
             .filter_map(|line| {
-                let marker = line
-                    .chars()
-                    .next()
-                    .filter(|first| "<|=>".contains(*first))?;
-                let rest = line.trim_start_matches(marker);
-                (rest.is_empty() || rest.starts_with(' ')).then_some(line.len() - rest.len())
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                let marker = *line.first().filter(|first| b"<|=>".contains(first))?;
+                let run = line.iter().take_while(|byte| **byte == marker).count();
+                matches!(line.get(run), None | Some(b' ')).then_some(run)
             })
             .max()
             .unwrap_or(0);

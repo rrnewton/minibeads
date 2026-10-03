@@ -179,7 +179,9 @@ git checkout -qb deleter3
 MB comments delete test-1 "$(comment_id "Comment from main")" >/dev/null
 git commit -qam "delete a third comment"
 git checkout -q main
-sed -i 's/"body": "Comment from main"/"body": "Comment from main, edited"/' "$COMMENTS"
+# Portable in-place edit: BSD sed (macOS) reads `-i`'s next argument as a suffix.
+sed 's/"body": "Comment from main"/"body": "Comment from main, edited"/' "$COMMENTS" >"$COMMENTS.edited"
+mv "$COMMENTS.edited" "$COMMENTS"
 assert_contains "$(MB comments list test-1)" "Comment from main, edited" "The hand-edited comment file should still parse"
 git commit -qam "edit that comment on main"
 EDITED_ID=$(comment_id "Comment from main, edited")

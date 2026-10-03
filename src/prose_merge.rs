@@ -137,6 +137,10 @@ pub(crate) enum CompetingEditReason {
     /// has, which happens when the two sides align against repeated text
     /// differently.
     InconsistentWordCounts,
+    /// The merge does not lie on a shortest token edit path from the
+    /// ancestor through each side, so it does not carry out some side's
+    /// change as written: repeated text let the change land in another spot.
+    MissesASideEdit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,7 +196,7 @@ pub(crate) fn merge_prose<'a>(
     }
 
     match merge_changed(inputs, limits) {
-        Ok(merged) => ProseMergeResult::Merged(MergedProse(Cow::Owned(merged))),
+        Ok(merged) => ProseMergeResult::Merged(MergedProse(merged)),
         Err(MergeError::Competing(reason)) => {
             ProseMergeResult::CompetingEdit(MergeFailure { inputs, reason })
         }
@@ -205,10 +209,10 @@ pub(crate) fn merge_prose<'a>(
     }
 }
 
-fn merge_changed(
-    inputs: ProseMergeInputs<'_>,
+fn merge_changed<'a>(
+    inputs: ProseMergeInputs<'a>,
     limits: ProseMergeLimits,
-) -> Result<String, MergeError> {
+) -> Result<Cow<'a, str>, MergeError> {
     if [
         inputs.ancestor.len(),
         inputs.local.len(),
@@ -220,33 +224,166 @@ fn merge_changed(
         return Err(MergeError::Exhausted(WorkExhaustionReason::InputBytes));
     }
 
-    // A paragraph carries the blank line that separates it from the next one,
-    // except the last. When no input ends in a line break, a common separator
-    // is appended to all three and removed again afterwards, so that a final
-    // paragraph that stops being final (one side appended after it) still
-    // aligns with itself instead of widening the edit into an overlap.
-    let texts = [inputs.ancestor, inputs.local, inputs.remote];
-    let pad = texts
-        .iter()
-        .all(|text| !text.is_empty() && !text.ends_with(['\n', '\r']));
-    let padded: [Cow<'_, str>; 3] = texts.map(|text| {
-        if pad {
-            Cow::Owned(format!("{text}{FINAL_SEPARATOR}"))
-        } else {
-            Cow::Borrowed(text)
+    let [ancestor, local, remote] = [inputs.ancestor, inputs.local, inputs.remote];
+    let piecewise = merge_piecewise(ancestor, local, remote, limits);
+    match superseding_side(ancestor, local, remote, limits) {
+        // A token edit script cannot tell deleting text from rewriting it, so
+        // a side that deleted what the other rewrote looks contained in it;
+        // the piecewise merge still sees the delete-versus-edit conflict.
+        Some(_) if piecewise == Err(MergeError::Competing(CompetingEditReason::DeleteVsEdit)) => {
+            Err(MergeError::Competing(CompetingEditReason::DeleteVsEdit))
         }
-    });
-    let [ancestor, local, remote] = &padded;
+        Some(superset) => Ok(Cow::Borrowed(superset)),
+        None => {
+            let merged = piecewise?;
+            require_both_sides_between(ancestor, local, remote, &merged, limits)?;
+            Ok(Cow::Owned(merged))
+        }
+    }
+}
 
+/// Fail unless each side lies on a shortest token edit path from the ancestor
+/// to `merged`, the containment test of [`superseding_side`] applied to the
+/// result: some minimal edit script of `merged` then makes every edit of each
+/// side, and edits both sides made alike are counted once. Alignment can still
+/// carry a side's change over to identical text elsewhere, which this catches
+/// when the move costs edits. Fails closed when the distances exceed the work
+/// limits.
+fn require_both_sides_between(
+    ancestor: &str,
+    local: &str,
+    remote: &str,
+    merged: &str,
+    limits: ProseMergeLimits,
+) -> Result<(), MergeError> {
     let mut budget = WorkBudget::new(limits);
-    let (first, second) = match budget.compare(local, remote)? {
+    let to_merged = token_distance(ancestor, merged, &mut budget)?;
+    for side in [local, remote] {
+        let through_side = token_distance(ancestor, side, &mut budget)?
+            + token_distance(side, merged, &mut budget)?;
+        if through_side != to_merged {
+            return Err(MergeError::Competing(CompetingEditReason::MissesASideEdit));
+        }
+    }
+    Ok(())
+}
+
+/// Merge each side's edits of the ancestor, piece by piece.
+fn merge_piecewise(
+    ancestor: &str,
+    local: &str,
+    remote: &str,
+    limits: ProseMergeLimits,
+) -> Result<String, MergeError> {
+    let (first, second) = match WorkBudget::new(limits).compare(local, remote)? {
         Ordering::Less => (local, remote),
         Ordering::Equal => unreachable!("equal replicas use the borrowed fast path"),
         Ordering::Greater => (remote, local),
     };
-    let output_capacity = local
+
+    // Each side is diffed against the ancestor on its own, so when text
+    // repeats, the two sides can align it differently and a merge can repeat
+    // or drop text that neither side did. Every longest common subsequence
+    // lies between the earliest and the latest one, and the merge is accepted
+    // only when it comes out the same with both sides aligned earliest and
+    // with both aligned latest.
+    let mut agreed: Option<String> = None;
+    for alignment in Alignment::BOTH {
+        let merged = merge_aligned(ancestor, first, second, alignment, limits)?;
+        match &agreed {
+            None => agreed = Some(merged),
+            Some(previous) if *previous == merged => {}
+            Some(_) => {
+                return Err(MergeError::Competing(
+                    CompetingEditReason::AmbiguousRepeatedAlignment,
+                ))
+            }
+        }
+    }
+    Ok(agreed.unwrap_or_default())
+}
+
+/// When one side lies on a shortest token edit path from the ancestor to the
+/// other, some minimal edit script of the other side makes every edit this
+/// side made (a replayed or cherry-picked change, or one side building on the
+/// other), so the merge is the other side as it stands. Deciding this needs no
+/// alignment, so it holds however text repeats; the piecewise merge could
+/// otherwise read the shared edits differently on each side and apply them
+/// twice. `None` when neither side contains the other, or when checking would
+/// exceed the work limits.
+fn superseding_side<'a>(
+    ancestor: &str,
+    local: &'a str,
+    remote: &'a str,
+    limits: ProseMergeLimits,
+) -> Option<&'a str> {
+    let mut budget = WorkBudget::new(limits);
+    let mut distance = |from, to| token_distance(from, to, &mut budget).ok();
+    let to_local = distance(ancestor, local)?;
+    let to_remote = distance(ancestor, remote)?;
+    let between = distance(local, remote)?;
+    if to_local + between == to_remote {
+        Some(remote)
+    } else if to_remote + between == to_local {
+        Some(local)
+    } else {
+        None
+    }
+}
+
+/// Insertions plus deletions in a shortest token edit script from `from` to
+/// `to`, by Myers' greedy algorithm: the work grows with the length times the
+/// distance, not with the product of the lengths, so a long text with a few
+/// edits stays cheap.
+fn token_distance(from: &str, to: &str, budget: &mut WorkBudget) -> Result<PieceIndex, MergeError> {
+    let from = Pieces::new(from, Level::Tokens, budget.piece_limit)?;
+    let to = Pieces::new(to, Level::Tokens, budget.piece_limit)?;
+    let longest = from.len() + to.len();
+    // `furthest[longest + k]`: the furthest `from` index that a script with
+    // the current number of edits reaches on diagonal k (the `from` index
+    // minus the `to` index). Points past either end can be recorded, but
+    // clamping them to the ends gives a script no longer, so the first
+    // distance to reach both ends is still the shortest.
+    let mut furthest: Vec<PieceIndex> = vec![0; 2 * longest + 2];
+    for distance in 0..=longest {
+        budget.reserve_alignment(distance + 1)?;
+        for diagonal in (longest - distance..=longest + distance).step_by(2) {
+            let after_insertion = diagonal == longest - distance
+                || (diagonal != longest + distance
+                    && furthest[diagonal - 1] < furthest[diagonal + 1]);
+            let mut from_index = if after_insertion {
+                furthest[diagonal + 1]
+            } else {
+                furthest[diagonal - 1] + 1
+            };
+            let mut to_index = from_index + longest - diagonal;
+            while from_index < from.len()
+                && to_index < to.len()
+                && budget.equal(from.piece(from_index), to.piece(to_index))?
+            {
+                from_index += 1;
+                to_index += 1;
+            }
+            furthest[diagonal] = from_index;
+            if from_index >= from.len() && to_index >= to.len() {
+                return Ok(distance);
+            }
+        }
+    }
+    unreachable!("deleting every piece and inserting every other reaches both ends")
+}
+
+fn merge_aligned(
+    ancestor: &str,
+    first: &str,
+    second: &str,
+    alignment: Alignment,
+    limits: ProseMergeLimits,
+) -> Result<String, MergeError> {
+    let mut budget = WorkBudget::new(limits);
+    let output_capacity = first
         .len()
-        .checked_add(remote.len())
+        .checked_add(second.len())
         .ok_or(MergeError::Exhausted(WorkExhaustionReason::InputBytes))?;
     let mut output = String::with_capacity(output_capacity);
     merge_level(
@@ -254,20 +391,12 @@ fn merge_changed(
         first,
         second,
         Level::Paragraphs,
+        alignment,
         &mut budget,
         &mut output,
     )?;
-    if pad {
-        // Every side ends with the separator, so a sound merge does too.
-        let Some(length) = output.strip_suffix(FINAL_SEPARATOR).map(str::len) else {
-            return Err(MergeError::Competing(CompetingEditReason::OverlappingEdits));
-        };
-        output.truncate(length);
-    }
     Ok(output)
 }
-
-const FINAL_SEPARATOR: &str = "\n\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MergeError {
@@ -430,12 +559,74 @@ impl<'a> Pieces<'a> {
         }
     }
 
-    fn span(&self, start: PieceIndex, end: PieceIndex) -> Range<ByteOffset> {
-        self.boundaries[start]..self.boundaries[end]
+    /// The byte range of a piece within `source`.
+    fn span(&self, index: PieceIndex) -> Range<ByteOffset> {
+        self.boundaries[index]..self.boundaries[index + 1]
     }
 }
 
+/// The bytes of two matched pieces that the match covers, as ranges of their
+/// sources. Tokens match whole. Matched paragraphs share their content, and
+/// the match extends over the blank lines around it only as far as the two
+/// pieces agree, so that a change to those blank lines alone, such as the
+/// separator a final paragraph gains when text is appended after it, remains
+/// an edit of just those bytes rather than of the whole paragraph.
+fn matched_spans(
+    ancestor: &Pieces<'_>,
+    side: &Pieces<'_>,
+    matched: MatchedPieces,
+) -> (Range<ByteOffset>, Range<ByteOffset>) {
+    let ancestor_span = ancestor.span(matched.ancestor);
+    let side_span = side.span(matched.side);
+    if ancestor.level == Level::Tokens {
+        return (ancestor_span, side_span);
+    }
+    let ancestor_piece = ancestor.piece(matched.ancestor);
+    let side_piece = side.piece(matched.side);
+    let ancestor_content = paragraph_content_span(ancestor_piece);
+    let side_content = paragraph_content_span(side_piece);
+    let shared_lead = common_suffix_length(
+        &ancestor_piece[..ancestor_content.start],
+        &side_piece[..side_content.start],
+    );
+    let shared_trail = common_prefix_length(
+        &ancestor_piece[ancestor_content.end..],
+        &side_piece[side_content.end..],
+    );
+    let covered = |span_start: ByteOffset, content: Range<ByteOffset>| {
+        span_start + content.start - shared_lead..span_start + content.end + shared_trail
+    };
+    (
+        covered(ancestor_span.start, ancestor_content),
+        covered(side_span.start, side_content),
+    )
+}
+
+fn common_prefix_length(first: &str, second: &str) -> ByteOffset {
+    first
+        .char_indices()
+        .zip(second.chars())
+        .find(|((_, left), right)| left != right)
+        .map_or(first.len().min(second.len()), |((offset, _), _)| offset)
+}
+
+fn common_suffix_length(first: &str, second: &str) -> ByteOffset {
+    first
+        .chars()
+        .rev()
+        .zip(second.chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum()
+}
+
 fn paragraph_content(piece: &str) -> &str {
+    &piece[paragraph_content_span(piece)]
+}
+
+/// The bytes of `piece` from its first to its last non-blank character,
+/// without the blank lines and line endings around them.
+fn paragraph_content_span(piece: &str) -> Range<ByteOffset> {
     let mut first_content = None;
     let mut content_end = 0;
     let mut offset = 0;
@@ -447,8 +638,7 @@ fn paragraph_content(piece: &str) -> &str {
         }
         offset += line.len();
     }
-    let start = first_content.unwrap_or(content_end);
-    &piece[start..content_end]
+    first_content.unwrap_or(content_end)..content_end
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,63 +727,120 @@ struct MatchedPieces {
     side: PieceIndex,
 }
 
+/// Which longest common subsequence `diff` reports when several exist: the one
+/// matching every piece as early as possible, or as late as possible. Every
+/// other LCS lies between the two, so a merge that comes out the same under
+/// both does not depend on how repeated text happens to be aligned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Alignment {
+    Earliest,
+    Latest,
+}
+
+impl Alignment {
+    const BOTH: [Self; 2] = [Self::Earliest, Self::Latest];
+
+    /// Map an index in scan order to a piece index: `Latest` scans backwards.
+    fn piece_index(self, scan_index: PieceIndex, length: PieceIndex) -> PieceIndex {
+        match self {
+            Self::Earliest => scan_index,
+            Self::Latest => length - 1 - scan_index,
+        }
+    }
+}
+
 fn diff<'a>(
     ancestor: &Pieces<'_>,
     side: &Pieces<'a>,
+    alignment: Alignment,
     budget: &mut WorkBudget,
 ) -> Result<Vec<Edit<'a>>, MergeError> {
-    let columns = side.len() + 1;
-    let cells = (ancestor.len() + 1)
+    let matches = longest_common_pieces(ancestor, side, alignment, budget)?;
+    let mut edits = Vec::new();
+    let mut ancestor_start = 0;
+    let mut side_start = 0;
+    for matched in matches {
+        let (ancestor_match, side_match) = matched_spans(ancestor, side, matched);
+        push_edit(
+            &mut edits,
+            ancestor.source,
+            side.source,
+            ancestor_start..ancestor_match.start,
+            side_start..side_match.start,
+            budget,
+        )?;
+        ancestor_start = ancestor_match.end;
+        side_start = side_match.end;
+    }
+    push_edit(
+        &mut edits,
+        ancestor.source,
+        side.source,
+        ancestor_start..ancestor.source.len(),
+        side_start..side.source.len(),
+        budget,
+    )?;
+    Ok(edits)
+}
+
+/// The matched piece pairs of one longest common subsequence, in increasing
+/// order. `alignment` picks which LCS when there are several; a choice between
+/// repeated content pieces at the same step is refused outright.
+fn longest_common_pieces(
+    ancestor: &Pieces<'_>,
+    side: &Pieces<'_>,
+    alignment: Alignment,
+    budget: &mut WorkBudget,
+) -> Result<Vec<MatchedPieces>, MergeError> {
+    let (ancestor_length, side_length) = (ancestor.len(), side.len());
+    let ancestor_piece =
+        |scan_index| ancestor.matching_piece(alignment.piece_index(scan_index, ancestor_length));
+    let side_piece =
+        |scan_index| side.matching_piece(alignment.piece_index(scan_index, side_length));
+    let columns = side_length + 1;
+    let cells = (ancestor_length + 1)
         .checked_mul(columns)
         .ok_or(MergeError::Exhausted(WorkExhaustionReason::AlignmentWork))?;
     budget.reserve_alignment(cells)?;
     let mut lengths: Vec<MatchCount> = vec![0; cells];
-    for ancestor_index in (0..ancestor.len()).rev() {
-        for side_index in (0..side.len()).rev() {
-            lengths[ancestor_index * columns + side_index] = if budget.equal(
-                ancestor.matching_piece(ancestor_index),
-                side.matching_piece(side_index),
-            )? {
-                lengths[(ancestor_index + 1) * columns + side_index + 1] + 1
-            } else {
-                lengths[(ancestor_index + 1) * columns + side_index]
-                    .max(lengths[ancestor_index * columns + side_index + 1])
-            };
+    for ancestor_index in (0..ancestor_length).rev() {
+        for side_index in (0..side_length).rev() {
+            lengths[ancestor_index * columns + side_index] =
+                if budget.equal(ancestor_piece(ancestor_index), side_piece(side_index))? {
+                    lengths[(ancestor_index + 1) * columns + side_index + 1] + 1
+                } else {
+                    lengths[(ancestor_index + 1) * columns + side_index]
+                        .max(lengths[ancestor_index * columns + side_index + 1])
+                };
         }
     }
 
-    let mut edits = Vec::new();
+    let mut matches = Vec::with_capacity(lengths[0]);
     let mut ancestor_start = 0;
     let mut side_start = 0;
     let mut remaining = lengths[0];
     while remaining > 0 {
         let mut next_match: Option<MatchedPieces> = None;
-        for ancestor_index in ancestor_start..ancestor.len() {
+        for ancestor_index in ancestor_start..ancestor_length {
             if lengths[ancestor_index * columns + side_start] < remaining {
                 break;
             }
-            for side_index in side_start..side.len() {
+            for side_index in side_start..side_length {
                 budget.reserve_alignment(1)?;
                 if lengths[ancestor_index * columns + side_index] < remaining {
                     break;
                 }
                 if lengths[(ancestor_index + 1) * columns + side_index + 1] + 1 == remaining
-                    && budget.equal(
-                        ancestor.matching_piece(ancestor_index),
-                        side.matching_piece(side_index),
-                    )?
+                    && budget.equal(ancestor_piece(ancestor_index), side_piece(side_index))?
                 {
                     if let Some(prior_match) = next_match {
-                        let content_anchor =
-                            is_content_anchor(ancestor.matching_piece(ancestor_index));
+                        let content_anchor = is_content_anchor(ancestor_piece(ancestor_index));
                         let repeated_ancestor = budget.equal(
-                            ancestor.matching_piece(prior_match.ancestor),
-                            ancestor.matching_piece(ancestor_index),
+                            ancestor_piece(prior_match.ancestor),
+                            ancestor_piece(ancestor_index),
                         )?;
-                        let repeated_side = budget.equal(
-                            side.matching_piece(prior_match.side),
-                            side.matching_piece(side_index),
-                        )?;
+                        let repeated_side =
+                            budget.equal(side_piece(prior_match.side), side_piece(side_index))?;
                         if (repeated_ancestor || repeated_side) && content_anchor {
                             return Err(MergeError::Competing(
                                 CompetingEditReason::AmbiguousRepeatedAlignment,
@@ -617,28 +864,18 @@ fn diff<'a>(
         let matched = next_match.ok_or(MergeError::Competing(
             CompetingEditReason::AmbiguousRepeatedAlignment,
         ))?;
-        let raw_match = ancestor.level == Level::Tokens
-            || budget.equal(ancestor.piece(matched.ancestor), side.piece(matched.side))?;
-        let matched_width = usize::from(!raw_match);
-        push_edit(
-            &mut edits,
-            ancestor,
-            side,
-            ancestor_start..matched.ancestor + matched_width,
-            side_start..matched.side + matched_width,
-        );
+        matches.push(MatchedPieces {
+            ancestor: alignment.piece_index(matched.ancestor, ancestor_length),
+            side: alignment.piece_index(matched.side, side_length),
+        });
         ancestor_start = matched.ancestor + 1;
         side_start = matched.side + 1;
         remaining -= 1;
     }
-    push_edit(
-        &mut edits,
-        ancestor,
-        side,
-        ancestor_start..ancestor.len(),
-        side_start..side.len(),
-    );
-    Ok(edits)
+    if alignment == Alignment::Latest {
+        matches.reverse();
+    }
+    Ok(matches)
 }
 
 fn is_content_anchor(piece: &str) -> bool {
@@ -647,19 +884,24 @@ fn is_content_anchor(piece: &str) -> bool {
     })
 }
 
+/// Record the replacement of `ancestor[ancestor_range]` by
+/// `side[side_range]`, unless the two are the same text.
 fn push_edit<'a>(
     edits: &mut Vec<Edit<'a>>,
-    ancestor: &Pieces<'_>,
-    side: &Pieces<'a>,
-    ancestor_range: Range<PieceIndex>,
-    side_range: Range<PieceIndex>,
-) {
-    if !ancestor_range.is_empty() || !side_range.is_empty() {
+    ancestor: &str,
+    side: &'a str,
+    ancestor_range: Range<ByteOffset>,
+    side_range: Range<ByteOffset>,
+    budget: &mut WorkBudget,
+) -> Result<(), MergeError> {
+    let replacement = &side[side_range];
+    if !budget.equal(&ancestor[ancestor_range.clone()], replacement)? {
         edits.push(Edit {
-            ancestor: ancestor.span(ancestor_range.start, ancestor_range.end),
-            replacement: &side.source[side.span(side_range.start, side_range.end)],
+            ancestor: ancestor_range,
+            replacement,
         });
     }
+    Ok(())
 }
 
 fn edits_overlap(left: &Range<ByteOffset>, right: &Range<ByteOffset>) -> bool {
@@ -696,14 +938,15 @@ fn merge_level(
     local: &str,
     remote: &str,
     level: Level,
+    alignment: Alignment,
     budget: &mut WorkBudget,
     output: &mut String,
 ) -> Result<(), MergeError> {
     let ancestor_pieces = Pieces::new(ancestor, level, budget.piece_limit)?;
     let local_pieces = Pieces::new(local, level, budget.piece_limit)?;
     let remote_pieces = Pieces::new(remote, level, budget.piece_limit)?;
-    let local_edits = diff(&ancestor_pieces, &local_pieces, budget)?;
-    let remote_edits = diff(&ancestor_pieces, &remote_pieces, budget)?;
+    let local_edits = diff(&ancestor_pieces, &local_pieces, alignment, budget)?;
+    let remote_edits = diff(&ancestor_pieces, &remote_pieces, alignment, budget)?;
     let mut local_index = 0;
     let mut remote_index = 0;
     let mut cursor = 0;
@@ -751,6 +994,7 @@ fn merge_level(
                     &local_region,
                     &remote_region,
                     level,
+                    alignment,
                     budget,
                     output,
                 )?;
@@ -784,12 +1028,14 @@ fn merge_level(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_overlap(
     ancestor: &str,
     region: &Range<ByteOffset>,
     local: &str,
     remote: &str,
     level: Level,
+    alignment: Alignment,
     budget: &mut WorkBudget,
     output: &mut String,
 ) -> Result<(), MergeError> {
@@ -798,16 +1044,6 @@ fn merge_overlap(
         return Ok(());
     }
     let original = &ancestor[region.start..region.end];
-    if level == Level::Paragraphs {
-        if replay_includes_edge_deletion(original, local, remote, budget)? {
-            output.push_str(remote);
-            return Ok(());
-        }
-        if replay_includes_edge_deletion(original, remote, local, budget)? {
-            output.push_str(local);
-            return Ok(());
-        }
-    }
     if local.is_empty() || remote.is_empty() {
         return Err(MergeError::Competing(CompetingEditReason::DeleteVsEdit));
     }
@@ -836,7 +1072,15 @@ fn merge_overlap(
             ));
         }
         let start = output.len();
-        merge_level(original, local, remote, Level::Tokens, budget, output)?;
+        merge_level(
+            original,
+            local,
+            remote,
+            Level::Tokens,
+            alignment,
+            budget,
+            output,
+        )?;
         return require_word_counts_within_sides(local, remote, &output[start..], budget);
     }
 
@@ -848,7 +1092,11 @@ fn merge_overlap(
 /// shared insertion land at different, non-overlapping positions and are both
 /// emitted, or both sides' deletions of one repeated word remove different
 /// copies. A sound merge of `local` and `remote` never holds a word more often
-/// than both sides or less often than both, so anything else is refused.
+/// than both sides or less often than both, so anything else is refused. The
+/// bound is necessary, not sufficient: it cannot see a word moved or a word
+/// that both sides repeat equally often, which the agreement of the earliest
+/// and latest alignments covers. Only content words are counted; whitespace
+/// and punctuation are not.
 fn require_word_counts_within_sides(
     local: &str,
     remote: &str,
@@ -876,72 +1124,6 @@ fn require_word_counts_within_sides(
             CompetingEditReason::InconsistentWordCounts,
         ))
     }
-}
-
-fn replay_includes_edge_deletion(
-    ancestor: &str,
-    prior_side: &str,
-    candidate: &str,
-    budget: &mut WorkBudget,
-) -> Result<bool, MergeError> {
-    let ancestor_pieces = Pieces::new(ancestor, Level::Paragraphs, budget.piece_limit)?;
-    let prior_pieces = Pieces::new(prior_side, Level::Paragraphs, budget.piece_limit)?;
-    let candidate_pieces = Pieces::new(candidate, Level::Paragraphs, budget.piece_limit)?;
-    if candidate_pieces.len() >= prior_pieces.len() {
-        return Ok(false);
-    }
-
-    let mut unchanged_prefix = 0;
-    while unchanged_prefix < ancestor_pieces.len()
-        && unchanged_prefix < prior_pieces.len()
-        && budget.equal(
-            ancestor_pieces.piece(unchanged_prefix),
-            prior_pieces.piece(unchanged_prefix),
-        )?
-    {
-        unchanged_prefix += 1;
-    }
-
-    let mut unchanged_suffix = 0;
-    while unchanged_suffix < ancestor_pieces.len().saturating_sub(unchanged_prefix)
-        && unchanged_suffix < prior_pieces.len().saturating_sub(unchanged_prefix)
-    {
-        let ancestor_index = ancestor_pieces.len() - unchanged_suffix - 1;
-        let prior_index = prior_pieces.len() - unchanged_suffix - 1;
-        if !budget.equal(
-            ancestor_pieces.piece(ancestor_index),
-            prior_pieces.piece(prior_index),
-        )? {
-            break;
-        }
-        unchanged_suffix += 1;
-    }
-
-    let removed = prior_pieces.len() - candidate_pieces.len();
-    for removed_prefix in 0..=unchanged_prefix.min(removed) {
-        budget.reserve_alignment(1)?;
-        let removed_suffix = removed - removed_prefix;
-        if removed_suffix > unchanged_suffix {
-            continue;
-        }
-        let prior_start = removed_prefix;
-        let prior_end = prior_pieces.len() - removed_suffix;
-        let mut matches = true;
-        for (candidate_index, prior_index) in (prior_start..prior_end).enumerate() {
-            budget.reserve_alignment(1)?;
-            if !budget.equal(
-                prior_pieces.matching_piece(prior_index),
-                candidate_pieces.matching_piece(candidate_index),
-            )? {
-                matches = false;
-                break;
-            }
-        }
-        if matches {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn trailing_whitespace(text: &str) -> &str {
@@ -1278,15 +1460,17 @@ mod tests {
         // whose words repeat nearby text, plus one edit of its own. The two
         // independent token alignments placed the insertion at different
         // positions and emitted it twice. The first case spans paragraphs and
-        // was found by the issue-merge re-merge property; its alignment is
-        // ambiguous outright. The single-paragraph cases came from adversarial
-        // review and are caught by the word-count bound.
+        // was found by the issue-merge re-merge property; no shortest token
+        // edit path runs through the remote, and its alignment is ambiguous.
         assert_competing_in_both_roles(
             "P0 Golf hotel india.\n\nP1 Mike.\n",
             "Golf hotel india. (ours)\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
             "P0 Golf hotel india.\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
             CompetingEditReason::AmbiguousRepeatedAlignment,
         );
+        // These came from adversarial review. The remote lies on a shortest
+        // token edit path to the local side, so the merge is the local side
+        // as it stands, with the insertion once.
         for (ancestor, local, remote) in [
             (
                 "bug fix a the and should fix the",
@@ -1299,12 +1483,7 @@ mod tests {
                 "We should fix the bug in bug fix the parser and then ship the release.",
             ),
         ] {
-            assert_competing_in_both_roles(
-                ancestor,
-                local,
-                remote,
-                CompetingEditReason::InconsistentWordCounts,
-            );
+            assert_merge(ancestor, local, remote, local);
         }
     }
 
@@ -1320,89 +1499,445 @@ mod tests {
         );
     }
 
-    /// Random token edits over a six-word vocabulary, so words repeat and the
-    /// two alignments often disagree. The remote makes one or two edits and
-    /// the local side makes the same edits plus one more, at least two
-    /// untouched ancestor words away. The only correct clean merge is then the
-    /// local text itself; anything else duplicates or drops an edit.
     #[test]
-    fn property_merging_a_subsumed_side_returns_the_superset() {
+    fn each_alignment_alone_corrupts_some_merge() {
+        // Found by the generated properties with the merge run under one
+        // alignment only: earliest alone merges the first three cases and
+        // latest alone the last two, each dropping a word of one side. The
+        // two alignments disagree, or one of them fails, on every case.
+        for (ancestor, local, remote, reason) in [
+            (
+                "bug a bug bug bug bug\n\nbug ship fix the the the\n\na test bug\n\nfix bug bug a fix ship\n",
+                "bug a bug\n\na test bug bug bug ship a bug ship fix the test the\n\na test bug\n\nship test bug bug a ship\n",
+                "bug a bug bug bug bug\n\nbug ship fix the the the\n\na bug\n\ntest bug\n\nfix test bug bug a fix ship\n",
+                CompetingEditReason::OverlappingEdits,
+            ),
+            (
+                "a bug the a ship ship\n\na bug the a ship ship\n\nthe bug\n\nship test fix bug a fix the\n",
+                "a bug the a the fix ship\n\na bug a ship ship\n\nthe bug\n\nship test fix bug a fix the\n",
+                "a bug test\n\nthe a ship fix ship a fix\n\nbug the a ship ship\n\nthe bug\n\nship ship fix bug a fix the\n",
+                CompetingEditReason::OverlappingEdits,
+            ),
+            // From adversarial review: earliest alone gives "... ship ship a".
+            (
+                "the test the bug fix a ship the the the a",
+                "the test the bug fix a the the the the ship a",
+                "the test the bug fix a ship the the ship a",
+                CompetingEditReason::OverlappingEdits,
+            ),
+            (
+                "ship test test the",
+                "ship a fix\n\ntest bug the",
+                "ship test test bug bug",
+                CompetingEditReason::InconsistentWordCounts,
+            ),
+            (
+                "bug a bug\n\nthe a test test\n\nfix bug the fix",
+                "bug a bug\n\nbug\n\nthe a the test\n\nfix bug the fix",
+                "bug a bug\n\nthe fix the test the\n\nfix bug the fix",
+                CompetingEditReason::OverlappingEdits,
+            ),
+        ] {
+            assert_competing_in_both_roles(ancestor, local, remote, reason);
+        }
+    }
+
+    #[test]
+    fn merges_that_carry_an_edit_to_repeated_text_elsewhere_are_refused() {
+        // The paragraph alignment matches the local's moved copy of "bug ship
+        // fix", so the remote's deletion of "ship" would land in the copy
+        // and the remote's own paragraph would keep it. Found by the
+        // generated disjoint property.
+        assert_competing_in_both_roles(
+            "bug ship fix\n\na ship fix\n\nbug ship fix",
+            "ship fix\n\nbug ship fix\n\nbug ship fix",
+            "bug fix\n\na ship fix\n\nbug ship bug",
+            CompetingEditReason::MissesASideEdit,
+        );
+        // From adversarial review, where the remote's insertion was repeated.
+        for (ancestor, local, remote) in [
+            (
+                "Alpha the.\n\nThe.",
+                "Test fix.\n\nAlpha the.",
+                "Alpha test fix.\n\nAlpha the.",
+            ),
+            ("a the\n\nthe", "test fix\n\na the", "a test fix\n\na the"),
+        ] {
+            assert_competing_in_both_roles(
+                ancestor,
+                local,
+                remote,
+                CompetingEditReason::MissesASideEdit,
+            );
+        }
+        // Insertions both sides made at one point may land in either order:
+        // the result is one side's change away from the other side.
+        assert_merge(
+            "the test the a test bug\n\ntest bug bug bug a fix bug",
+            "the test the a test ship bug bug\n\ntest bug bug bug a fix bug",
+            "the test the a test bug\n\ntest bug\n\ntest bug bug bug a bug",
+            "the test the a test ship bug bug\n\ntest bug\n\ntest bug bug bug a bug",
+        );
+    }
+
+    #[test]
+    fn a_superseding_side_keeps_every_paragraph() {
+        // From adversarial review, which saw the remote's kept paragraph
+        // dropped. The remote lies on a shortest token edit path to the
+        // local side, so the merge is the local side.
+        for (ancestor, local, remote) in [
+            (
+                "Ship it today.\n\nShip it.",
+                "Ship it.\n\nThe end.",
+                "Ship it today.\n\nThe end.",
+            ),
+            ("ship fix\n\nship", "ship\n\nthe", "ship fix\n\nthe"),
+        ] {
+            assert_merge(ancestor, local, remote, local);
+        }
+    }
+
+    /// Generated three-way cases. Text is a list of tokens drawn from a
+    /// six-word vocabulary, so words repeat, and paragraphs are often copies
+    /// or near copies of earlier ones. Changes may be adjacent. A case is
+    /// kept only when every side's changes form a minimal edit script, so no
+    /// two changes cancel out or merge into a smaller one and the generated
+    /// changes are what the merger is shown.
+    mod generated {
         use rand::rngs::StdRng;
         use rand::{Rng, SeedableRng};
-        const WORDS: [&str; 6] = ["bug", "fix", "the", "ship", "test", "a"];
-        #[derive(Clone, Copy)]
+
+        type Token = &'static str;
+        type TokenIndex = usize;
+        type EditCost = usize;
+
+        const WORDS: [Token; 6] = ["bug", "fix", "the", "ship", "test", "a"];
+        /// Renders as the blank line between two paragraphs.
+        const PARAGRAPH: Token = "\n\n";
+
+        #[derive(Debug)]
         enum Change {
-            Insert(&'static str),
-            Replace(&'static str),
+            InsertBefore(Vec<Token>),
+            Replace(Vec<Token>),
             Delete,
         }
-        /// Apply changes keyed by ancestor index, from the last index back so
-        /// earlier indices stay valid.
-        fn apply(ancestor: &[&'static str], changes: &[(usize, Change)]) -> String {
-            let mut words = ancestor.to_vec();
-            let mut sorted = changes.to_vec();
-            sorted.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
-            for (index, change) in sorted {
-                match change {
-                    Change::Insert(word) => words.insert(index, word),
-                    Change::Replace(word) => words[index] = word,
-                    Change::Delete => {
-                        words.remove(index);
+
+        /// A change to the ancestor token at `at` (or an insertion at the end
+        /// when `at` is the token count). At most one change per index.
+        #[derive(Debug)]
+        struct Placed {
+            at: TokenIndex,
+            change: Change,
+        }
+
+        impl Placed {
+            /// Tokens inserted plus tokens deleted.
+            fn cost(&self) -> EditCost {
+                match &self.change {
+                    Change::InsertBefore(tokens) => tokens.len(),
+                    Change::Replace(tokens) => tokens.len() + 1,
+                    Change::Delete => 1,
+                }
+            }
+        }
+
+        pub(super) struct Case {
+            pub(super) ancestor: String,
+            pub(super) local: String,
+            pub(super) remote: String,
+            /// The only acceptable clean merge.
+            pub(super) expected: String,
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub(super) enum Shape {
+            /// The remote makes some of the local side's changes.
+            Subsumed,
+            /// The two sides make disjoint sets of changes.
+            Disjoint,
+        }
+
+        fn apply<'c>(
+            ancestor: &[Token],
+            changes: impl Iterator<Item = &'c Placed> + Clone,
+        ) -> Vec<Token> {
+            let mut tokens = Vec::with_capacity(ancestor.len() + 4);
+            for index in 0..=ancestor.len() {
+                let mut keep = true;
+                for placed in changes.clone().filter(|placed| placed.at == index) {
+                    match &placed.change {
+                        Change::InsertBefore(inserted) => tokens.extend_from_slice(inserted),
+                        Change::Replace(inserted) => {
+                            tokens.extend_from_slice(inserted);
+                            keep = false;
+                        }
+                        Change::Delete => keep = false,
+                    }
+                }
+                if keep {
+                    tokens.extend(ancestor.get(index));
+                }
+            }
+            tokens
+        }
+
+        fn cost<'c>(changes: impl Iterator<Item = &'c Placed>) -> EditCost {
+            changes.map(Placed::cost).sum()
+        }
+
+        /// Insertions plus deletions of a shortest edit script.
+        fn distance(from: &[Token], to: &[Token]) -> EditCost {
+            let columns = to.len() + 1;
+            let mut lengths = vec![0; (from.len() + 1) * columns];
+            for (row, from_token) in from.iter().enumerate() {
+                for (column, to_token) in to.iter().enumerate() {
+                    lengths[(row + 1) * columns + column + 1] = if from_token == to_token {
+                        lengths[row * columns + column] + 1
+                    } else {
+                        lengths[row * columns + column + 1]
+                            .max(lengths[(row + 1) * columns + column])
+                    };
+                }
+            }
+            from.len() + to.len() - 2 * lengths[lengths.len() - 1]
+        }
+
+        /// `None` for token lists that do not render as plain paragraphs.
+        fn render(tokens: &[Token], final_newline: bool) -> Option<String> {
+            let empty_paragraph = tokens.first() == Some(&PARAGRAPH)
+                || tokens.last() == Some(&PARAGRAPH)
+                || tokens
+                    .windows(2)
+                    .any(|pair| pair[0] == PARAGRAPH && pair[1] == PARAGRAPH);
+            if tokens.is_empty() || empty_paragraph {
+                return None;
+            }
+            let mut text = String::new();
+            for (index, token) in tokens.iter().enumerate() {
+                if index > 0 && *token != PARAGRAPH && tokens[index - 1] != PARAGRAPH {
+                    text.push(' ');
+                }
+                text.push_str(token);
+            }
+            if final_newline {
+                text.push('\n');
+            }
+            Some(text)
+        }
+
+        fn words(rng: &mut StdRng, count: usize) -> Vec<Token> {
+            (0..count)
+                .map(|_| WORDS[rng.gen_range(0..WORDS.len())])
+                .collect()
+        }
+
+        fn ancestor(rng: &mut StdRng) -> Vec<Token> {
+            let mut paragraphs: Vec<Vec<Token>> = Vec::new();
+            for _ in 0..rng.gen_range(1..=4) {
+                let mut paragraph = if !paragraphs.is_empty() && rng.gen_bool(0.4) {
+                    paragraphs[rng.gen_range(0..paragraphs.len())].clone()
+                } else {
+                    let count = rng.gen_range(2..=7);
+                    words(rng, count)
+                };
+                if rng.gen_bool(0.3) {
+                    let index = rng.gen_range(0..paragraph.len());
+                    paragraph[index] = WORDS[rng.gen_range(0..WORDS.len())];
+                }
+                paragraphs.push(paragraph);
+            }
+            paragraphs.join(&PARAGRAPH)
+        }
+
+        fn change(rng: &mut StdRng) -> Change {
+            let count = rng.gen_range(1..=2);
+            let mut inserted = words(rng, count);
+            match rng.gen_range(0..8) {
+                0 => {
+                    inserted.insert(0, PARAGRAPH);
+                    Change::InsertBefore(inserted)
+                }
+                1 => {
+                    inserted.push(PARAGRAPH);
+                    Change::InsertBefore(inserted)
+                }
+                2 | 3 => Change::InsertBefore(inserted),
+                4 | 5 => Change::Replace(inserted),
+                _ => Change::Delete,
+            }
+        }
+
+        pub(super) fn case(seed: u64, shape: Shape) -> Option<Case> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let ancestor = ancestor(&mut rng);
+            let mut changes = Vec::new();
+            for at in 0..=ancestor.len() {
+                if rng.gen_bool(0.3) {
+                    let change = change(&mut rng);
+                    let at_end = at == ancestor.len();
+                    if !at_end || matches!(change, Change::InsertBefore(_)) {
+                        changes.push(Placed { at, change });
                     }
                 }
             }
-            words.join(" ")
-        }
-        let (mut clean, mut refused) = (0, 0);
-        for seed in 0..5000 {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let word = |rng: &mut StdRng| WORDS[rng.gen_range(0..WORDS.len())];
-            let ancestor: Vec<&str> = (0..rng.gen_range(6..14)).map(|_| word(&mut rng)).collect();
-            let random_change = |rng: &mut StdRng| match rng.gen_range(0..3) {
-                0 => Change::Insert(word(rng)),
-                1 => Change::Replace(word(rng)),
-                _ => Change::Delete,
+            if changes.len() < 2 {
+                return None;
+            }
+            // Which changes the local side makes and which the remote makes.
+            let sides: Vec<(bool, bool)> = match shape {
+                Shape::Subsumed => {
+                    let mut sides: Vec<(bool, bool)> =
+                        changes.iter().map(|_| (true, rng.gen_bool(0.5))).collect();
+                    let skipped = rng.gen_range(0..sides.len());
+                    sides[skipped].1 = false;
+                    sides
+                }
+                Shape::Disjoint => changes
+                    .iter()
+                    .map(|_| {
+                        let local = rng.gen_bool(0.5);
+                        (local, !local)
+                    })
+                    .collect(),
             };
-            // Distinct ancestor indices at least three apart, so every two
-            // changes keep at least two ancestor words between them.
-            let mut indices: Vec<usize> = (0..ancestor.len()).step_by(3).collect();
-            indices.retain(|_| rng.gen_bool(0.6));
-            if indices.len() < 2 {
-                continue;
+            let local_changes = || {
+                changes
+                    .iter()
+                    .zip(&sides)
+                    .filter(|(_, side)| side.0)
+                    .map(|(placed, _)| placed)
+            };
+            let remote_changes = || {
+                changes
+                    .iter()
+                    .zip(&sides)
+                    .filter(|(_, side)| side.1)
+                    .map(|(placed, _)| placed)
+            };
+            let local = apply(&ancestor, local_changes());
+            let remote = apply(&ancestor, remote_changes());
+            let expected = apply(&ancestor, changes.iter());
+            let local_cost = cost(local_changes());
+            let remote_cost = cost(remote_changes());
+            let minimal = remote_cost > 0
+                && local != remote
+                && distance(&ancestor, &local) == local_cost
+                && distance(&ancestor, &remote) == remote_cost
+                && distance(&ancestor, &expected) == cost(changes.iter())
+                && distance(&local, &expected) == cost(changes.iter()) - local_cost
+                && distance(&remote, &expected) == cost(changes.iter()) - remote_cost;
+            if !minimal {
+                return None;
             }
-            let changes: Vec<(usize, Change)> = indices
-                .iter()
-                .map(|index| (*index, random_change(&mut rng)))
-                .collect();
-            let extra = rng.gen_range(0..changes.len());
-            let remote_changes: Vec<(usize, Change)> = changes
-                .iter()
-                .enumerate()
-                .filter(|(position, _)| *position != extra)
-                .map(|(_, change)| *change)
-                .collect();
-            let original = ancestor.join(" ");
-            let local = apply(&ancestor, &changes);
-            let remote = apply(&ancestor, &remote_changes);
-            if local == remote || remote == original || local == original {
-                continue;
+            let final_newline = rng.gen_bool(0.3);
+            let case = Case {
+                ancestor: render(&ancestor, final_newline)?,
+                local: render(&local, final_newline)?,
+                remote: render(&remote, final_newline)?,
+                expected: render(&expected, final_newline)?,
+            };
+            // The merger's tokens also count the spaces around words, so a
+            // script that is minimal here need not be minimal there; keep
+            // only cases whose shape holds in the merger's own token space.
+            let to_local = merger_distance(&case.ancestor, &case.local);
+            let to_remote = merger_distance(&case.ancestor, &case.remote);
+            let between = merger_distance(&case.local, &case.remote);
+            let local_contains_remote = to_remote + between == to_local;
+            let holds = match shape {
+                Shape::Subsumed => local_contains_remote,
+                Shape::Disjoint => {
+                    let to_expected = merger_distance(&case.ancestor, &case.expected);
+                    !local_contains_remote
+                        && to_local + between != to_remote
+                        && to_expected == to_local + to_remote
+                        && merger_distance(&case.local, &case.expected) == to_remote
+                        && merger_distance(&case.remote, &case.expected) == to_local
+                }
+            };
+            holds.then_some(case)
+        }
+
+        impl Case {
+            /// Whether `merged` is the expected merge with insertions that both
+            /// sides made at one point in the other order. The generator's
+            /// script puts each insertion in one gap, but where text repeats
+            /// an equally short script of that side puts it in another, and
+            /// the merger orders concurrent insertions canonically. `merged`
+            /// must hold exactly the expected words and paragraphs and lie
+            /// exactly one side's change from the other side, so no text can
+            /// be dropped, repeated or invented.
+            pub(super) fn reorders_expected_insertions(&self, merged: &str) -> bool {
+                fn words(text: &str) -> (Vec<&str>, usize) {
+                    let mut words: Vec<&str> = text.split_whitespace().collect();
+                    words.sort_unstable();
+                    (words, text.trim_end().matches("\n\n").count())
+                }
+                let to_local = merger_distance(&self.ancestor, &self.local);
+                let to_remote = merger_distance(&self.ancestor, &self.remote);
+                words(merged) == words(&self.expected)
+                    && merger_distance(&self.local, merged) == to_remote
+                    && merger_distance(&self.remote, merged) == to_local
+                    && merger_distance(&self.ancestor, merged) == to_local + to_remote
             }
-            for (first, second) in [(&local, &remote), (&remote, &local)] {
-                match merge(&original, first, second) {
+        }
+
+        fn merger_distance(from: &str, to: &str) -> usize {
+            let mut budget = super::WorkBudget::new(super::ProseMergeLimits::default());
+            super::token_distance(from, to, &mut budget).expect("small inputs")
+        }
+    }
+
+    /// Seeds per generated property; about a quarter yield a usable case.
+    const GENERATED_SEEDS: u64 = 20_000;
+
+    /// Runs `seeds` generated cases of one shape in both roles; every clean
+    /// merge must be the expected text, up to the order of insertions both
+    /// sides made at one point. Returns (clean, refused) counts.
+    fn check_generated(shape: generated::Shape, seeds: std::ops::Range<u64>) -> (usize, usize) {
+        let (mut clean, mut refused) = (0, 0);
+        for seed in seeds {
+            let Some(case) = generated::case(seed, shape) else {
+                continue;
+            };
+            for (first, second) in [(&case.local, &case.remote), (&case.remote, &case.local)] {
+                match merge(&case.ancestor, first, second) {
                     ProseMergeResult::Merged(text) => {
                         clean += 1;
-                        assert_eq!(
+                        assert!(
+                            text.as_str() == case.expected
+                                || case.reorders_expected_insertions(text.as_str()),
+                            "{shape:?} seed {seed}: {:?} {first:?} {second:?} merged to {:?}, \
+                             expected {:?}",
+                            case.ancestor,
                             text.as_str(),
-                            local,
-                            "seed {seed}: {original:?} {local:?} {remote:?}"
+                            case.expected
                         );
                     }
                     _ => refused += 1,
                 }
             }
         }
-        // Most of these merges are unambiguous and must stay clean.
-        assert!(clean > refused, "{clean} clean, {refused} refused");
+        (clean, refused)
+    }
+
+    /// One side makes some of the other side's changes, so the only correct
+    /// clean merge is the other side as it stands. Generated in the merger's
+    /// own token space, so the betweenness rule should take nearly all of
+    /// these; the rest are delete-versus-edit refusals.
+    #[test]
+    fn property_merging_a_subsumed_side_returns_the_superset() {
+        let (clean, refused) = check_generated(generated::Shape::Subsumed, 0..GENERATED_SEEDS);
+        assert!(clean > 20 * refused, "{clean} clean, {refused} refused");
+    }
+
+    /// The two sides make disjoint sets of changes, so the only correct clean
+    /// merge applies both. Changes are often adjacent and text repeats, so
+    /// many of these are refused as ambiguous; a clean merge must be exact up
+    /// to the order of insertions both sides made at one point.
+    #[test]
+    fn property_merging_disjoint_changes_applies_both() {
+        let (clean, refused) = check_generated(generated::Shape::Disjoint, 0..GENERATED_SEEDS);
+        assert!(5 * clean > refused, "{clean} clean, {refused} refused");
     }
 
     #[test]
@@ -1543,13 +2078,13 @@ mod tests {
     }
 
     #[test]
-    fn repeated_superset_cannot_bypass_insertion_ambiguity() {
-        assert_competing_in_both_roles(
-            "End.",
-            "Repeat.\n\nRepeat.\n\nEnd.",
-            "Other.\n\nRepeat.\n\nRepeat.\n\nEnd.",
-            CompetingEditReason::AmbiguousInsertionGroup,
-        );
+    fn repeated_superset_is_taken_whole() {
+        // Both sides insert the repeated paragraphs and the remote also adds
+        // one before them. Aligning the two insertions piece by piece is
+        // ambiguous, but the remote contains the local side's whole change,
+        // so it is the merge as it stands.
+        let remote = "Other.\n\nRepeat.\n\nRepeat.\n\nEnd.";
+        assert_merge("End.", "Repeat.\n\nRepeat.\n\nEnd.", remote, remote);
     }
 
     #[test]
@@ -1971,6 +2506,108 @@ mod tests {
                 competing_reason(merge("", first, second)),
                 CompetingEditReason::AmbiguousInsertionGroup,
             );
+        }
+    }
+
+    /// The quadratic longest-common-subsequence table that [`token_distance`]
+    /// replaced, kept as its oracle.
+    fn token_distance_by_table(
+        from: &str,
+        to: &str,
+        budget: &mut WorkBudget,
+    ) -> Result<PieceIndex, MergeError> {
+        let from = Pieces::new(from, Level::Tokens, budget.piece_limit)?;
+        let to = Pieces::new(to, Level::Tokens, budget.piece_limit)?;
+        // Pieces shared at both ends are in every longest common subsequence.
+        let mut prefix = 0;
+        while prefix < from.len().min(to.len())
+            && budget.equal(from.piece(prefix), to.piece(prefix))?
+        {
+            prefix += 1;
+        }
+        let mut suffix = 0;
+        while suffix < (from.len() - prefix).min(to.len() - prefix)
+            && budget.equal(
+                from.piece(from.len() - 1 - suffix),
+                to.piece(to.len() - 1 - suffix),
+            )?
+        {
+            suffix += 1;
+        }
+        let from_middle = prefix..from.len() - suffix;
+        let to_middle = prefix..to.len() - suffix;
+        let cells = from_middle
+            .len()
+            .checked_mul(to_middle.len())
+            .ok_or(MergeError::Exhausted(WorkExhaustionReason::AlignmentWork))?;
+        budget.reserve_alignment(cells)?;
+        // `row[column]`: longest common subsequence of the `from` pieces seen so
+        // far and the first `column` pieces of the `to` middle.
+        let mut row: Vec<MatchCount> = vec![0; to_middle.len() + 1];
+        for from_index in from_middle {
+            let mut diagonal = 0;
+            for (column, to_index) in to_middle.clone().enumerate() {
+                let above = row[column + 1];
+                row[column + 1] = if budget.equal(from.piece(from_index), to.piece(to_index))? {
+                    diagonal + 1
+                } else {
+                    above.max(row[column])
+                };
+                diagonal = above;
+            }
+        }
+        let common = prefix + suffix + row[to_middle.len()];
+        Ok(from.len() + to.len() - 2 * common)
+    }
+
+    #[test]
+    fn token_distance_matches_the_quadratic_table() {
+        let mut checked = 0;
+        for seed in 0..2000 {
+            for shape in [generated::Shape::Subsumed, generated::Shape::Disjoint] {
+                let Some(case) = generated::case(seed, shape) else {
+                    continue;
+                };
+                let texts = [&case.ancestor, &case.local, &case.remote, &case.expected];
+                for from in texts {
+                    for to in texts {
+                        let limits = ProseMergeLimits::default();
+                        let fast = token_distance(from, to, &mut WorkBudget::new(limits));
+                        let table = token_distance_by_table(from, to, &mut WorkBudget::new(limits));
+                        assert_eq!(fast, table, "{from:?} {to:?}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "{checked} pairs checked");
+        assert_eq!(
+            token_distance("", "", &mut WorkBudget::new(ProseMergeLimits::default())),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn long_sections_with_distant_small_edits_merge() {
+        // The merge containment check measures distances over whole texts;
+        // they must stay within the default work limits when the edits are
+        // small, however long the section. Paragraphs of 100 words keep the
+        // piecewise word alignment, which is quadratic in one paragraph's
+        // length, within the limits too.
+        for paragraphs in [6, 12, 18] {
+            let ancestor = (0..paragraphs)
+                .map(|paragraph| {
+                    (0..100)
+                        .map(|word| format!("w{paragraph}x{word}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let local = format!("start {ancestor}");
+            let remote = format!("{ancestor} end").replacen(" w1x50 ", " w1x50 changed ", 1);
+            let merged = format!("start {remote}");
+            assert_merge(&ancestor, &local, &remote, &merged);
         }
     }
 }

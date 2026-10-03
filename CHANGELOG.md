@@ -43,9 +43,10 @@ issue tracker; the binary is named `mb`.
 
 - `mb` refuses to read an issue file containing a complete git conflict hunk
   outside a code fence, so an unresolved merge is reported instead of being
-  parsed as prose. Section text that merely quotes a conflict is written with
-  its opening `<<<<<<<` line escaped as `\<<<<<<<` and read back unchanged, so
-  such text can still be created or imported from GitHub.
+  parsed as prose. Section text that merely quotes a conflict outside fenced
+  code is written with its opening `<<<<<<<` line escaped as `\<<<<<<<` and
+  read back unchanged, so such text can still be created or imported from
+  GitHub; fenced code is written as it is.
 - Divergent GitHub/local issue fields without a provable common ancestor no
   longer pick a winner during ordinary sync. Matching replicas establish a
   baseline, legacy equal hashes can prove one-sided changes, and
@@ -64,14 +65,26 @@ issue tracker; the binary is named `mb`.
   map, so issues with two or more dependencies were rewritten in random order,
   producing spurious diffs and merge conflicts (Markdown and JSONL export).
 - The prose merger could emit an inserted word or paragraph twice, or drop
-  both copies of a deleted word, when refining an overlapping edit to word
-  level: each side was aligned to the ancestor independently, and a repeated
-  word could anchor differently on each side. A word-level merge is now kept
-  only if every word occurs, in the result, between its counts on the two
-  sides; otherwise it is reported as a competing edit.
+  text, when the same words or paragraphs repeat: each side is aligned to the
+  ancestor independently, and repeated text could anchor differently on each
+  side. A merge is now accepted only when it comes out the same under the
+  earliest and the latest alignment of both sides, only when each side lies on
+  a shortest token edit path from the ancestor to the result (so no side's edit
+  lands on a copy of its text elsewhere), and a word-level merge only when
+  every word occurs between its counts on the two sides; otherwise it is
+  reported as a competing edit. When one side already contains the other's
+  whole change (a replayed or cherry-picked edit, or one side building on the
+  other), the merge is that side as it stands, decided without any alignment.
+  A heuristic for replayed edge deletions that could silently drop a paragraph
+  was removed.
 - The prose merger now aligns a final paragraph that one side extends (by
   appending after it) with its unchanged copy, instead of reporting a
-  conflict that paragraph-level diff3 would merge.
+  conflict that paragraph-level diff3 would merge. A matched paragraph covers
+  only the blank lines both sides share, so a changed separator is an edit of
+  those bytes alone.
+- The merge driver takes the changed side of a non-UTF-8 file that only one
+  side changed, and grows the markers of a non-UTF-8 hunk past marker-like
+  lines.
 
 ## [0.28.0] - 2026-09-02
 

@@ -354,7 +354,10 @@ Merge rules:
   the latest, and `closed_at` follows the merged status.
 - **Prose sections** (Description, Design, Acceptance Criteria, Notes) use the
   same bounded paragraph/word merger as GitHub sync. Edits to different
-  paragraphs merge; competing edits conflict.
+  paragraphs merge; competing edits conflict. A side that already contains the
+  other side's whole change is taken as it stands. The merger is
+  conservative: when repeated text makes the alignment of two edits ambiguous
+  it reports a conflict rather than guess.
 - **Comments** merge as a three-way set keyed by comment ID: comments added on
   either side are all kept, exactly once, in `created_at` order. A comment
   deleted on one side is deleted, as git would delete its lines, unless the
@@ -385,12 +388,16 @@ Everything outside the hunks is already merged, so a tool can resolve a file
 by keeping one section of each hunk: keeping the same side everywhere
 reproduces exactly that side's value of every conflicting field. Markers are
 made longer than any content line that looks like one (such as a setext
-`=======` underline), so they are never ambiguous. The driver also prints one
-`mb merge-driver: CONFLICT <path>: <field or comment>: <reason>` line per
-conflict. `mb` refuses to read an issue file that still contains a hunk
-outside a code fence, so a hunk accidentally committed is reported instead of
-silently parsed as prose. (Text that quotes a conflict is stored with its
-`<<<<<<<` line escaped as `\<<<<<<<` and reads back unchanged.)
+`=======` underline), so they are never ambiguous. Git's own tools assume
+markers of exactly `conflict-marker-size` (default 7), so `git diff --check`
+and rerere do not recognize a grown hunk; resolve such a file by hand or with
+a resolver that reads the marker length from the `<<<<<<<` line. The driver
+also prints one `mb merge-driver: CONFLICT <path>: <field or comment>:
+<reason>` line per conflict. `mb` refuses to read an issue file that still
+contains a hunk outside a code fence, so a hunk accidentally committed is
+reported instead of silently parsed as prose. (Text that quotes a conflict outside fenced code is
+stored with its `<<<<<<<` line escaped as `\<<<<<<<` and reads back
+unchanged; fenced code is stored as it is.)
 
 `mb merge-driver run BASE OURS THEIRS --path REPO/PATH --stdout` previews a
 merge without writing any file.

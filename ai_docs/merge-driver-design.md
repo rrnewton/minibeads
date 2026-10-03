@@ -78,10 +78,13 @@ tell markers from content by length.
 `markdown_to_issue` refuses a file that has a complete hunk outside a code
 fence, so an unresolved merge is reported, never parsed as prose. Section text
 that merely quotes a conflict must still be storable (`mb create`, GitHub
-import), so `issue_to_markdown` escapes every line that would open a hunk:
-after any run of backslashes, seven or more `<` then a space or the end of the
-line. It gains one leading backslash, and reading removes one, which is exactly
-reversible and renders the same in Markdown. A whole-database read such as
+import), so outside fenced code `issue_to_markdown` escapes every line that
+would open a hunk: after any run of backslashes, seven or more `<` then a space
+or the end of the line. It gains one leading backslash, and reading removes
+one, which is exactly reversible and renders the same in Markdown. Inside a
+fence a backslash would display, so fenced lines are written as they are; the
+writer, the reader and the hunk check follow fences by one rule
+(`FenceTracker`), and the hunk check skips fenced lines. A whole-database read such as
 `mb list` still fails on a genuinely conflicted file, naming the file, line and
 escape. Skipping that file instead would silently drop the issue from
 whole-database exports such as the JSONL sync. A file written by 0.28 with an
@@ -123,28 +126,69 @@ sorted too.
 
 ## Prose merger fixes found by the properties
 
-The re-merge idempotence property and the review found silent corruption in
-`prose_merge.rs` (PR #26). An overlapping edit is refined to word level by
-aligning each side to the ancestor independently. When a word repeats, the two
-sides can anchor it at different occurrences, and the merge emitted an
-insertion twice or dropped both copies of a once-deleted word, within one
-paragraph as well as across paragraphs. A word-level merge is now accepted only
-if every content word occurs in the result between its counts on the two sides
-(`require_word_counts_within_sides`); otherwise it is a `CompetingEdit`
-conflict (`InconsistentWordCounts`), which is fail-closed. A sound merge never
-violates this bound: each word count is either one side's or, when both
-changed it, a count between theirs. Regression tests:
-`word_merges_never_duplicate_a_shared_insertion`,
-`word_merges_never_drop_both_copies_of_one_deleted_word`, and the seeded
-`property_merging_a_subsumed_side_returns_the_superset`.
+The re-merge idempotence property, generated properties and two reviews found
+silent corruption in `prose_merge.rs` (PR #26). Each side is diffed against
+the ancestor on its own, so when words or paragraphs repeat the two sides can
+anchor shared text at different occurrences, and a merge emitted an insertion
+twice or dropped text that neither side dropped. Five rules now make it sound
+on everything the properties generate:
 
-A paragraph piece carries the blank line that separates it from the next one,
-except the last. A final paragraph that one side appends after therefore no
-longer matched itself, and the edit widened into a spurious overlap. When no
-input ends in a line break, all three now get a common separator that is
-removed afterwards (`a_final_paragraph_that_stops_being_final_still_aligns`).
+- **Containment.** If one side lies on a shortest token edit path from the
+  ancestor to the other (`d(A,X) + d(X,Y) = d(A,Y)` in insert/delete distance
+  over the merger's tokens), some minimal edit script of Y makes every edit X
+  made, so the merge is Y as it stands (`superseding_side`). This needs no
+  alignment, so it holds however text repeats, and it covers replayed and
+  cherry-picked edits. A token script cannot tell deleting text from
+  rewriting it, so when the piecewise merge reports delete-versus-edit, that
+  conflict stands.
+- **Alignment agreement.** Of all longest common subsequences, `diff` can
+  report the earliest or the latest; every other lies between them. The
+  piecewise merge runs with both sides aligned earliest and with both aligned
+  latest, and is accepted only when the two agree (otherwise
+  `AmbiguousRepeatedAlignment`). Mixing the alignments across sides refused
+  more merges without catching anything more in the generated cases. Each
+  alignment alone corrupts merges that every other rule accepts
+  (`each_alignment_alone_corrupts_some_merge`, found by running the
+  generated properties under one alignment).
+- **Merge containment.** The piecewise result M is accepted only when each
+  side lies on a shortest token edit path from the ancestor to M
+  (`d(A,M) = d(A,L) + d(L,M) = d(A,R) + d(R,M)`, else `MissesASideEdit`):
+  the containment test above, applied to the result. Some minimal script of
+  M then makes every edit of each side, edits made alike on both sides count
+  once, and an edit that alignment carried over to an identical copy
+  elsewhere is caught when the move costs edits
+  (`merges_that_carry_an_edit_to_repeated_text_elsewhere_are_refused`, from
+  generated seed 111328, where both alignments agree on the wrong copy). The
+  check fails closed when its distances exceed the work limits; distances use
+  Myers' greedy algorithm, whose work grows with the distance rather than the
+  text length, so long sections with small edits stay well inside them
+  (`long_sections_with_distant_small_edits_merge`;
+  `token_distance_matches_the_quadratic_table` checks it against the
+  quadratic table).
+- **Word-count bound.** A word-level merge is accepted only if every content
+  word occurs in the result between its counts on the two sides
+  (`InconsistentWordCounts`). The bound is necessary for a sound merge, not
+  sufficient; it is a cheap extra check.
+- **Separator edits.** A matched paragraph covers its content and only the
+  blank lines around it that both pieces share, so the separator a final
+  paragraph gains when one side appends after it is an edit of those bytes
+  alone, not of the whole paragraph
+  (`a_final_paragraph_that_stops_being_final_still_aligns`). This replaces an
+  earlier padding scheme that review showed could corrupt text.
 
-## Tests and evidence (2026-10-03_#232(5742073e8e) plus uncommitted review fixes)
+A heuristic that took a side whose paragraphs were the other's minus an edge
+deletion (`replay_includes_edge_deletion`) was removed: the generated
+properties showed it silently dropped a paragraph, and containment covers the
+replays it was meant for.
+
+Every rule refuses rather than guesses, so the merger is conservative. Over
+300,000 generated seeds per shape in both roles (2026-10-03_#233(de008f76e3)
+plus uncommitted review fixes), 163,364 of 165,204 subsumed merges (98.9%) and
+42,298 of 164,296 disjoint ones (25.7%) came out clean, with no wrong merge;
+the rest were refused, mostly because a six-word vocabulary makes nearly every
+alignment ambiguous. Real prose repeats far less.
+
+## Tests and evidence (2026-10-03_#233(de008f76e3) plus uncommitted review fixes)
 
 - Explicit cases in `src/issue_merge_tests.rs`:
   - a single-line title hunk, a hunk confined to one paragraph, and clean
@@ -174,10 +218,23 @@ removed afterwards (`a_final_paragraph_that_stops_being_final_still_aligns`).
   - comments: exactly the expected three-way set of IDs (no loss, duplicate,
     invention or resurrection) after all-ours, all-theirs and random mixed
     resolutions, time order kept, commutativity and idempotence.
-- `prose_merge` adds a 5000-seed property: merging a side whose changes are a
-  subset of the other's either returns the superset or refuses.
-- `format` checks that quoted conflict markers round-trip through the escape;
-  `merge_driver` checks non-UTF-8 byte hunks and marker growth.
+- `prose_merge` generates cases from a six-word vocabulary with repeated and
+  near-copied paragraphs and possibly adjacent changes, kept only when each
+  side's changes form a minimal edit script both in the generator's tokens and
+  in the merger's (so no two changes cancel out). Two properties of 20,000
+  seeds each, in both roles: a subsumed side merges to exactly the superset,
+  and disjoint changes merge to both applied; anything else must be a
+  refusal, and the clean rates are bounded below. "Both applied" is the
+  generator's text, or the same words and paragraphs with insertions that
+  both sides made at one point in the other order: where text repeats, an
+  equally short script of a side puts its insertion in another gap, and the
+  merger orders concurrent insertions canonically. Such a result must also be
+  exactly one side's change from the other side and the sum of both changes
+  from the ancestor, in the merger's own token distance. Explicit regression
+  cases pin the generated and reviewer reproducers.
+- `format` checks that quoted conflict markers round-trip through the escape,
+  inside and outside fences; `merge_driver` checks non-UTF-8 byte hunks, their
+  marker growth, one-sided non-UTF-8 changes, and marker growth.
 - `tests/merge_driver.sh` runs real `git merge`s through `mb merge-driver
   install`:
   - routing, including a nested database;
@@ -187,8 +244,9 @@ removed afterwards (`a_final_paragraph_that_stops_being_final_still_aligns`).
   - competing titles that produce exactly one three-line hunk, after which `mb`
     refuses the unresolved file and a mechanical "take theirs" resolution parses;
   - the `--stdout` preview.
-- Mutation check: each deliberate breakage below was applied alone and made
-  the unit suite fail (number of failing tests in parentheses):
+- Mutation check (2026-10-03_#233(de008f76e3) plus uncommitted review
+  fixes): each deliberate breakage below was applied alone and made the unit
+  suite fail (number of failing tests in parentheses):
   - keeping a comment deleted on one side and unchanged on the other (3);
   - letting a deletion beat an edit (2);
   - dropping theirs-only comments (5);
@@ -198,13 +256,21 @@ removed afterwards (`a_final_paragraph_that_stops_being_final_still_aligns`).
   - letting ours silently win scalar conflicts (15);
   - leaving `closed_at` out of the status hunk (2);
   - keeping `closed_at` on a reopened issue (4);
-  - merging the frontmatter views with ordinary diff3 (1);
-  - removing the word-count check (4);
-  - removing the final-separator padding (2);
+  - merging the frontmatter views with ordinary diff3 (2);
+  - removing the word-count check (2);
+  - removing the containment rule (5);
+  - removing the delete-versus-edit guard (1);
+  - removing the merge containment check (1);
+  - aligning earliest only (1), or latest only (1);
+  - matching whole paragraphs with their separators (4), or content
+    only (6);
+  - measuring token distance with the quadratic table instead of Myers (1:
+    the long-section test exhausts the work limit);
   - having theirs win line-level diff3 conflicts (6);
-  - never growing the markers (1);
-  - not escaping quoted markers (1);
-  - leaving ours in place for non-UTF-8 input (1).
+  - never growing the markers (2), or not for non-UTF-8 hunks (1);
+  - not escaping quoted markers (1), or escaping inside fences (2);
+  - leaving ours in place for non-UTF-8 input (1), or conflicting on a
+    one-sided non-UTF-8 change (1).
 
 ## Limitations and follow-ups
 
@@ -221,3 +287,6 @@ removed afterwards (`a_final_paragraph_that_stops_being_final_still_aligns`).
   a hunk by hand can of course break the invariant.
 - A description that starts with blank lines is not written canonically, so
   its file always takes the textual fallback.
+- The prose merger is conservative over repeated text, and a single
+  paragraph of about 500 words or more exhausts the word-level alignment
+  budget, as it did before this work (minibeads-41).

@@ -132,18 +132,19 @@ pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
 }
 
 /// Sanitize section content so it cannot break the file format: a column-0
-/// "# " heading becomes "## ", and a line that opens a git conflict hunk gains
-/// a backslash (see [`escape_marker_line`]) so that text which merely quotes a
-/// conflict is never mistaken for an unresolved merge.
+/// "# " heading becomes "## ", and outside fenced code a line that opens a git
+/// conflict hunk gains a backslash (see [`escape_marker_line`]) so that text
+/// which merely quotes a conflict is never mistaken for an unresolved merge.
 pub fn sanitize_section_content(content: &str) -> String {
     let mut output = String::with_capacity(content.len());
+    let mut fence = FenceTracker::default();
     for (index, line) in content.lines().enumerate() {
         if index > 0 {
             output.push('\n');
         }
         if line.starts_with("# ") {
             output.push('#'); // Convert H1 to H2
-        } else if escape_marker_line(line) {
+        } else if !fence.code_line(line) && escape_marker_line(line) {
             output.push('\\');
         }
         output.push_str(line);
@@ -157,7 +158,8 @@ pub fn sanitize_section_content(content: &str) -> String {
 /// Writing prefixes such a line with one more backslash and reading removes
 /// one, so the escape is exactly reversible, even for text that itself starts
 /// with backslashes. In rendered Markdown `\<` is a literal `<`, so the escaped
-/// file still displays the original text.
+/// file still displays the original text. Fenced code is never escaped, since
+/// a backslash there would display; [`find_conflict_hunk`] skips it instead.
 fn escape_marker_line(line: &str) -> bool {
     marker_run(line.trim_start_matches('\\'), '<').is_some_and(is_marker_label)
 }
@@ -167,6 +169,26 @@ fn unescape_marker_line(line: &str) -> &str {
     match line.strip_prefix('\\') {
         Some(rest) if escape_marker_line(rest) => rest,
         _ => line,
+    }
+}
+
+/// Follows fenced code blocks through the lines of one section, the same way
+/// for writing, reading and conflict detection: any line starting with three
+/// backticks or tildes after indentation opens or closes a fence.
+#[derive(Default)]
+struct FenceTracker {
+    in_fence: bool,
+}
+
+impl FenceTracker {
+    /// Whether `line` is a fence line or lies inside a fence.
+    fn code_line(&mut self, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            self.in_fence = !self.in_fence;
+            return true;
+        }
+        self.in_fence
     }
 }
 
@@ -194,20 +216,15 @@ pub fn find_conflict_hunk(content: &str) -> Option<LineNumber> {
         Separated(LineNumber),
     }
     let mut state = State::Outside;
-    let mut in_fence = false;
+    let mut fence = FenceTracker::default();
     for (index, line) in content.lines().enumerate() {
         if line.starts_with("# ") {
             // Column-0 "# " is always a section heading (content is escaped
             // to "## "), so an unclosed fence cannot hide later sections.
-            in_fence = false;
+            fence = FenceTracker::default();
             continue;
         }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
+        if fence.code_line(line) {
             continue;
         }
         state = match state {
@@ -336,6 +353,7 @@ fn parse_sections(body: &str) -> Result<(String, String, String, String)> {
     let mut seen = std::collections::HashSet::new();
     let mut current_section = "";
     let mut current_content = String::new();
+    let mut fence = FenceTracker::default();
 
     for line in body.lines() {
         // Check if this is a top-level header. Only column-0 "# " lines count:
@@ -363,12 +381,17 @@ fn parse_sections(body: &str) -> Result<(String, String, String, String)> {
             // Start new section
             current_section = header;
             current_content.clear();
+            fence = FenceTracker::default();
         } else if !current_section.is_empty() {
             // Add line to current section
             if !current_content.is_empty() {
                 current_content.push('\n');
             }
-            current_content.push_str(unescape_marker_line(line));
+            if fence.code_line(line) {
+                current_content.push_str(line);
+            } else {
+                current_content.push_str(unescape_marker_line(line));
+            }
         } else if !line.trim().is_empty() {
             anyhow::bail!("Text before the first Markdown section would be lost; place it under # Description before updating the issue");
         }
@@ -472,6 +495,7 @@ mod tests {
         for description in [
             "Before.\n\n<<<<<<< ours\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> theirs\n\nAfter.",
             "<<<<<<<\n\\<<<<<<< x\n\\\\<<<<<<<<<\n=======\n>>>>>>>",
+            "```\n<<<<<<< ours\n\\<<<<<<< x\n```\n<<<<<<< after\n~~~\n<<<<<<< unclosed",
             "\\<<<<<<<< not a marker\n<<<<<<<label\n <<<<<<< indented",
         ] {
             issue.description = description.into();
@@ -486,6 +510,17 @@ mod tests {
         assert!(
             markdown.contains("\n\\\\<<<<<<<< not a marker\n<<<<<<<label\n <<<<<<< indented"),
             "only lines that open a hunk are escaped: {markdown}"
+        );
+        // Inside fenced code a backslash would display, so fenced lines are
+        // written as they are and conflict detection skips them.
+        issue.description =
+            "```\n<<<<<<< ours\n\\<<<<<<< x\n```\n<<<<<<< after\n~~~\n<<<<<<< unclosed".into();
+        let markdown = issue_to_markdown(&issue).unwrap();
+        assert!(
+            markdown.contains(
+                "```\n<<<<<<< ours\n\\<<<<<<< x\n```\n\\<<<<<<< after\n~~~\n<<<<<<< unclosed\n"
+            ),
+            "fenced lines are not escaped: {markdown}"
         );
     }
 
