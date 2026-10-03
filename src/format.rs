@@ -123,29 +123,51 @@ pub fn issue_to_markdown(issue: &Issue) -> Result<String> {
         }
     }
 
-    if let Some(line) = find_conflict_hunk(&output) {
-        anyhow::bail!(
-            "{} would be written with a git conflict hunk at line {line}, which mb refuses to \
-             read back; resolve it, or put the text in a ``` code fence",
-            issue.id
-        );
-    }
+    debug_assert_eq!(
+        find_conflict_hunk(&output),
+        None,
+        "opening markers are escaped"
+    );
     Ok(output)
 }
 
-/// Sanitize section content to prevent top-level headers from breaking the format
+/// Sanitize section content so it cannot break the file format: a column-0
+/// "# " heading becomes "## ", and a line that opens a git conflict hunk gains
+/// a backslash (see [`escape_marker_line`]) so that text which merely quotes a
+/// conflict is never mistaken for an unresolved merge.
 pub fn sanitize_section_content(content: &str) -> String {
-    content
-        .lines()
-        .map(|line| {
-            if line.starts_with("# ") {
-                format!("#{}", line) // Convert H1 to H2
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::with_capacity(content.len());
+    for (index, line) in content.lines().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        if line.starts_with("# ") {
+            output.push('#'); // Convert H1 to H2
+        } else if escape_marker_line(line) {
+            output.push('\\');
+        }
+        output.push_str(line);
+    }
+    output
+}
+
+/// Whether `line`, after any run of backslashes, starts with a conflict
+/// opening marker (seven or more `<`, then a space or the end of the line).
+///
+/// Writing prefixes such a line with one more backslash and reading removes
+/// one, so the escape is exactly reversible, even for text that itself starts
+/// with backslashes. In rendered Markdown `\<` is a literal `<`, so the escaped
+/// file still displays the original text.
+fn escape_marker_line(line: &str) -> bool {
+    marker_run(line.trim_start_matches('\\'), '<').is_some_and(is_marker_label)
+}
+
+/// Undo [`sanitize_section_content`]'s marker escape for one line read back.
+fn unescape_marker_line(line: &str) -> &str {
+    match line.strip_prefix('\\') {
+        Some(rest) if escape_marker_line(rest) => rest,
+        _ => line,
+    }
 }
 
 /// 1-based line number in an issue file.
@@ -154,6 +176,11 @@ pub type LineNumber = usize;
 fn marker_run(line: &str, marker: char) -> Option<&str> {
     let rest = line.trim_start_matches(marker);
     (line.len() - rest.len() >= 7).then_some(rest)
+}
+
+/// Git's conflict marker is followed by nothing or by a space and a label.
+fn is_marker_label(rest: &str) -> bool {
+    rest.is_empty() || rest.starts_with(' ')
 }
 
 /// First line of an unresolved `git merge` conflict hunk (`<<<<<<<`, then
@@ -183,11 +210,10 @@ pub fn find_conflict_hunk(content: &str) -> Option<LineNumber> {
         if in_fence {
             continue;
         }
-        let is_label = |rest: &str| rest.is_empty() || rest.starts_with(' ');
         state = match state {
-            _ if marker_run(line, '<').is_some_and(is_label) => State::Opened(index + 1),
+            _ if marker_run(line, '<').is_some_and(is_marker_label) => State::Opened(index + 1),
             State::Opened(start) if marker_run(line, '=') == Some("") => State::Separated(start),
-            State::Separated(start) if marker_run(line, '>').is_some_and(is_label) => {
+            State::Separated(start) if marker_run(line, '>').is_some_and(is_marker_label) => {
                 return Some(start)
             }
             other => other,
@@ -201,7 +227,8 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
     if let Some(line) = find_conflict_hunk(content) {
         anyhow::bail!(
             "{issue_id}.md has an unresolved merge conflict starting at line {line}; \
-             keep one side of each <<<<<<< ... >>>>>>> hunk and delete the markers"
+             keep one side of each <<<<<<< ... >>>>>>> hunk and delete the markers. If the \
+             text is meant to quote a conflict, write the opening line as \\<<<<<<<"
         );
     }
     let (frontmatter, body) = split_frontmatter(content)?;
@@ -341,7 +368,7 @@ fn parse_sections(body: &str) -> Result<(String, String, String, String)> {
             if !current_content.is_empty() {
                 current_content.push('\n');
             }
-            current_content.push_str(line);
+            current_content.push_str(unescape_marker_line(line));
         } else if !line.trim().is_empty() {
             anyhow::bail!("Text before the first Markdown section would be lost; place it under # Description before updating the issue");
         }
@@ -440,14 +467,33 @@ mod tests {
     use crate::types::IssueType;
 
     #[test]
+    fn quoted_conflict_markers_round_trip_through_an_escape() {
+        let mut issue = Issue::new("test-1".into(), "T".into(), 2, IssueType::Task);
+        for description in [
+            "Before.\n\n<<<<<<< ours\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> theirs\n\nAfter.",
+            "<<<<<<<\n\\<<<<<<< x\n\\\\<<<<<<<<<\n=======\n>>>>>>>",
+            "\\<<<<<<<< not a marker\n<<<<<<<label\n <<<<<<< indented",
+        ] {
+            issue.description = description.into();
+            let markdown = issue_to_markdown(&issue).unwrap();
+            assert_eq!(find_conflict_hunk(&markdown), None, "{markdown}");
+            assert_eq!(
+                markdown_to_issue("test-1", &markdown).unwrap().description,
+                description
+            );
+        }
+        let markdown = issue_to_markdown(&issue).unwrap();
+        assert!(
+            markdown.contains("\n\\\\<<<<<<<< not a marker\n<<<<<<<label\n <<<<<<< indented"),
+            "only lines that open a hunk are escaped: {markdown}"
+        );
+    }
+
+    #[test]
     fn unresolved_conflict_hunks_are_rejected_outside_code_fences() {
         let mut issue = Issue::new("test-1".into(), "T".into(), 2, IssueType::Task);
-        issue.description =
-            "Before.\n\n<<<<<<< ours\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> theirs\n\nAfter."
-                .into();
-        let error = issue_to_markdown(&issue).unwrap_err().to_string();
-        assert!(error.contains("conflict hunk at line 14"), "{error}");
-        let clean = std::mem::take(&mut issue.description);
+        let clean =
+            "Before.\n\n<<<<<<< ours\nmine\n||||||| base\nold\n=======\nyours\n>>>>>>> theirs\n\nAfter.";
         let markdown = format!(
             "{}\n# Description\n\n{clean}\n",
             issue_to_markdown(&issue).unwrap()
@@ -456,6 +502,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unresolved merge conflict"), "{error}");
+        assert!(
+            error.contains("\\<<<<<<<"),
+            "the error explains the escape: {error}"
+        );
         assert_eq!(
             find_conflict_hunk(&markdown),
             markdown

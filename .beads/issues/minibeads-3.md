@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-10-03T06:41:37.467323576+00:00
+updated_at: 2026-10-03T07:22:09.568800570+00:00
 ---
 
 # Description
@@ -139,3 +139,5 @@ make stress-test's test_sync_stress fails deterministically (seed 12345) with an
 2026-09-15_#229(6e30bdc7a8): GitHub sync overhaul validation adds adversarial prose/ancestor/concurrency coverage. Final debug make -o purge validate passes 296 tests: 66 lib, 189 bin, 7 shell fixtures, 1 migration, 28 regressions, and 5 harness initialization tests. Strict cargo clippy --locked --all-targets --all-features -- -D warnings and git diff --check pass. Rust 1.87 all-feature run passes 303 executed tests with 1 ignored stress test. New regressions cover role-symmetric bounded prose merging, repeated text, CommonMark structures, stale replay, per-issue lease serialization, transaction rollback, duplicate concurrent comment export, local/remote write races, dry-run pending-journal purity, future state schemas, relink ownership, and all five ID migrations. Remote CI remains pending on the review PR.
 
 - 2026-10-03: merge-driver suites (minibeads-38): seeded property tests in src/issue_merge_tests.rs and tests/merge_driver.sh (real git merges), mutation-checked.
+
+- 2026-10-03_#232(5742073e8e) review fixes (minibeads-38): exact three-way comment-set property under mixed resolutions, re-merge property gated by a paragraph-diff3 oracle instead of a tolerance, closed_at/created_at checks in the precision property, 13 generated edit kinds, a 5000-seed prose subsumption property, escape round-trip and non-UTF-8/marker-size unit tests, and merge_driver.sh comment-deletion and nested-routing cases. 16 mutations all caught.

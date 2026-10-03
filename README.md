@@ -336,10 +336,10 @@ alone). The equivalent manual setup is:
 git config merge.mb.name "minibeads three-way issue and comment merge"
 git config merge.mb.driver "mb merge-driver run %O %A %B --marker-size %L --path %P"
 cat >> .gitattributes <<'ATTRS'
-.minibeads/issues/**/*.md merge=mb
-.minibeads/comments/*.json merge=mb
-.beads/issues/**/*.md merge=mb
-.beads/comments/*.json merge=mb
+**/.minibeads/issues/**/*.md merge=mb
+**/.minibeads/comments/*.json merge=mb
+**/.beads/issues/**/*.md merge=mb
+**/.beads/comments/*.json merge=mb
 ATTRS
 ```
 
@@ -355,12 +355,13 @@ Merge rules:
 - **Prose sections** (Description, Design, Acceptance Criteria, Notes) use the
   same bounded paragraph/word merger as GitHub sync. Edits to different
   paragraphs merge; competing edits conflict.
-- **Comments** are an append-only set keyed by comment ID: comments added on
+- **Comments** merge as a three-way set keyed by comment ID: comments added on
   either side are all kept, exactly once, in `created_at` order. A comment
-  deleted on only one side is **kept** (with a `NOTICE` on stderr); one deleted
-  on both sides stays deleted. A GitHub-imported comment edited on both sides
-  takes the newer GitHub revision; a local comment edited on both sides merges
-  its body as prose or conflicts.
+  deleted on one side is deleted, as git would delete its lines, unless the
+  other side edited it: then the edited comment is kept, with a `NOTICE` on
+  stderr. A GitHub-imported comment edited on both sides takes the newer GitHub
+  revision; a local comment edited on both sides merges its body as prose or
+  conflicts.
 - Files with no merge base (both branches created the same ID) merge only when
   identical; otherwise the whole file is one conflict.
 - Input that is not exactly what `mb` writes (hand-edited YAML, unknown keys)
@@ -381,11 +382,15 @@ title: Feature title
 ```
 
 Everything outside the hunks is already merged, so a tool can resolve a file
-by keeping one section of each hunk. The driver also prints one
+by keeping one section of each hunk: keeping the same side everywhere
+reproduces exactly that side's value of every conflicting field. Markers are
+made longer than any content line that looks like one (such as a setext
+`=======` underline), so they are never ambiguous. The driver also prints one
 `mb merge-driver: CONFLICT <path>: <field or comment>: <reason>` line per
 conflict. `mb` refuses to read an issue file that still contains a hunk
 outside a code fence, so a hunk accidentally committed is reported instead of
-silently parsed as prose.
+silently parsed as prose. (Text that quotes a conflict is stored with its
+`<<<<<<<` line escaped as `\<<<<<<<` and reads back unchanged.)
 
 `mb merge-driver run BASE OURS THEIRS --path REPO/PATH --stdout` previews a
 merge without writing any file.

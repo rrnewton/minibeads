@@ -18,11 +18,16 @@ issue tracker; the binary is named `mb`.
   take the changed side, labels merge as a set, dependencies per target,
   timestamps by rule (earliest created, latest updated, derived closed), and
   all four prose sections through the paragraph/word merger. Comments merge as
-  an append-only set keyed by stable comment ID -- never dropped (a one-sided
-  deletion is kept and reported) and never duplicated. Conflicts are standard
-  diff3 hunks with fixed `ours`/`base`/`theirs` labels confined to the
-  conflicting field, paragraph, or comment, plus one
-  `mb merge-driver: CONFLICT <path>: <subject>: <reason>` line each.
+  a three-way set keyed by stable comment ID: additions from both sides are
+  kept exactly once, a deletion propagates unless the other side edited that
+  comment (then the edit is kept and reported), and both-sides edits merge the
+  body as prose. Conflicts are standard diff3 hunks with fixed
+  `ours`/`base`/`theirs` labels confined to the conflicting field, paragraph,
+  or comment; taking one side of every hunk reproduces that side's values
+  exactly (a conflicting status carries its own `closed_at`). Markers grow
+  past any marker-like content line, non-UTF-8 input becomes one byte hunk,
+  and each conflict is also printed as one
+  `mb merge-driver: CONFLICT <path>: <subject>: <reason>` line.
   Non-canonical input is never re-serialized (byte-exact one-sided take, else a
   textual merge).
 - **Full ancestor-based GitHub issue field merging.** Versioned per-issue
@@ -36,9 +41,11 @@ issue tracker; the binary is named `mb`.
 
 ### Changed
 
-- `mb` refuses to read or write an issue file containing a complete git
-  conflict hunk outside a code fence, so an unresolved merge is reported
-  instead of being parsed as prose.
+- `mb` refuses to read an issue file containing a complete git conflict hunk
+  outside a code fence, so an unresolved merge is reported instead of being
+  parsed as prose. Section text that merely quotes a conflict is written with
+  its opening `<<<<<<<` line escaped as `\<<<<<<<` and read back unchanged, so
+  such text can still be created or imported from GitHub.
 - Divergent GitHub/local issue fields without a provable common ancestor no
   longer pick a winner during ordinary sync. Matching replicas establish a
   baseline, legacy equal hashes can prove one-sided changes, and
@@ -56,9 +63,15 @@ issue tracker; the binary is named `mb`.
 - Dependencies are written in sorted order. They were serialized from a hash
   map, so issues with two or more dependencies were rewritten in random order,
   producing spurious diffs and merge conflicts (Markdown and JSONL export).
-- The prose merger no longer refines an overlap that spans several paragraphs
-  to word level; doing so could emit an inserted paragraph twice. Such overlaps
-  are now reported as competing edits.
+- The prose merger could emit an inserted word or paragraph twice, or drop
+  both copies of a deleted word, when refining an overlapping edit to word
+  level: each side was aligned to the ancestor independently, and a repeated
+  word could anchor differently on each side. A word-level merge is now kept
+  only if every word occurs, in the result, between its counts on the two
+  sides; otherwise it is reported as a competing edit.
+- The prose merger now aligns a final paragraph that one side extends (by
+  appending after it) with its unchanged copy, instead of reporting a
+  conflict that paragraph-level diff3 would merge.
 
 ## [0.28.0] - 2026-09-02
 

@@ -65,21 +65,30 @@ fn structured(base: &Issue, ours: &Issue, theirs: &Issue) -> FileMerge {
 
 /// Resolve every conflict hunk by taking one side, as a tool or agent would.
 fn resolve(text: &str, side: Side) -> String {
+    resolve_each(text, |_| side)
+}
+
+/// Resolve the `n`th conflict hunk (counting from 0) by taking `side_for(n)`.
+fn resolve_each(text: &str, side_for: impl Fn(usize) -> Side) -> String {
     #[derive(Clone, Copy, PartialEq)]
     enum Region {
         Outside,
         In(Side),
     }
     let mut region = Region::Outside;
+    let mut hunk = 0;
     let mut resolved = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         match (region, line.trim_end_matches('\n')) {
             (Region::Outside, "<<<<<<< ours") => region = Region::In(Side::Ours),
             (Region::In(Side::Ours), "||||||| base") => region = Region::In(Side::Base),
             (Region::In(Side::Base), "=======") => region = Region::In(Side::Theirs),
-            (Region::In(Side::Theirs), ">>>>>>> theirs") => region = Region::Outside,
+            (Region::In(Side::Theirs), ">>>>>>> theirs") => {
+                region = Region::Outside;
+                hunk += 1;
+            }
             (Region::Outside, _) => resolved.push_str(line),
-            (Region::In(current), _) if current == side => resolved.push_str(line),
+            (Region::In(current), _) if current == side_for(hunk) => resolved.push_str(line),
             (Region::In(_), _) => {}
         }
     }
@@ -318,6 +327,26 @@ fn different_additions_without_an_ancestor_conflict_as_whole_files() {
 }
 
 #[test]
+fn dependency_conflicts_without_an_ancestor_say_so() {
+    let mut ours = base_issue();
+    let mut theirs = base_issue();
+    ours.depends_on
+        .insert("mb-9".into(), DependencyType::Blocks);
+    theirs
+        .depends_on
+        .insert("mb-9".into(), DependencyType::Related);
+
+    let result = merge_texts("", &render(&ours), &render(&theirs));
+    assert_eq!(
+        conflict_fields(&result),
+        vec![IssueField::Dependency("mb-9".into())]
+    );
+    assert_eq!(result.conflicts[0].reason, ConflictReason::NoCommonAncestor);
+    assert_eq!(resolve(&result.text, Side::Ours), render(&ours));
+    assert_eq!(resolve(&result.text, Side::Theirs), render(&theirs));
+}
+
+#[test]
 fn non_canonical_files_fall_back_to_a_textual_merge() {
     let base = render(&base_issue());
     let ours = base.replace(
@@ -377,6 +406,17 @@ fn imported(remote_id: u32, body: &str, minute: Minute, edited: Minute) -> Comme
         )),
         source_id: Some(remote_id.to_string()),
     }
+}
+
+/// Comments in the order `Storage` writes them.
+fn sorted_comments<'a>(comments: impl Iterator<Item = &'a Comment>) -> Vec<&'a Comment> {
+    let mut sorted: Vec<&Comment> = comments.collect();
+    sorted.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    sorted
 }
 
 fn render_comments(comments: &[Comment]) -> String {
@@ -449,25 +489,86 @@ fn the_same_imported_comment_on_both_sides_is_kept_once() {
 }
 
 #[test]
-fn a_comment_deleted_on_one_side_is_kept_and_reported() {
+fn a_comment_deleted_on_one_side_and_unchanged_on_the_other_is_deleted() {
     let base = vec![comment("c-1", "one", 1), comment("c-2", "two", 2)];
     let ours = vec![comment("c-1", "one", 1)];
     let mut theirs = base.clone();
     theirs.push(comment("c-3", "three", 3));
 
-    let result = merge_comment_lists(&base, &ours, &theirs);
-    assert!(result.is_clean());
+    for result in [
+        merge_comment_lists(&base, &ours, &theirs),
+        merge_comment_lists(&base, &theirs, &ours),
+    ] {
+        assert!(result.is_clean());
+        assert_eq!(ids(&parse_comments(&result.text)), vec!["c-1", "c-3"]);
+        assert_eq!(result.notices, Vec::new());
+    }
+    // Git resolves an untouched file without the driver; the structured merge
+    // must agree with that resolution.
     assert_eq!(
-        ids(&parse_comments(&result.text)),
-        vec!["c-1", "c-2", "c-3"]
+        merge_comment_lists(&base, &ours, &base).text,
+        structured_comments(&base, &ours, &base).text
     );
     assert_eq!(
+        ids(&parse_comments(
+            &structured_comments(&base, &base, &ours).text
+        )),
+        vec!["c-1"]
+    );
+}
+
+#[test]
+fn a_comment_deleted_on_one_side_but_edited_on_the_other_is_kept_and_reported() {
+    let base = vec![comment("c-1", "one", 1), comment("c-2", "two", 2)];
+    let ours = vec![comment("c-1", "one", 1)];
+    let mut theirs = base.clone();
+    theirs[1].body = "two, clarified".into();
+
+    let result = merge_comment_lists(&base, &ours, &theirs);
+    assert!(result.is_clean());
+    let merged = parse_comments(&result.text);
+    assert_eq!(ids(&merged), vec!["c-1", "c-2"]);
+    assert_eq!(merged[1].body, "two, clarified");
+    assert_eq!(
         result.notices,
-        vec![MergeNotice::KeptCommentDeletedOnOneSide {
+        vec![MergeNotice::KeptEditedCommentDeletedOnOneSide {
             comment_id: "c-2".into(),
             deleted_by: Side::Ours,
         }]
     );
+}
+
+#[test]
+fn conflicting_comments_whose_creation_times_differ_resolve_hunk_by_hunk() {
+    let base = vec![
+        comment("c-1", "one", 1),
+        comment("c-2", "two", 2),
+        comment("c-3", "three", 3),
+    ];
+    let mut ours = base.clone();
+    ours[0].body = "one, ours".into();
+    ours[0].created_at = at(5);
+    ours[2].body = "three, ours".into();
+    let mut theirs = base.clone();
+    theirs[0].body = "one, theirs".into();
+    theirs[2].body = "three, theirs".into();
+    theirs[2].created_at = at(0);
+
+    let result = merge_comment_lists(&base, &ours, &theirs);
+    assert_eq!(result.conflicts.len(), 2);
+    assert!(hunk_count(&result.text) >= 2, "{}", result.text);
+    for hunk_sides in 0..(1 << hunk_count(&result.text)) {
+        let resolved = parse_comments(&resolve_each(&result.text, |hunk| {
+            if hunk_sides >> hunk & 1 == 0 {
+                Side::Ours
+            } else {
+                Side::Theirs
+            }
+        }));
+        let mut resolved_ids = ids(&resolved);
+        resolved_ids.sort_unstable();
+        assert_eq!(resolved_ids, vec!["c-1", "c-2", "c-3"], "{}", result.text);
+    }
 }
 
 #[test]
@@ -597,23 +698,35 @@ enum EditKind {
     Title,
     Status,
     Priority,
+    IssueType,
     Assignee,
+    ExternalRef,
+    Claim,
     Labels,
     Dependencies,
     Description,
+    Design,
+    AcceptanceCriteria,
     Notes,
 }
 
-const EDIT_KINDS: [EditKind; 8] = [
+const EDIT_KINDS: [EditKind; 13] = [
     EditKind::Title,
     EditKind::Status,
     EditKind::Priority,
+    EditKind::IssueType,
     EditKind::Assignee,
+    EditKind::ExternalRef,
+    EditKind::Claim,
     EditKind::Labels,
     EditKind::Dependencies,
     EditKind::Description,
+    EditKind::Design,
+    EditKind::AcceptanceCriteria,
     EditKind::Notes,
 ];
+const ISSUE_TYPES: [IssueType; 3] = [IssueType::Task, IssueType::Bug, IssueType::Feature];
+const EXTERNAL_REFS: [Option<&str>; 3] = [None, Some("gh-11"), Some("gh-12")];
 
 fn pick<'a, T>(rng: &mut StdRng, items: &'a [T]) -> &'a T {
     items.choose(rng).unwrap()
@@ -652,8 +765,16 @@ fn random_base(rng: &mut StdRng) -> Issue {
         .map(|index| format!("P{index} {}", pick(rng, &SENTENCES)))
         .collect::<Vec<_>>()
         .join("\n\n");
-    if rng.gen_bool(0.3) {
-        issue.notes = (*pick(rng, &SENTENCES)).into();
+    issue.issue_type = *pick(rng, &ISSUE_TYPES);
+    issue.external_ref = pick(rng, &EXTERNAL_REFS).map(str::to_owned);
+    for section in [
+        &mut issue.design,
+        &mut issue.acceptance_criteria,
+        &mut issue.notes,
+    ] {
+        if rng.gen_bool(0.3) {
+            *section = (*pick(rng, &SENTENCES)).into();
+        }
     }
     issue
 }
@@ -671,7 +792,16 @@ fn apply_edit(rng: &mut StdRng, issue: &mut Issue, kind: EditKind, tag: &str, mi
         }
         EditKind::Status => set_status(issue, *pick(rng, &STATUSES), minute),
         EditKind::Priority => issue.priority = rng.gen_range(0..5),
+        EditKind::IssueType => issue.issue_type = *pick(rng, &ISSUE_TYPES),
         EditKind::Assignee => issue.assignee = (*pick(rng, &ASSIGNEES)).into(),
+        EditKind::ExternalRef => {
+            issue.external_ref = pick(rng, &EXTERNAL_REFS).map(str::to_owned);
+        }
+        EditKind::Claim => {
+            let claimed = rng.gen_bool(0.7);
+            issue.claimed_at = claimed.then(|| at(minute));
+            issue.claimed_until = claimed.then(|| at(minute + rng.gen_range(30..90)));
+        }
         EditKind::Labels => {
             let label = (*pick(rng, &LABELS)).to_owned();
             match issue.labels.iter().position(|existing| *existing == label) {
@@ -706,12 +836,17 @@ fn apply_edit(rng: &mut StdRng, issue: &mut Issue, kind: EditKind, tag: &str, mi
             }
             issue.description = paragraphs.join("\n\n");
         }
-        EditKind::Notes => {
-            issue.notes = if rng.gen_bool(0.3) {
+        EditKind::Design | EditKind::AcceptanceCriteria | EditKind::Notes => {
+            let text = if rng.gen_bool(0.3) {
                 String::new()
             } else {
                 (*pick(rng, &SENTENCES)).into()
             };
+            match kind {
+                EditKind::Design => issue.design = text,
+                EditKind::AcceptanceCriteria => issue.acceptance_criteria = text,
+                _ => issue.notes = text,
+            }
         }
     }
     issue.updated_at = at(minute);
@@ -754,6 +889,17 @@ fn generated_triples() -> impl Iterator<Item = (Seed, Issue, Issue, Issue)> {
     })
 }
 
+/// `Storage` keeps `closed_at` set exactly while an issue is closed.
+fn assert_close_time_matches_status(seed: Seed, issue: &Issue) {
+    assert_eq!(
+        issue.closed_at.is_some(),
+        issue.status == Status::Closed,
+        "seed {seed}: status {} with closed_at {:?}",
+        issue.status,
+        issue.closed_at
+    );
+}
+
 #[test]
 fn property_issue_merge_is_commutative() {
     let mut conflicted = 0;
@@ -768,6 +914,7 @@ fn property_issue_merge_is_commutative() {
         );
         if forward.is_clean() {
             assert_eq!(forward.text, backward.text, "seed {seed}");
+            assert_close_time_matches_status(seed, &parse(&forward.text));
         } else {
             conflicted += 1;
             // Swapping the roles swaps hunk contents and nothing else.
@@ -812,16 +959,44 @@ fn property_structured_merge_is_identity_when_one_side_is_unchanged() {
     }
 }
 
+/// Classic diff3 over whole paragraphs, used as an oracle for the prose
+/// merger: `true` when it merges the three texts without a conflict.
+fn paragraph_diff3_is_clean(base: &str, ours: &str, theirs: &str) -> bool {
+    let one_line_per_paragraph = |text: &str| -> String {
+        text.split("\n\n")
+            .filter(|paragraph| !paragraph.is_empty())
+            .map(|paragraph| format!("{}\n", paragraph.replace('\n', "\u{1}")))
+            .collect()
+    };
+    let (base, ours, theirs) = (
+        one_line_per_paragraph(base),
+        one_line_per_paragraph(ours),
+        one_line_per_paragraph(theirs),
+    );
+    merge_lines(
+        ThreeWay {
+            base: &base,
+            ours: &ours,
+            theirs: &theirs,
+        },
+        MarkerSize::DEFAULT,
+    )
+    .hunks
+    .is_clean()
+}
+
 /// Merging a clean result back against either input changes nothing.
 ///
 /// Field merges satisfy this exactly. Prose, like any diff3, does not always:
 /// with base `P0 P1`, a result `X` (P0 rewritten, P1 deleted) and a side `P0`
-/// (P1 deleted), the two edits overlap at P1 and the re-merge conflicts. Such
-/// re-merges must conflict only in prose sections, never produce a different
-/// clean text, and stay rare.
+/// (P1 deleted), the two edits overlap at P1 and the re-merge conflicts. A
+/// re-merge may therefore conflict only in a prose section on which classic
+/// paragraph-level diff3 conflicts too, so the prose merger is never weaker
+/// than that baseline. It must never produce a different clean text, and its
+/// resolution must reproduce the first merge.
 #[test]
 fn property_remerging_a_merged_side_is_idempotent() {
-    let (mut checked, mut prose_overlaps) = (0, 0);
+    let mut checked = 0;
     for (seed, base, ours, theirs) in generated_triples() {
         let result = merge(&base, &ours, &theirs);
         if !result.is_clean() {
@@ -840,11 +1015,17 @@ fn property_remerging_a_merged_side_is_idempotent() {
                 assert_eq!(remerge.text, result.text, "seed {seed}");
                 continue;
             }
-            prose_overlaps += 1;
             for field in conflict_fields(&remerge) {
+                let IssueField::Section(section) = field else {
+                    panic!("seed {seed}: re-merge conflicted on {field}");
+                };
                 assert!(
-                    matches!(field, IssueField::Section(_)),
-                    "seed {seed}: re-merge conflicted on {field}"
+                    !paragraph_diff3_is_clean(
+                        section.content(&base),
+                        section.content(&merged),
+                        section.content(side),
+                    ),
+                    "seed {seed}: paragraph diff3 merges {section:?} but the prose merger refused"
                 );
             }
             assert_eq!(
@@ -855,10 +1036,6 @@ fn property_remerging_a_merged_side_is_idempotent() {
         }
     }
     assert!(checked > PROPERTY_CASES / 4, "{checked} clean merges");
-    assert!(
-        prose_overlaps * 20 < checked,
-        "{prose_overlaps} of {checked}"
-    );
 }
 
 #[test]
@@ -885,7 +1062,17 @@ fn property_disjoint_edits_always_merge_with_both_edits() {
                         assert_eq!(merged.closed_at, side.closed_at, "seed {seed}");
                     }
                     EditKind::Priority => assert_eq!(merged.priority, side.priority, "seed {seed}"),
+                    EditKind::IssueType => {
+                        assert_eq!(merged.issue_type, side.issue_type, "seed {seed}")
+                    }
                     EditKind::Assignee => assert_eq!(merged.assignee, side.assignee, "seed {seed}"),
+                    EditKind::ExternalRef => {
+                        assert_eq!(merged.external_ref, side.external_ref, "seed {seed}")
+                    }
+                    EditKind::Claim => {
+                        assert_eq!(merged.claimed_at, side.claimed_at, "seed {seed}");
+                        assert_eq!(merged.claimed_until, side.claimed_until, "seed {seed}");
+                    }
                     EditKind::Labels => assert_eq!(merged.labels, side.labels, "seed {seed}"),
                     EditKind::Dependencies => {
                         assert_eq!(merged.depends_on, side.depends_on, "seed {seed}")
@@ -893,6 +1080,11 @@ fn property_disjoint_edits_always_merge_with_both_edits() {
                     EditKind::Description => {
                         assert_eq!(merged.description, side.description, "seed {seed}")
                     }
+                    EditKind::Design => assert_eq!(merged.design, side.design, "seed {seed}"),
+                    EditKind::AcceptanceCriteria => assert_eq!(
+                        merged.acceptance_criteria, side.acceptance_criteria,
+                        "seed {seed}"
+                    ),
                     EditKind::Notes => assert_eq!(merged.notes, side.notes, "seed {seed}"),
                 }
             }
@@ -914,6 +1106,17 @@ fn property_conflict_output_is_machine_resolvable_and_precise() {
         let conflicts = conflict_fields(&result);
         let took_ours = parse(&resolve(&result.text, Side::Ours));
         let took_theirs = parse(&resolve(&result.text, Side::Theirs));
+        let took_base = parse(&resolve(&result.text, Side::Base));
+        for resolved in [&took_ours, &took_theirs, &took_base] {
+            assert_close_time_matches_status(seed, resolved);
+            assert_eq!(resolved.created_at, took_ours.created_at, "seed {seed}");
+        }
+        if conflicts.contains(&IssueField::Status) {
+            assert_eq!(took_ours.closed_at, ours.closed_at, "seed {seed}");
+            assert_eq!(took_theirs.closed_at, theirs.closed_at, "seed {seed}");
+        } else {
+            assert_eq!(took_ours.closed_at, took_theirs.closed_at, "seed {seed}");
+        }
         for field in FRONTMATTER_FIELDS.iter().cloned().chain(
             DEPENDENCY_IDS
                 .iter()
@@ -989,6 +1192,10 @@ fn random_comment_descendant(rng: &mut StdRng, base: &[Comment], tag: &str) -> V
             comment.updated_at += Duration::minutes(rng.gen_range(1..30));
         } else if comment.source_id.is_none() && rng.gen_bool(0.08) {
             comment.body = format!("{} (rewritten by {tag})", comment.body);
+            if rng.gen_bool(0.3) {
+                // A hand edit that also moved the comment in time.
+                comment.created_at += Duration::minutes(rng.gen_range(-15..15));
+            }
         }
     }
     for index in 0..rng.gen_range(0..3) {
@@ -1015,7 +1222,32 @@ fn random_comment_descendant(rng: &mut StdRng, base: &[Comment], tag: &str) -> V
     comments
 }
 
-fn assert_no_lost_or_duplicated_comments(
+/// The IDs a three-way set merge must keep: everything either side added,
+/// everything both sides kept, and a comment deleted by one side only when the
+/// other side edited it.
+fn expected_comment_ids<'a>(
+    base: &'a [Comment],
+    ours: &'a [Comment],
+    theirs: &'a [Comment],
+) -> BTreeSet<&'a str> {
+    let find = |list: &'a [Comment], id: &str| list.iter().find(|comment| comment.id == id);
+    ours.iter()
+        .chain(theirs)
+        .filter(|comment| {
+            let id = comment.id.as_str();
+            match (find(ours, id), find(theirs, id), find(base, id)) {
+                (Some(_), Some(_), _) | (_, _, None) => true,
+                (Some(kept), None, Some(original)) | (None, Some(kept), Some(original)) => {
+                    kept != original
+                }
+                (None, None, Some(_)) => unreachable!("{id} came from a side"),
+            }
+        })
+        .map(|comment| comment.id.as_str())
+        .collect()
+}
+
+fn assert_comment_ids_are_exactly_the_merged_set(
     seed: Seed,
     merged: &[Comment],
     base: &[Comment],
@@ -1029,26 +1261,21 @@ fn assert_no_lost_or_duplicated_comments(
         merged_ids.len(),
         "seed {seed}: duplicate IDs {merged_ids:?}"
     );
-    for id in ids(ours).into_iter().chain(ids(theirs)) {
-        assert!(unique.contains(id), "seed {seed}: lost comment {id}");
-    }
-    for id in &unique {
-        assert!(
-            ids(base).contains(id) || ids(ours).contains(id) || ids(theirs).contains(id),
-            "seed {seed}: invented comment {id}"
-        );
-        assert!(
-            ids(ours).contains(id) || ids(theirs).contains(id),
-            "seed {seed}: resurrected comment {id} deleted on both sides"
-        );
-    }
+    assert_eq!(
+        unique,
+        expected_comment_ids(base, ours, theirs),
+        "seed {seed}: wrong comment set"
+    );
+}
+
+fn assert_in_time_order(seed: Seed, merged: &[Comment]) {
     let mut sorted = merged.to_vec();
     sorted.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-    assert_eq!(ids(&sorted), merged_ids, "seed {seed}: not in time order");
+    assert_eq!(ids(&sorted), ids(merged), "seed {seed}: not in time order");
 }
 
 fn generated_comment_triples(
@@ -1069,7 +1296,8 @@ fn property_comment_merge_never_loses_or_duplicates_comments() {
         let result = merge_comment_lists(&base, &ours, &theirs);
         if result.is_clean() {
             let merged = parse_comments(&result.text);
-            assert_no_lost_or_duplicated_comments(seed, &merged, &base, &ours, &theirs);
+            assert_comment_ids_are_exactly_the_merged_set(seed, &merged, &base, &ours, &theirs);
+            assert_in_time_order(seed, &merged);
             for comment in &merged {
                 let known = ours.iter().chain(&theirs).any(|side| side == comment);
                 let merged_body = ours.iter().any(|side| side.id == comment.id)
@@ -1078,9 +1306,29 @@ fn property_comment_merge_never_loses_or_duplicates_comments() {
             }
         } else {
             conflicted += 1;
-            for side in [Side::Ours, Side::Theirs] {
-                let merged = parse_comments(&resolve(&result.text, side));
-                assert_no_lost_or_duplicated_comments(seed, &merged, &base, &ours, &theirs);
+            // Every way of resolving the hunks one by one keeps the same set.
+            let hunks = hunk_count(&result.text);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let choices: Vec<Vec<Side>> = [Side::Ours, Side::Theirs, Side::Base]
+                .into_iter()
+                .map(|side| vec![side; hunks])
+                .chain((0..4).map(|_| {
+                    (0..hunks)
+                        .map(|_| *pick(&mut rng, &[Side::Ours, Side::Theirs]))
+                        .collect()
+                }))
+                .collect();
+            for choice in &choices {
+                let merged = parse_comments(&resolve_each(&result.text, |hunk| choice[hunk]));
+                if choice.contains(&Side::Base) {
+                    // Taking the base of every hunk yields a list without
+                    // the conflicting edits but still one entry per ID.
+                    let merged_ids = ids(&merged);
+                    let unique: BTreeSet<&str> = merged_ids.iter().copied().collect();
+                    assert_eq!(unique.len(), merged_ids.len(), "seed {seed}");
+                    continue;
+                }
+                assert_comment_ids_are_exactly_the_merged_set(seed, &merged, &base, &ours, &theirs);
             }
         }
     }

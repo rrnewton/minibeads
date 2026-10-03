@@ -5,8 +5,11 @@
 //! `%A` file; the exit status is 0 for a clean merge and 1 when conflict hunks
 //! were written, exactly as git expects from a merge driver.
 
-use crate::diff3::MarkerSize;
-use crate::issue_merge::{merge_comment_files, merge_issue_files, FileMerge, MergeInputs};
+use crate::diff3::{MarkerSize, BASE_LABEL, OURS_LABEL, THEIRS_LABEL};
+use crate::issue_merge::{
+    merge_comment_files, merge_issue_files, ConflictReason, ConflictSubject, FileMerge,
+    MergeConflict, MergeInputs,
+};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -60,6 +63,7 @@ pub(crate) fn merge_file(
     inputs: MergeInputs<'_>,
     size: MarkerSize,
 ) -> FileMerge {
+    let size = size.longer_than_markers_in([inputs.base, inputs.ours, inputs.theirs]);
     match kind {
         MergeFileKind::Issue => {
             let issue_id = path
@@ -99,9 +103,64 @@ pub(crate) enum DriverOutcome {
     Conflicted,
 }
 
-fn read_input(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
+fn read_input(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("Failed to read {}", path.display()))
+}
+
+/// One conflict hunk holding the three versions verbatim, for inputs that are
+/// not text. Leaving `%A` as ours would let ours be committed unnoticed.
+fn byte_conflict(base: &[u8], ours: &[u8], theirs: &[u8], size: MarkerSize) -> Vec<u8> {
+    let mut output = Vec::with_capacity(base.len() + ours.len() + theirs.len() + 64);
+    for (marker, label, side) in [
+        (b'<', Some(OURS_LABEL), Some(ours)),
+        (b'|', Some(BASE_LABEL), Some(base)),
+        (b'=', None, Some(theirs)),
+        (b'>', Some(THEIRS_LABEL), None),
+    ] {
+        output.extend(std::iter::repeat_n(marker, size.get()));
+        if let Some(label) = label {
+            output.push(b' ');
+            output.extend_from_slice(label.as_bytes());
+        }
+        output.push(b'\n');
+        if let Some(side) = side {
+            output.extend_from_slice(side);
+            if side.last().is_some_and(|last| *last != b'\n') {
+                output.push(b'\n');
+            }
+        }
+    }
+    output
+}
+
+/// Merge three raw inputs: as text when all are UTF-8, otherwise as one hunk.
+fn merge_bytes(
+    kind: MergeFileKind,
+    path: &Path,
+    [base, ours, theirs]: [&[u8]; 3],
+    size: MarkerSize,
+) -> (Vec<u8>, FileMerge) {
+    match (
+        std::str::from_utf8(base),
+        std::str::from_utf8(ours),
+        std::str::from_utf8(theirs),
+    ) {
+        (Ok(base), Ok(ours), Ok(theirs)) => {
+            let mut merged = merge_file(kind, path, MergeInputs { base, ours, theirs }, size);
+            (std::mem::take(&mut merged.text).into_bytes(), merged)
+        }
+        _ => (
+            byte_conflict(base, ours, theirs, size),
+            FileMerge {
+                text: String::new(),
+                conflicts: vec![MergeConflict {
+                    subject: ConflictSubject::WholeFile,
+                    reason: ConflictReason::NotUtf8,
+                }],
+                notices: Vec::new(),
+            },
+        ),
+    }
 }
 
 /// Paths and options of one driver invocation.
@@ -123,22 +182,13 @@ pub(crate) fn run_driver(run: &DriverRun<'_>) -> Result<DriverOutcome> {
     let ours = read_input(run.ours)?;
     let theirs = read_input(run.theirs)?;
     let path = run.path.unwrap_or(run.ours);
-    let kind = classify_path(path);
-    let merged = merge_file(
-        kind,
-        path,
-        MergeInputs {
-            base: &base,
-            ours: &ours,
-            theirs: &theirs,
-        },
-        run.size,
-    );
+    let (bytes, merged) = merge_bytes(classify_path(path), path, [&base, &ours, &theirs], run.size);
 
     if run.stdout {
-        print!("{}", merged.text);
+        std::io::Write::write_all(&mut std::io::stdout().lock(), &bytes)
+            .context("Failed to write the merge result to stdout")?;
     } else {
-        crate::transaction::atomic_write(run.ours, merged.text.as_bytes())
+        crate::transaction::atomic_write(run.ours, &bytes)
             .with_context(|| format!("Failed to write {}", run.ours.display()))?;
     }
     let shown = path.display();
@@ -158,14 +208,15 @@ pub(crate) fn run_driver(run: &DriverRun<'_>) -> Result<DriverOutcome> {
     })
 }
 
-/// The `.gitattributes` lines routing minibeads files to the driver.
+/// The `.gitattributes` lines routing minibeads files to the driver. The
+/// leading `**/` matches a database at the top level or in any subdirectory.
 pub(crate) fn gitattributes_lines() -> Vec<String> {
     DATABASE_DIRS
         .iter()
         .flat_map(|dir| {
             [
-                format!("{dir}/issues/**/*.md merge={DRIVER_NAME}"),
-                format!("{dir}/comments/*.json merge={DRIVER_NAME}"),
+                format!("**/{dir}/issues/**/*.md merge={DRIVER_NAME}"),
+                format!("**/{dir}/comments/*.json merge={DRIVER_NAME}"),
             ]
         })
         .collect()
@@ -319,7 +370,46 @@ mod tests {
     #[test]
     fn gitattributes_cover_both_database_directories() {
         let lines = gitattributes_lines();
-        assert!(lines.contains(&".beads/issues/**/*.md merge=mb".to_owned()));
-        assert!(lines.contains(&".minibeads/comments/*.json merge=mb".to_owned()));
+        assert!(lines.contains(&"**/.beads/issues/**/*.md merge=mb".to_owned()));
+        assert!(lines.contains(&"**/.minibeads/comments/*.json merge=mb".to_owned()));
+    }
+
+    #[test]
+    fn non_utf8_inputs_become_one_hunk_of_raw_bytes() {
+        let (base, ours, theirs) = (&b"base\n"[..], &b"ours \xff"[..], &b"theirs\n"[..]);
+        let (bytes, merged) = merge_bytes(
+            MergeFileKind::Issue,
+            Path::new(".minibeads/issues/x-1.md"),
+            [base, ours, theirs],
+            MarkerSize::DEFAULT,
+        );
+        assert_eq!(
+            bytes,
+            b"<<<<<<< ours\nours \xff\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> theirs\n"
+        );
+        assert_eq!(
+            merged.conflicts,
+            vec![MergeConflict {
+                subject: ConflictSubject::WholeFile,
+                reason: ConflictReason::NotUtf8,
+            }]
+        );
+    }
+
+    #[test]
+    fn markers_outgrow_marker_like_content() {
+        let base = "Title\n=======\n";
+        let ours = "Title\n=======\nours\n";
+        let theirs = "Title\n=======\ntheirs\n";
+        let merged = merge_file(
+            MergeFileKind::Text,
+            Path::new("notes.md"),
+            MergeInputs { base, ours, theirs },
+            MarkerSize::DEFAULT,
+        );
+        assert_eq!(
+            merged.text,
+            "Title\n=======\n<<<<<<<< ours\nours\n|||||||| base\n========\ntheirs\n>>>>>>>> theirs\n"
+        );
     }
 }

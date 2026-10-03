@@ -18,7 +18,7 @@ The binary composes safe-Rust modules around Markdown issue storage:
   diffs see only real changes.
 - `issue_merge.rs` is the whole-file three-way merge of issue Markdown (every
   field, label set, dependency map, timestamps, and all four prose sections via
-  `prose_merge.rs`) and of comment JSON (append-only set keyed by comment ID).
+  `prose_merge.rs`) and of comment JSON (three-way set keyed by comment ID).
   Conflicts are rendered as diff3 hunks covering only the conflicting lines;
   non-canonical input falls back to a textual merge instead of being rewritten.
 - `diff3.rs` is the line-level three-way merge and conflict-hunk writer under it.

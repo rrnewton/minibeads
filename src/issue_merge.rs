@@ -8,15 +8,17 @@
 //! Issue files merge field by field: scalars take whichever side changed them,
 //! labels merge as a set, dependencies as a keyed map, timestamps by derivation
 //! rules, and the four prose sections through the deterministic prose merger
-//! shared with GitHub sync. Comment files merge as an append-only set keyed by
-//! the stable comment ID: no comment present on either side is ever dropped and
-//! no ID appears twice.
+//! shared with GitHub sync. Comment files merge as a three-way set keyed by the
+//! stable comment ID: additions from both sides are kept, no ID appears twice,
+//! and a comment is removed only when a side deleted it and the other side left
+//! it unchanged, which is also what git does when it resolves an untouched file
+//! without calling the driver.
 //!
 //! Inputs that do not parse, or that would not be reproduced byte-for-byte by
 //! re-serialising them (hand-edited or foreign files), fall back to a plain
 //! line-based diff3 so no unknown content is silently discarded.
 
-use crate::diff3::{merge_lines, push_conflict, MarkerSize, ThreeWay};
+use crate::diff3::{mark_view_differences, merge_lines, push_conflict, MarkerSize, ThreeWay};
 use crate::format::{
     frontmatter_yaml, issue_to_markdown, markdown_to_issue, push_section_heading,
     sanitize_section_content, trim_blank_edge_lines, Section,
@@ -70,7 +72,12 @@ impl IssueField {
     fn copy_value(&self, target: &mut Issue, source: &Issue) {
         match self {
             IssueField::Title => target.title.clone_from(&source.title),
-            IssueField::Status => target.status = source.status,
+            IssueField::Status => {
+                // `closed_at` is set exactly when the status is closed, so it
+                // travels with the status.
+                target.status = source.status;
+                target.closed_at = source.closed_at;
+            }
             IssueField::Priority => target.priority = source.priority,
             IssueField::IssueType => target.issue_type = source.issue_type,
             IssueField::Assignee => target.assignee.clone_from(&source.assignee),
@@ -141,6 +148,8 @@ pub(crate) enum ConflictReason {
     Prose(ProseMergeFailureKind),
     /// The file was merged textually and this hunk did not merge.
     Textual(TextualFallback),
+    /// An input is not UTF-8 text, so the file is one hunk of raw bytes.
+    NotUtf8,
 }
 
 impl fmt::Display for ConflictReason {
@@ -168,6 +177,9 @@ impl fmt::Display for ConflictReason {
                     "overlapping line edits; merged as text because {fallback}"
                 )
             }
+            ConflictReason::NotUtf8 => {
+                formatter.write_str("not UTF-8 text; the whole file is one hunk")
+            }
         }
     }
 }
@@ -180,6 +192,8 @@ pub(crate) enum ConflictSubject {
     Comment(String),
     /// A hunk of a file merged as plain text.
     Lines,
+    /// The entire file.
+    WholeFile,
 }
 
 impl fmt::Display for ConflictSubject {
@@ -188,6 +202,7 @@ impl fmt::Display for ConflictSubject {
             ConflictSubject::Field(field) => write!(formatter, "field {field}"),
             ConflictSubject::Comment(id) => write!(formatter, "comment {id}"),
             ConflictSubject::Lines => formatter.write_str("lines"),
+            ConflictSubject::WholeFile => formatter.write_str("whole file"),
         }
     }
 }
@@ -201,9 +216,9 @@ pub(crate) struct MergeConflict {
 /// Something the merge resolved automatically that a user may want to know.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MergeNotice {
-    /// Comments are append-only: a deletion on one branch does not remove the
-    /// comment from the merge result.
-    KeptCommentDeletedOnOneSide {
+    /// One side deleted a comment that the other side edited; the edit is kept
+    /// rather than silently discarded.
+    KeptEditedCommentDeletedOnOneSide {
         comment_id: String,
         deleted_by: Side,
     },
@@ -219,12 +234,12 @@ pub(crate) enum MergeNotice {
 impl fmt::Display for MergeNotice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MergeNotice::KeptCommentDeletedOnOneSide {
+            MergeNotice::KeptEditedCommentDeletedOnOneSide {
                 comment_id,
                 deleted_by,
             } => write!(
                 formatter,
-                "kept comment {comment_id} deleted only by {deleted_by} (comments are append-only)"
+                "kept comment {comment_id}: {deleted_by} deleted it but the other side edited it"
             ),
             MergeNotice::NewerImportedCommentWins { comment_id, winner } => write!(
                 formatter,
@@ -460,22 +475,21 @@ pub(crate) fn merge_issue_versions(
         Some(status) => merged.status = *status,
         None => conflict(IssueField::Status, unresolved),
     }
-    // `closed_at` is derived bookkeeping, never a conflict of its own: when
-    // both sides closed at different instants the later close wins, and a
-    // one-sided value survives unless the merged status is known to be open.
-    merged.closed_at = match merge_scalar(
-        base.map(|issue| &issue.closed_at),
-        &ours.closed_at,
-        &theirs.closed_at,
-    ) {
-        Some(closed_at) => *closed_at,
-        None => match (ours.closed_at, theirs.closed_at) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (left, right) if status.is_none_or(|status| *status == Status::Closed) => {
-                left.or(right)
-            }
-            _ => None,
+    // `closed_at` is derived from the status and never a conflict of its own:
+    // it is set exactly when the merged status is closed, and when both sides
+    // closed at different instants the later close wins. A conflicting status
+    // carries each side's `closed_at` into its hunk (see `copy_value`).
+    merged.closed_at = match status {
+        Some(Status::Closed) => match merge_scalar(
+            base.map(|issue| &issue.closed_at),
+            &ours.closed_at,
+            &theirs.closed_at,
+        ) {
+            Some(closed_at) => *closed_at,
+            None => ours.closed_at.max(theirs.closed_at),
         },
+        Some(_) => None,
+        None => ours.closed_at,
     };
 
     merged.created_at = *merge_scalar(
@@ -519,10 +533,7 @@ pub(crate) fn merge_issue_versions(
                 if let Some(dep_type) = ours_type {
                     depends_on.insert(id.clone(), *dep_type);
                 }
-                conflict(
-                    IssueField::Dependency(id.clone()),
-                    ConflictReason::BothChanged,
-                );
+                conflict(IssueField::Dependency(id.clone()), unresolved);
             }
         }
     }
@@ -624,13 +635,13 @@ fn render_issue_conflicts(
         ours: &ours_frontmatter,
         theirs: &theirs_frontmatter,
     };
-    let frontmatter = merge_lines(frontmatter_region, size);
+    let frontmatter = mark_view_differences(frontmatter_region, size);
 
     let mut text = String::with_capacity(frontmatter.text.len() * 2);
     text.push_str("---\n");
     if frontmatter.hunks.is_clean() && fields.iter().any(|field| field.is_frontmatter()) {
-        // Line alignment merged what the field merge rejected; never let that
-        // pass as clean.
+        // Should the views of a conflicting field ever render identically,
+        // still never let the conflict pass as clean.
         push_conflict(&mut text, frontmatter_region, size);
     } else {
         text.push_str(&frontmatter.text);
@@ -648,7 +659,7 @@ fn render_issue_conflicts(
                 theirs: &theirs_text,
             };
             push_section_heading(&mut text, section);
-            let lines = merge_lines(region, size);
+            let lines = mark_view_differences(region, size);
             if lines.hunks.is_clean() {
                 push_conflict(&mut text, region, size);
             } else {
@@ -702,13 +713,9 @@ impl CommentVersions {
 }
 
 /// Merge three versions of a comment file.
-///
-/// Unlike issue files there is no "one side unchanged" byte shortcut: the
-/// comment set is append-only, so a comment deleted on one side must survive
-/// even when the other side did not touch the file.
 pub(crate) fn merge_comment_files(inputs: MergeInputs<'_>, size: MarkerSize) -> FileMerge {
-    if inputs.ours == inputs.theirs {
-        return FileMerge::clean(inputs.ours.to_owned());
+    if let Some(text) = inputs.trivial() {
+        return FileMerge::clean(text.to_owned());
     }
     match CommentVersions::parse(inputs) {
         Ok(versions) => merge_comment_versions(&versions, size),
@@ -777,16 +784,6 @@ fn resolve_shared_comment<'a>(
     CommentResolution::Conflict { base, ours, theirs }
 }
 
-fn sorted_comments<'a>(comments: impl Iterator<Item = &'a Comment>) -> Vec<&'a Comment> {
-    let mut sorted: Vec<&Comment> = comments.collect();
-    sorted.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    sorted
-}
-
 fn comments_by_id(comments: &[Comment]) -> BTreeMap<&str, &Comment> {
     comments
         .iter()
@@ -794,7 +791,7 @@ fn comments_by_id(comments: &[Comment]) -> BTreeMap<&str, &Comment> {
         .collect()
 }
 
-/// ID-keyed, append-only merge of comment lists.
+/// ID-keyed three-way merge of comment lists.
 pub(crate) fn merge_comment_versions(versions: &CommentVersions, size: MarkerSize) -> FileMerge {
     let base = comments_by_id(&versions.base);
     let ours = comments_by_id(&versions.ours);
@@ -841,9 +838,14 @@ pub(crate) fn merge_comment_versions(versions: &CommentVersions, size: MarkerSiz
                     }
                 }
             }
-            (Some(kept), None) | (None, Some(kept)) => {
-                if base_comment.is_some() {
-                    notices.push(MergeNotice::KeptCommentDeletedOnOneSide {
+            (Some(kept), None) | (None, Some(kept)) => match base_comment {
+                // Added by one side.
+                None => views.push([Some(kept); 3]),
+                // Deleted by one side and untouched by the other.
+                Some(base_comment) if base_comment == kept => {}
+                // Deleted by one side and edited by the other: keep the edit.
+                Some(_) => {
+                    notices.push(MergeNotice::KeptEditedCommentDeletedOnOneSide {
                         comment_id: id.to_owned(),
                         deleted_by: if ours.contains_key(id) {
                             Side::Theirs
@@ -851,9 +853,9 @@ pub(crate) fn merge_comment_versions(versions: &CommentVersions, size: MarkerSiz
                             Side::Ours
                         },
                     });
+                    views.push([Some(kept); 3]);
                 }
-                views.push([Some(kept); 3]);
-            }
+            },
             // Deleted by both sides: both replicas agree it is gone.
             (None, None) => {}
         }
@@ -862,7 +864,18 @@ pub(crate) fn merge_comment_versions(versions: &CommentVersions, size: MarkerSiz
         views[slot] = [Some(comment); 3];
     }
 
-    let view = |index: usize| sorted_comments(views.iter().filter_map(move |slots| slots[index]));
+    // One order for all three views, so that a comment whose `created_at`
+    // differs between sides still lines up with itself and any per-hunk
+    // resolution keeps every ID exactly once.
+    views.sort_by_cached_key(|slots| {
+        slots
+            .iter()
+            .flatten()
+            .map(|comment| (comment.created_at, comment.id.as_str()))
+            .min()
+    });
+    let view =
+        |index: usize| -> Vec<&Comment> { views.iter().filter_map(|slots| slots[index]).collect() };
     let ours_json = comments_json(&view(1));
     if conflicts.is_empty() {
         return FileMerge {
@@ -878,7 +891,7 @@ pub(crate) fn merge_comment_versions(versions: &CommentVersions, size: MarkerSiz
         ours: &ours_json,
         theirs: &theirs_json,
     };
-    let lines = merge_lines(region, size);
+    let lines = mark_view_differences(region, size);
     let text = if lines.hunks.is_clean() {
         let mut text = String::new();
         push_conflict(&mut text, region, size);

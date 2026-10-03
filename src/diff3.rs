@@ -21,6 +21,31 @@ impl MarkerSize {
     pub(crate) fn new(size: usize) -> Self {
         Self(size.max(Self::DEFAULT.0))
     }
+
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+
+    /// This size, grown if needed so that markers are longer than any
+    /// marker-like line in `texts` (a Markdown setext `=======`, a quoted
+    /// conflict). A resolver can then tell every marker from content by its
+    /// exact length.
+    pub(crate) fn longer_than_markers_in(self, texts: [&str; 3]) -> Self {
+        let longest = texts
+            .into_iter()
+            .flat_map(str::lines)
+            .filter_map(|line| {
+                let marker = line
+                    .chars()
+                    .next()
+                    .filter(|first| "<|=>".contains(*first))?;
+                let rest = line.trim_start_matches(marker);
+                (rest.is_empty() || rest.starts_with(' ')).then_some(line.len() - rest.len())
+            })
+            .max()
+            .unwrap_or(0);
+        Self(self.0.max(longest + 1))
+    }
 }
 
 /// Number of conflict hunks written into a merge result.
@@ -123,17 +148,31 @@ pub(crate) fn push_conflict(output: &mut String, region: ThreeWay<'_>, size: Mar
     push_marker_line(output, '>', size, Some(THEIRS_LABEL));
 }
 
+/// Which differing chunks become conflict hunks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HunkRule {
+    /// Ordinary diff3: a chunk changed by one side, or identically by both,
+    /// is merged.
+    BothSidesChangedDifferently,
+    /// Every chunk in which the three texts are not identical is a hunk.
+    AnyDifference,
+}
+
 fn merge_chunk(
     output: &mut String,
     base: &[&str],
     ours: &[&str],
     theirs: &[&str],
+    rule: HunkRule,
     size: MarkerSize,
     hunks: &mut HunkCount,
 ) {
-    if ours == theirs || theirs == base {
+    let all_equal = ours == theirs && ours == base;
+    if all_equal
+        || (rule == HunkRule::BothSidesChangedDifferently && (ours == theirs || theirs == base))
+    {
         push_lines(output, ours);
-    } else if ours == base {
+    } else if rule == HunkRule::BothSidesChangedDifferently && ours == base {
         push_lines(output, theirs);
     } else {
         let base_text = base.concat();
@@ -159,6 +198,20 @@ fn merge_chunk(
 /// conflict hunk when both sides changed it differently. The algorithm is
 /// symmetric: swapping `ours` and `theirs` swaps only the hunk contents.
 pub(crate) fn merge_lines(region: ThreeWay<'_>, size: MarkerSize) -> LineMerge {
+    merge_with_rule(region, HunkRule::BothSidesChangedDifferently, size)
+}
+
+/// Mark every line-level difference between three views of one merge result.
+///
+/// The structured merges render three views that agree on everything that
+/// merged and differ only in what conflicts. Here no difference is merged, not
+/// even one made by a single view, so the text outside the hunks is common to
+/// all three views and taking side S of every hunk reproduces view S exactly.
+pub(crate) fn mark_view_differences(region: ThreeWay<'_>, size: MarkerSize) -> LineMerge {
+    merge_with_rule(region, HunkRule::AnyDifference, size)
+}
+
+fn merge_with_rule(region: ThreeWay<'_>, rule: HunkRule, size: MarkerSize) -> LineMerge {
     let base = split_lines(region.base);
     let ours = split_lines(region.ours);
     let theirs = split_lines(region.theirs);
@@ -179,6 +232,7 @@ pub(crate) fn merge_lines(region: ThreeWay<'_>, size: MarkerSize) -> LineMerge {
             &base[base_start..base_index],
             &ours[ours_start..ours_index],
             &theirs[theirs_start..theirs_index],
+            rule,
             size,
             &mut hunks,
         );
@@ -192,6 +246,7 @@ pub(crate) fn merge_lines(region: ThreeWay<'_>, size: MarkerSize) -> LineMerge {
         &base[base_start..],
         &ours[ours_start..],
         &theirs[theirs_start..],
+        rule,
         size,
         &mut hunks,
     );
@@ -254,6 +309,33 @@ mod tests {
         );
         assert!(result.text.starts_with("<<<<<<<<< ours\n"));
         assert_eq!(MarkerSize::new(3), MarkerSize::DEFAULT);
+    }
+
+    #[test]
+    fn view_differences_are_never_merged_even_when_one_sided() {
+        let views = ThreeWay {
+            base: "status: blocked\npriority: 2\n",
+            ours: "status: closed\npriority: 2\nclosed_at: noon\n",
+            theirs: "status: in_progress\npriority: 2\n",
+        };
+        assert_eq!(merge_lines(views, MarkerSize::DEFAULT).hunks.get(), 1);
+        let marked = mark_view_differences(views, MarkerSize::DEFAULT);
+        assert_eq!(marked.hunks.get(), 2);
+        assert!(marked
+            .text
+            .ends_with("<<<<<<< ours\nclosed_at: noon\n||||||| base\n=======\n>>>>>>> theirs\n"));
+        let identical = ThreeWay {
+            base: "a\n",
+            ours: "a\n",
+            theirs: "a\n",
+        };
+        assert_eq!(
+            mark_view_differences(identical, MarkerSize::DEFAULT),
+            LineMerge {
+                text: "a\n".into(),
+                hunks: HunkCount::default(),
+            }
+        );
     }
 
     #[test]

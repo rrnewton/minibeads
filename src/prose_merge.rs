@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::ops::Range;
 
 type ByteOffset = usize;
@@ -7,6 +8,7 @@ type ByteCount = usize;
 type PieceIndex = usize;
 type MatchCount = usize;
 type WorkCount = usize;
+type OccurrenceCount = usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InputByteLimit(ByteCount);
@@ -131,6 +133,10 @@ pub(crate) enum CompetingEditReason {
     DeleteVsEdit,
     AmbiguousRepeatedAlignment,
     AmbiguousInsertionGroup,
+    /// A word-level merge would repeat or drop a word beyond what either side
+    /// has, which happens when the two sides align against repeated text
+    /// differently.
+    InconsistentWordCounts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,28 +220,54 @@ fn merge_changed(
         return Err(MergeError::Exhausted(WorkExhaustionReason::InputBytes));
     }
 
+    // A paragraph carries the blank line that separates it from the next one,
+    // except the last. When no input ends in a line break, a common separator
+    // is appended to all three and removed again afterwards, so that a final
+    // paragraph that stops being final (one side appended after it) still
+    // aligns with itself instead of widening the edit into an overlap.
+    let texts = [inputs.ancestor, inputs.local, inputs.remote];
+    let pad = texts
+        .iter()
+        .all(|text| !text.is_empty() && !text.ends_with(['\n', '\r']));
+    let padded: [Cow<'_, str>; 3] = texts.map(|text| {
+        if pad {
+            Cow::Owned(format!("{text}{FINAL_SEPARATOR}"))
+        } else {
+            Cow::Borrowed(text)
+        }
+    });
+    let [ancestor, local, remote] = &padded;
+
     let mut budget = WorkBudget::new(limits);
-    let (first, second) = match budget.compare(inputs.local, inputs.remote)? {
-        Ordering::Less => (inputs.local, inputs.remote),
+    let (first, second) = match budget.compare(local, remote)? {
+        Ordering::Less => (local, remote),
         Ordering::Equal => unreachable!("equal replicas use the borrowed fast path"),
-        Ordering::Greater => (inputs.remote, inputs.local),
+        Ordering::Greater => (remote, local),
     };
-    let output_capacity = inputs
-        .local
+    let output_capacity = local
         .len()
-        .checked_add(inputs.remote.len())
+        .checked_add(remote.len())
         .ok_or(MergeError::Exhausted(WorkExhaustionReason::InputBytes))?;
     let mut output = String::with_capacity(output_capacity);
     merge_level(
-        inputs.ancestor,
+        ancestor,
         first,
         second,
         Level::Paragraphs,
         &mut budget,
         &mut output,
     )?;
+    if pad {
+        // Every side ends with the separator, so a sound merge does too.
+        let Some(length) = output.strip_suffix(FINAL_SEPARATOR).map(str::len) else {
+            return Err(MergeError::Competing(CompetingEditReason::OverlappingEdits));
+        };
+        output.truncate(length);
+    }
     Ok(output)
 }
+
+const FINAL_SEPARATOR: &str = "\n\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MergeError {
@@ -803,18 +835,47 @@ fn merge_overlap(
                 StructuredOverlapReason::MarkdownSource,
             ));
         }
-        // Word-level merging is only sound inside one paragraph. Across
-        // paragraph breaks the token alignment can anchor on text repeated in
-        // an inserted paragraph and emit that paragraph twice.
-        for text in [original, local, remote] {
-            if Pieces::new(text, Level::Paragraphs, budget.piece_limit)?.len() > 1 {
-                return Err(MergeError::Competing(CompetingEditReason::OverlappingEdits));
-            }
-        }
-        return merge_level(original, local, remote, Level::Tokens, budget, output);
+        let start = output.len();
+        merge_level(original, local, remote, Level::Tokens, budget, output)?;
+        return require_word_counts_within_sides(local, remote, &output[start..], budget);
     }
 
     Err(MergeError::Competing(CompetingEditReason::OverlappingEdits))
+}
+
+/// Each side's token diff against the ancestor is computed independently, so
+/// when text repeats the two alignments can disagree: both sides' copies of a
+/// shared insertion land at different, non-overlapping positions and are both
+/// emitted, or both sides' deletions of one repeated word remove different
+/// copies. A sound merge of `local` and `remote` never holds a word more often
+/// than both sides or less often than both, so anything else is refused.
+fn require_word_counts_within_sides(
+    local: &str,
+    remote: &str,
+    merged: &str,
+    budget: &WorkBudget,
+) -> Result<(), MergeError> {
+    // Occurrences of each word in `[local, remote, merged]`.
+    let mut counts: HashMap<&str, [OccurrenceCount; 3]> = HashMap::new();
+    for (slot, text) in [local, remote, merged].into_iter().enumerate() {
+        let pieces = Pieces::new(text, Level::Tokens, budget.piece_limit)?;
+        for index in 0..pieces.len() {
+            let word = pieces.piece(index);
+            if is_content_anchor(word) {
+                counts.entry(word).or_default()[slot] += 1;
+            }
+        }
+    }
+    if counts
+        .values()
+        .all(|[local, remote, merged]| local.min(remote) <= merged && merged <= local.max(remote))
+    {
+        Ok(())
+    } else {
+        Err(MergeError::Competing(
+            CompetingEditReason::InconsistentWordCounts,
+        ))
+    }
 }
 
 fn replay_includes_edge_deletion(
@@ -1212,15 +1273,167 @@ mod tests {
     }
 
     #[test]
-    fn overlap_spanning_paragraphs_never_duplicates_an_insertion() {
-        // Found by the issue-merge re-merge property: the local side rewrote
-        // P0 and carries the remote's inserted paragraph, whose words repeat
-        // P0's. A token merge across the break emitted the insertion twice.
+    fn word_merges_never_duplicate_a_shared_insertion() {
+        // Each case: the local side already carries the remote's insertion,
+        // whose words repeat nearby text, plus one edit of its own. The two
+        // independent token alignments placed the insertion at different
+        // positions and emitted it twice. The first case spans paragraphs and
+        // was found by the issue-merge re-merge property; its alignment is
+        // ambiguous outright. The single-paragraph cases came from adversarial
+        // review and are caught by the word-count bound.
         assert_competing_in_both_roles(
             "P0 Golf hotel india.\n\nP1 Mike.\n",
             "Golf hotel india. (ours)\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
             "P0 Golf hotel india.\n\nAdded: Golf hotel india.\n\nP1 Mike.\n",
-            CompetingEditReason::OverlappingEdits,
+            CompetingEditReason::AmbiguousRepeatedAlignment,
+        );
+        for (ancestor, local, remote) in [
+            (
+                "bug fix a the and should fix the",
+                "really fix test bug ship a the and should fix the",
+                "bug fix test bug ship a the and should fix the",
+            ),
+            (
+                "We should fix the bug in the parser and then ship the release.",
+                "We should fix the really in bug fix the parser and then ship the release.",
+                "We should fix the bug in bug fix the parser and then ship the release.",
+            ),
+        ] {
+            assert_competing_in_both_roles(
+                ancestor,
+                local,
+                remote,
+                CompetingEditReason::InconsistentWordCounts,
+            );
+        }
+    }
+
+    #[test]
+    fn word_merges_never_drop_both_copies_of_one_deleted_word() {
+        // Both sides delete one "fix" but align on different copies, so a
+        // naive merge deletes both.
+        assert_competing_in_both_roles(
+            "fix one fix two",
+            "one fix two more",
+            "fix one two",
+            CompetingEditReason::InconsistentWordCounts,
+        );
+    }
+
+    /// Random token edits over a six-word vocabulary, so words repeat and the
+    /// two alignments often disagree. The remote makes one or two edits and
+    /// the local side makes the same edits plus one more, at least two
+    /// untouched ancestor words away. The only correct clean merge is then the
+    /// local text itself; anything else duplicates or drops an edit.
+    #[test]
+    fn property_merging_a_subsumed_side_returns_the_superset() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        const WORDS: [&str; 6] = ["bug", "fix", "the", "ship", "test", "a"];
+        #[derive(Clone, Copy)]
+        enum Change {
+            Insert(&'static str),
+            Replace(&'static str),
+            Delete,
+        }
+        /// Apply changes keyed by ancestor index, from the last index back so
+        /// earlier indices stay valid.
+        fn apply(ancestor: &[&'static str], changes: &[(usize, Change)]) -> String {
+            let mut words = ancestor.to_vec();
+            let mut sorted = changes.to_vec();
+            sorted.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+            for (index, change) in sorted {
+                match change {
+                    Change::Insert(word) => words.insert(index, word),
+                    Change::Replace(word) => words[index] = word,
+                    Change::Delete => {
+                        words.remove(index);
+                    }
+                }
+            }
+            words.join(" ")
+        }
+        let (mut clean, mut refused) = (0, 0);
+        for seed in 0..5000 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let word = |rng: &mut StdRng| WORDS[rng.gen_range(0..WORDS.len())];
+            let ancestor: Vec<&str> = (0..rng.gen_range(6..14)).map(|_| word(&mut rng)).collect();
+            let random_change = |rng: &mut StdRng| match rng.gen_range(0..3) {
+                0 => Change::Insert(word(rng)),
+                1 => Change::Replace(word(rng)),
+                _ => Change::Delete,
+            };
+            // Distinct ancestor indices at least three apart, so every two
+            // changes keep at least two ancestor words between them.
+            let mut indices: Vec<usize> = (0..ancestor.len()).step_by(3).collect();
+            indices.retain(|_| rng.gen_bool(0.6));
+            if indices.len() < 2 {
+                continue;
+            }
+            let changes: Vec<(usize, Change)> = indices
+                .iter()
+                .map(|index| (*index, random_change(&mut rng)))
+                .collect();
+            let extra = rng.gen_range(0..changes.len());
+            let remote_changes: Vec<(usize, Change)> = changes
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != extra)
+                .map(|(_, change)| *change)
+                .collect();
+            let original = ancestor.join(" ");
+            let local = apply(&ancestor, &changes);
+            let remote = apply(&ancestor, &remote_changes);
+            if local == remote || remote == original || local == original {
+                continue;
+            }
+            for (first, second) in [(&local, &remote), (&remote, &local)] {
+                match merge(&original, first, second) {
+                    ProseMergeResult::Merged(text) => {
+                        clean += 1;
+                        assert_eq!(
+                            text.as_str(),
+                            local,
+                            "seed {seed}: {original:?} {local:?} {remote:?}"
+                        );
+                    }
+                    _ => refused += 1,
+                }
+            }
+        }
+        // Most of these merges are unambiguous and must stay clean.
+        assert!(clean > refused, "{clean} clean, {refused} refused");
+    }
+
+    #[test]
+    fn overlapping_paragraph_deletions_merge() {
+        // Both sides delete P1; the local side also deletes P3. Refusing
+        // every multi-paragraph overlap made this conflict.
+        assert_merge(
+            "P0 Papa quebec romeo.\n\nP1 Golf hotel india.\n\nP2 Mike november oscar.\n\nP3 Alpha bravo charlie.",
+            "P0 Papa quebec romeo.\n\nP2 Mike november oscar.",
+            "P0 Papa quebec romeo.\n\nP2 Mike november oscar.\n\nP3 Alpha bravo charlie.",
+            "P0 Papa quebec romeo.\n\nP2 Mike november oscar.",
+        );
+    }
+
+    #[test]
+    fn a_final_paragraph_that_stops_being_final_still_aligns() {
+        // Both sides delete P1 and local also appends after the last
+        // paragraph, so its copy of P2 gains a separator. Paragraph diff3
+        // merges this cleanly (found by the re-merge property).
+        assert_merge(
+            "P0 Juliet kilo lima.\n\nP1 Golf hotel india.\n\nP2 Alpha bravo charlie.",
+            "P0 Juliet kilo lima.\n\nP2 Alpha bravo charlie.\n\nAdded: Mike november.",
+            "P0 Juliet kilo lima.\n\nP2 Alpha bravo charlie.",
+            "P0 Juliet kilo lima.\n\nP2 Alpha bravo charlie.\n\nAdded: Mike november.",
+        );
+        // Text that ends in a line break is left as it is.
+        assert_merge(
+            "P0 Juliet kilo lima.\n\nP1 Golf hotel india.\n",
+            "P0 Juliet kilo lima.\n\nP1 Golf hotel india.\n\nAdded: Mike november.\n",
+            "P1 Golf hotel india.\n",
+            "P1 Golf hotel india.\n\nAdded: Mike november.\n",
         );
     }
 

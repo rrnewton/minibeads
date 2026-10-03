@@ -112,7 +112,8 @@ assert_contains "$(git config merge.mb.driver)" "merge-driver run %O %A %B --mar
 assert_equals "mb" "$(git check-attr merge -- "$ISSUE" | awk '{print $3}')" "Issue files should use the mb driver"
 assert_equals "mb" "$(git check-attr merge -- "$COMMENTS" | awk '{print $3}')" "Comment files should use the mb driver"
 MB merge-driver install --command "$BD_BIN" >/dev/null 2>&1
-assert_equals "1" "$(grep -c '^.minibeads/issues/\*\*/\*.md merge=mb$' .gitattributes)" "Re-running install should not duplicate .gitattributes lines"
+assert_equals "1" "$(grep -c '^\*\*/.minibeads/issues/\*\*/\*.md merge=mb$' .gitattributes)" "Re-running install should not duplicate .gitattributes lines"
+assert_equals "mb" "$(git check-attr merge -- sub/project/.minibeads/issues/p-1.md | awk '{print $3}')" "Nested databases should use the mb driver too"
 git add .gitattributes
 git commit -qm "Use the mb merge driver"
 
@@ -148,19 +149,43 @@ MB show test-1 >/dev/null
 success "Merged issue should still parse"
 TESTS_RUN=$((TESTS_RUN + 1))
 
-# Test 3: a comment deleted on one branch survives the merge (append-only set)
-echo -e "\n${YELLOW}Test 3: One-sided comment deletion is not propagated${NC}"
+# Test 3: comment deletions propagate like line deletions in git
+echo -e "\n${YELLOW}Test 3: Comment deletions merge as a three-way set${NC}"
+comment_id() {
+    MB --json comments list test-1 | grep -B3 -F "\"body\": \"$1\"" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' | head -1
+}
+# 3a: one branch deletes a comment while the other adds one
 git checkout -qb deleter
-BASE_COMMENT_ID=$(MB --json comments list test-1 | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' | head -1)
-MB comments delete test-1 "$BASE_COMMENT_ID" >/dev/null
+MB comments delete test-1 "$(comment_id "Base comment")" >/dev/null
 git commit -qam "delete a comment"
 git checkout -q main
 MB comments add test-1 -b "Comment after the split" >/dev/null
 git commit -qam "another comment on main"
 MERGE_OUTPUT=$(git merge --no-edit deleter 2>&1)
-assert_contains "$MERGE_OUTPUT" "NOTICE $COMMENTS: kept comment $BASE_COMMENT_ID" "Driver should report the kept comment"
-assert_equals "1" "$(MB comments list test-1 | grep -cF "Base comment")" "Deleted-on-one-side comment should be kept"
+assert_equals "" "$(echo "$MERGE_OUTPUT" | grep -F "mb merge-driver:" || true)" "A clean set merge should print no conflicts or notices"
+assert_equals "0" "$(MB comments list test-1 | grep -cF "Base comment")" "A comment deleted on one side and unchanged on the other should be deleted"
 assert_equals "1" "$(MB comments list test-1 | grep -cF "Comment after the split")" "New comment should be kept"
+# 3b: one branch deletes a comment and the other leaves the comment file alone
+git checkout -qb deleter2
+MB comments delete test-1 "$(comment_id "Comment from feature")" >/dev/null
+git commit -qam "delete another comment"
+git checkout -q main
+MB update test-1 --priority 1 >/dev/null
+git commit -qam "touch only the issue on main"
+git merge --no-edit deleter2 >/dev/null 2>&1
+assert_equals "0" "$(MB comments list test-1 | grep -cF "Comment from feature")" "A deletion against an untouched comment file should be deleted"
+# 3c: one branch deletes a comment that the other edits: the edit is kept and reported
+git checkout -qb deleter3
+MB comments delete test-1 "$(comment_id "Comment from main")" >/dev/null
+git commit -qam "delete a third comment"
+git checkout -q main
+sed -i 's/"body": "Comment from main"/"body": "Comment from main, edited"/' "$COMMENTS"
+assert_contains "$(MB comments list test-1)" "Comment from main, edited" "The hand-edited comment file should still parse"
+git commit -qam "edit that comment on main"
+EDITED_ID=$(comment_id "Comment from main, edited")
+MERGE_OUTPUT=$(git merge --no-edit deleter3 2>&1)
+assert_contains "$MERGE_OUTPUT" "NOTICE $COMMENTS: kept comment $EDITED_ID: theirs deleted it but the other side edited it" "Driver should report the kept edit"
+assert_equals "1" "$(MB comments list test-1 | grep -cF "Comment from main, edited")" "The edited comment should be kept"
 
 # Test 4: competing title edits conflict on exactly the title line
 echo -e "\n${YELLOW}Test 4: Precise conflict hunk for competing title edits${NC}"
