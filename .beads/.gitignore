@@ -1,2 +1,7 @@
 minibeads.lock
 command_history.log
+
+minibeads-transaction.json
+.mb-write-*
+
+sync_ancestors/

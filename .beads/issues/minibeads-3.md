@@ -4,7 +4,7 @@ status: in_progress
 priority: 1
 issue_type: epic
 created_at: 2025-10-30T13:22:12.880731360+00:00
-updated_at: 2026-09-07T20:31:27.385373464+00:00
+updated_at: 2026-10-03T14:28:47.821167186+00:00
 ---
 
 # Description
@@ -135,3 +135,9 @@ make stress-test's test_sync_stress fails deterministically (seed 12345) with an
 2026-09-07_#228(3f467d063a): Post-merge follow-up: final PR CI34158336503 and merge CI34158685706 both passed all seven jobs, but the documentation-only handoff run34158790240 failed macOS random_minibeads::test_stress_minibeads_parallel_hash with ENOENT spawning mb after several actions. Six other jobs passed. Investigation finds each parallel Rust test repeatedly performs separate nested Cargo builds into shared release artifacts while sibling test workers execute those paths; tempfile lifetimes are independent and retained. A scoped test-harness initialization correction is being validated separately, without changing sync semantics or unfreezing the overhaul. No new issue created.
 
 2026-09-07_#228(3f467d063a): CI harness follow-up implemented and validated. Cache one initialization result (including failure) with OnceLock, build mb/test_minibeads together once in locked debug mode, and resolve executable paths from Cargo JSON artifacts. Five deterministic harness_initialization regressions are included in make validate and existing cross-platform CI. Integrated local validation: 208 routine tests, fmt and strict all-target/all-feature Clippy pass; native harness 10 tests pass on stable and Rust 1.87 (five initialization tests overlap routine totals). Reviewer additionally passed custom target path with spaces and six seeded parallel stress runs/602 iterations. Upstream comparisons excluded. Final platform confirmation is attached to this follow-up commit in GitHub Actions. No new issue created; overhaul plan-review gate remains minibeads-37.
+
+2026-09-15_#229(6e30bdc7a8): GitHub sync overhaul validation adds adversarial prose/ancestor/concurrency coverage. Final debug make -o purge validate passes 296 tests: 66 lib, 189 bin, 7 shell fixtures, 1 migration, 28 regressions, and 5 harness initialization tests. Strict cargo clippy --locked --all-targets --all-features -- -D warnings and git diff --check pass. Rust 1.87 all-feature run passes 303 executed tests with 1 ignored stress test. New regressions cover role-symmetric bounded prose merging, repeated text, CommonMark structures, stale replay, per-issue lease serialization, transaction rollback, duplicate concurrent comment export, local/remote write races, dry-run pending-journal purity, future state schemas, relink ownership, and all five ID migrations. Remote CI remains pending on the review PR.
+
+- 2026-10-03: merge-driver suites (minibeads-38): seeded property tests in src/issue_merge_tests.rs, generated prose-merge properties with exact oracles (src/prose_merge.rs), and tests/merge_driver.sh (real git merges); mutation-checked with 26 breakages caught.
+
+- 2026-10-03_#232(5742073e8e) review fixes (minibeads-38): exact three-way comment-set property under mixed resolutions, re-merge property gated by a paragraph-diff3 oracle instead of a tolerance, closed_at/created_at checks in the precision property, 13 generated edit kinds, a 5000-seed prose subsumption property, escape round-trip and non-UTF-8/marker-size unit tests, and merge_driver.sh comment-deletion and nested-routing cases. 16 mutations all caught.

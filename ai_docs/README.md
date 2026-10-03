@@ -5,3 +5,9 @@ substitutes for the project vision, maintained user documentation, or issue trac
 
 - [Brian's PR stack review](pr-landing-review.md): reviewed scope, corrections,
   validation evidence, and the atomic landing plan for PRs #15–#24.
+- [GitHub sync implementation plan](github-sync-plan.md): owner-approved scope,
+  invariants, and acceptance gates for scoped ancestor-based synchronization.
+- [GitHub sync and prose merging](github-sync-design.md): design-space analysis,
+  Unison comparison, deterministic prose recommendation, and recovery model.
+- [Git merge driver](merge-driver-design.md): `mb merge-driver` contract, field
+  and comment merge rules, precise conflict rendering, tests, and follow-ups.

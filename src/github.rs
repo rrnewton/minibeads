@@ -1,5 +1,11 @@
 //! GitHub Issues sync using the authenticated `gh` CLI.
 
+use crate::github_ancestor::{
+    acquire_sync_lease, AncestorRecord, CanonicalGithubIssue, CommonIssueBody, CommonIssueFields,
+    CommonIssueStatus, CommonIssueTitle, GithubAncestorRecord, GithubAncestorStageOutcome,
+    LocalIssueId,
+};
+use crate::github_merge::{merge_issue_fields, GithubFieldMergeFailure};
 use crate::storage::{IssueStorageLayout, Storage};
 use crate::types::{Comment, Issue, IssueType, Status};
 use anyhow::{anyhow, Context, Result};
@@ -12,10 +18,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
+
+#[cfg(test)]
+#[path = "github_sync_tests.rs"]
+mod sync_tests;
 
 const MARKER: &str = "MB_DO_NOT_SYNC";
 static TRACE_GH_CALLS: AtomicBool = AtomicBool::new(false);
@@ -95,6 +106,34 @@ pub struct GithubImportOptions {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubSyncLabel(String);
+
+impl GithubSyncLabel {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for GithubSyncLabel {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let label = value.trim();
+        if label.is_empty() {
+            Err("GitHub sync labels cannot be empty".to_string())
+        } else {
+            Ok(Self(label.to_owned()))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GithubSyncFilter<'a> {
+    pub labels: &'a [GithubSyncLabel],
+    pub since: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubImportReport {
     pub imported: usize,
@@ -115,8 +154,25 @@ pub struct GithubImportedIssueReport {
     pub details: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct GithubSyncStateSchemaVersion(u64);
+
+impl GithubSyncStateSchemaVersion {
+    const CURRENT: Self = Self(1);
+}
+
+impl Default for GithubSyncStateSchemaVersion {
+    fn default() -> Self {
+        Self::CURRENT
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct GithubSyncState {
+    #[serde(default)]
+    schema_version: GithubSyncStateSchemaVersion,
     #[serde(default)]
     issues: BTreeMap<String, GithubIssueState>,
 }
@@ -138,6 +194,329 @@ struct GithubIssueState {
     /// never synced, so deletions can be propagated instead of resurrected.
     #[serde(default)]
     synced_comments: Vec<SyncedComment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldSyncKind {
+    Unchanged,
+    Push,
+    Pull,
+    Merge,
+}
+
+struct FieldSyncPlan {
+    fields: CommonIssueFields,
+    kind: FieldSyncKind,
+}
+
+const MAX_FIELD_SYNC_ATTEMPTS: usize = 4;
+
+struct ExecutedFieldSync {
+    issue: Issue,
+    remote: RemoteIssue,
+    plan: FieldSyncPlan,
+    pushed: bool,
+    pulled: bool,
+}
+
+enum FieldExecutionConflict {
+    Fields {
+        issue: Issue,
+        conflict: FieldSyncConflict,
+    },
+    RemoteChangedBeforeWrite(Issue),
+    DidNotConverge(Issue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FieldSyncConflict {
+    MissingAncestor,
+    PullWouldDiscardLocal,
+    LocalIdMismatch { recorded: String, current: String },
+    Merge(GithubFieldMergeFailure),
+}
+
+fn canonical_text(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
+}
+
+fn common_status_from_local(status: Status) -> CommonIssueStatus {
+    if status == Status::Closed {
+        CommonIssueStatus::Closed
+    } else {
+        CommonIssueStatus::Open
+    }
+}
+
+fn common_status_from_remote(status: &str) -> CommonIssueStatus {
+    if status.eq_ignore_ascii_case("closed") {
+        CommonIssueStatus::Closed
+    } else {
+        CommonIssueStatus::Open
+    }
+}
+
+fn fields_from_local(issue: &Issue) -> CommonIssueFields {
+    CommonIssueFields::new(
+        CommonIssueTitle::new(canonical_text(&issue.title)),
+        CommonIssueBody::new(canonical_text(&issue.description)),
+        common_status_from_local(issue.status),
+    )
+}
+
+fn fields_from_remote(issue: &RemoteIssue) -> CommonIssueFields {
+    CommonIssueFields::new(
+        CommonIssueTitle::new(canonical_text(&issue.title)),
+        CommonIssueBody::new(canonical_text(&issue.body)),
+        common_status_from_remote(&issue.state),
+    )
+}
+
+fn fields_hash(fields: &CommonIssueFields) -> String {
+    hash_fields(&[
+        fields.title().as_str(),
+        fields.body().as_str(),
+        match fields.status() {
+            CommonIssueStatus::Open => "open",
+            CommonIssueStatus::Closed => "closed",
+        },
+    ])
+}
+
+fn local_status_for_common(current: Status, common: CommonIssueStatus) -> Status {
+    match (common, current) {
+        (CommonIssueStatus::Closed, _) => Status::Closed,
+        (CommonIssueStatus::Open, Status::Closed) => Status::Open,
+        (CommonIssueStatus::Open, current) => current,
+    }
+}
+
+fn apply_fields_to_local(issue: &mut Issue, fields: &CommonIssueFields) {
+    issue.title = fields.title().as_str().to_owned();
+    issue.description = fields.body().as_str().to_owned();
+    issue.status = local_status_for_common(issue.status, fields.status());
+}
+
+fn decide_field_sync(
+    local: &CommonIssueFields,
+    remote: &CommonIssueFields,
+    ancestor: Option<&AncestorRecord>,
+    local_id: &str,
+    legacy_common_hash: Option<&str>,
+    pull_only: bool,
+    force: bool,
+) -> Result<FieldSyncPlan, FieldSyncConflict> {
+    if let Some(record) = ancestor {
+        if record.local_id().as_str() != local_id {
+            return Err(FieldSyncConflict::LocalIdMismatch {
+                recorded: record.local_id().as_str().to_owned(),
+                current: local_id.to_owned(),
+            });
+        }
+    }
+    if local == remote {
+        return Ok(FieldSyncPlan {
+            fields: local.clone(),
+            kind: FieldSyncKind::Unchanged,
+        });
+    }
+
+    if pull_only {
+        let local_unchanged = ancestor.is_some_and(|record| record.common() == local);
+        if force || local_unchanged {
+            return Ok(FieldSyncPlan {
+                fields: remote.clone(),
+                kind: FieldSyncKind::Pull,
+            });
+        }
+        return Err(if ancestor.is_some() {
+            FieldSyncConflict::PullWouldDiscardLocal
+        } else {
+            FieldSyncConflict::MissingAncestor
+        });
+    }
+
+    if let Some(record) = ancestor {
+        let merged =
+            merge_issue_fields(record.common(), local, remote).map_err(FieldSyncConflict::Merge)?;
+        let push = merged != *remote;
+        let pull = merged != *local;
+        let kind = match (push, pull) {
+            (true, true) => FieldSyncKind::Merge,
+            (true, false) => FieldSyncKind::Push,
+            (false, true) => FieldSyncKind::Pull,
+            (false, false) => FieldSyncKind::Unchanged,
+        };
+        return Ok(FieldSyncPlan {
+            fields: merged,
+            kind,
+        });
+    }
+
+    if let Some(common_hash) = legacy_common_hash {
+        let local_hash = fields_hash(local);
+        let remote_hash = fields_hash(remote);
+        if local_hash == common_hash && remote_hash != common_hash {
+            return Ok(FieldSyncPlan {
+                fields: remote.clone(),
+                kind: FieldSyncKind::Pull,
+            });
+        }
+        if remote_hash == common_hash && local_hash != common_hash {
+            return Ok(FieldSyncPlan {
+                fields: local.clone(),
+                kind: FieldSyncKind::Push,
+            });
+        }
+    }
+
+    Err(FieldSyncConflict::MissingAncestor)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_field_sync(
+    storage: &Storage,
+    handle: &GithubIssueHandle,
+    remote_identity: &CanonicalGithubIssue,
+    mut issue: Issue,
+    mut remote: RemoteIssue,
+    durable_ancestor: Option<&AncestorRecord>,
+    legacy_common_hash: Option<&str>,
+    pull_only: bool,
+    force: bool,
+) -> Result<std::result::Result<ExecutedFieldSync, FieldExecutionConflict>> {
+    let mut working_ancestor = durable_ancestor.cloned();
+    let mut pushed = false;
+    let mut pulled = false;
+
+    for _attempt in 0..MAX_FIELD_SYNC_ATTEMPTS {
+        let local_fields = fields_from_local(&issue);
+        let remote_fields = fields_from_remote(&remote);
+        let plan = match decide_field_sync(
+            &local_fields,
+            &remote_fields,
+            working_ancestor.as_ref(),
+            &issue.id,
+            legacy_common_hash,
+            pull_only,
+            force,
+        ) {
+            Ok(plan) => plan,
+            Err(conflict) => {
+                return Ok(Err(FieldExecutionConflict::Fields { issue, conflict }));
+            }
+        };
+        let push_fields = matches!(plan.kind, FieldSyncKind::Push | FieldSyncKind::Merge);
+        let pull_fields = matches!(plan.kind, FieldSyncKind::Pull | FieldSyncKind::Merge);
+        if !push_fields && !pull_fields {
+            return Ok(Ok(ExecutedFieldSync {
+                issue,
+                remote,
+                plan,
+                pushed,
+                pulled,
+            }));
+        }
+
+        let refreshed = handle.refresh().await?;
+        if fields_from_remote(&refreshed) != remote_fields {
+            return Ok(Err(FieldExecutionConflict::RemoteChangedBeforeWrite(issue)));
+        }
+        remote = refreshed;
+
+        if pull_fields {
+            let mut updates = HashMap::new();
+            updates.insert("title".to_string(), plan.fields.title().as_str().to_owned());
+            updates.insert(
+                "description".to_string(),
+                plan.fields.body().as_str().to_owned(),
+            );
+            updates.insert(
+                "status".to_string(),
+                local_status_for_common(issue.status, plan.fields.status()).to_string(),
+            );
+            let Some(updated) = storage.update_issue_if_unchanged(&issue, updates)? else {
+                issue = storage
+                    .get_issue(&issue.id)?
+                    .context("Issue disappeared during GitHub field synchronization")?;
+                continue;
+            };
+            issue = updated;
+            pulled = true;
+        }
+
+        if push_fields {
+            let refreshed = handle.refresh().await?;
+            if fields_from_remote(&refreshed) != fields_from_remote(&remote) {
+                working_ancestor = Some(GithubAncestorRecord::new(
+                    remote_identity.clone(),
+                    LocalIssueId::parse(issue.id.as_str())?,
+                    plan.fields,
+                ));
+                remote = refreshed;
+                continue;
+            }
+            remote = refreshed;
+            if !storage.issue_matches_snapshot(&issue)? {
+                issue = storage
+                    .get_issue(&issue.id)?
+                    .context("Issue disappeared during GitHub field synchronization")?;
+                continue;
+            }
+            let mut desired = issue.clone();
+            apply_fields_to_local(&mut desired, &plan.fields);
+            handle.edit_fields(&desired).await?;
+            handle.set_state(desired.status).await?;
+            pushed = true;
+        }
+
+        let latest_issue = storage
+            .get_issue(&issue.id)?
+            .context("Issue disappeared during GitHub field synchronization")?;
+        let latest_remote = handle.refresh().await?;
+        if fields_from_local(&latest_issue) == plan.fields
+            && fields_from_remote(&latest_remote) == plan.fields
+        {
+            return Ok(Ok(ExecutedFieldSync {
+                issue: latest_issue,
+                remote: latest_remote,
+                plan,
+                pushed,
+                pulled,
+            }));
+        }
+
+        working_ancestor = Some(GithubAncestorRecord::new(
+            remote_identity.clone(),
+            LocalIssueId::parse(latest_issue.id.as_str())?,
+            plan.fields,
+        ));
+        issue = latest_issue;
+        remote = latest_remote;
+    }
+
+    Ok(Err(FieldExecutionConflict::DidNotConverge(issue)))
+}
+
+fn describe_field_conflict(issue: &Issue, url: &str, conflict: &FieldSyncConflict) -> String {
+    match conflict {
+        FieldSyncConflict::MissingAncestor => format!(
+            "{} / {} has divergent fields without a provable common content ancestor; reconcile both copies or use --pull-only --force to choose GitHub",
+            issue.id, url
+        ),
+        FieldSyncConflict::PullWouldDiscardLocal => format!(
+            "{} / {} has local edits that --pull-only would discard; use --force only if GitHub should win",
+            issue.id, url
+        ),
+        FieldSyncConflict::LocalIdMismatch { recorded, current } => format!(
+            "{} / {} has an ancestor owned by local issue {}; refusing to reuse it for {}",
+            issue.id, url, recorded, current
+        ),
+        FieldSyncConflict::Merge(field) => format!(
+            "{} / {} has incompatible {} changes against its common ancestor",
+            issue.id, url, field
+        ),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,8 +906,38 @@ async fn link_issue_async(
     dry_run: bool,
 ) -> Result<GithubSyncReport> {
     let store = GithubStore::new(repo);
+    link_issue_with_store(storage, issue_id, reference, dry_run, &store).await
+}
+
+async fn link_issue_with_store(
+    storage: &Storage,
+    issue_id: &str,
+    reference: &str,
+    dry_run: bool,
+    store: &GithubStore,
+) -> Result<GithubSyncReport> {
     let handle = store.issue(reference);
     let remote = handle.get().await?;
+    let remote_identity = CanonicalGithubIssue::parse(&remote.url)?;
+    let _sync_lease = if dry_run {
+        None
+    } else {
+        Some(acquire_sync_lease(
+            &storage.get_beads_dir(),
+            &remote_identity,
+        )?)
+    };
+    if let Some(existing) =
+        crate::github_ancestor::load(&storage.get_beads_dir(), &remote_identity)?
+    {
+        anyhow::ensure!(
+            existing.local_id().as_str() == issue_id,
+            "GitHub issue {} is already owned by local issue {}; refusing to relink it to {}",
+            remote.url,
+            existing.local_id().as_str(),
+            issue_id
+        );
+    }
 
     if !dry_run {
         let mut updates = HashMap::new();
@@ -630,6 +1039,8 @@ async fn publish_issue_async(
 
     let store = GithubStore::new(repo);
     let handle_remote = store.create_issue(&issue).await?;
+    let remote_identity = CanonicalGithubIssue::parse(&handle_remote.url)?;
+    let _sync_lease = acquire_sync_lease(&storage.get_beads_dir(), &remote_identity)?;
     let handle = store.issue(&handle_remote.url);
     let mut updates = HashMap::new();
     updates.insert("external_ref".to_string(), handle_remote.url.clone());
@@ -682,10 +1093,10 @@ pub fn sync_linked(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
 ) -> Result<GithubSyncReport> {
     block_on_github(sync_linked_async(
-        storage, issue_ids, repo, dry_run, pull_only, force, since,
+        storage, issue_ids, repo, dry_run, pull_only, force, filter,
     ))
 }
 
@@ -752,6 +1163,9 @@ async fn import_issues_with_store(
             report.issues.push(item);
             continue;
         }
+
+        let remote_identity = CanonicalGithubIssue::parse(&remote.url)?;
+        let _sync_lease = acquire_sync_lease(&storage.get_beads_dir(), &remote_identity)?;
 
         let issue = storage.create_issue(
             remote.title.clone(),
@@ -871,10 +1285,13 @@ async fn sync_linked_async(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
 ) -> Result<GithubSyncReport> {
     let store = GithubStore::new(repo);
-    sync_linked_with_store(storage, issue_ids, dry_run, pull_only, force, since, &store).await
+    sync_linked_with_store(
+        storage, issue_ids, dry_run, pull_only, force, filter, &store,
+    )
+    .await
 }
 
 async fn sync_linked_with_store(
@@ -883,15 +1300,18 @@ async fn sync_linked_with_store(
     dry_run: bool,
     pull_only: bool,
     force: bool,
-    since: Option<DateTime<Utc>>,
+    filter: GithubSyncFilter<'_>,
     store: &GithubStore,
 ) -> Result<GithubSyncReport> {
     let beads_dir = storage.get_beads_dir();
-    let mut state = {
-        let _lock = crate::lock::Lock::acquire(&beads_dir)?;
-        load_state(&beads_dir)?
-    };
-    let original_state = state.clone();
+    {
+        let _lock = if dry_run {
+            crate::lock::Lock::acquire_without_recovery(&beads_dir)?
+        } else {
+            crate::lock::Lock::acquire(&beads_dir)?
+        };
+        load_state(&beads_dir)?;
+    }
     let mut report = GithubSyncReport {
         linked: 0,
         created_remote: 0,
@@ -906,7 +1326,7 @@ async fn sync_linked_with_store(
     };
 
     let mut issues = storage.list_issues(None, None, None, None, None)?;
-    if let Some(since) = since {
+    if let Some(since) = filter.since {
         // Incremental mode: only walk issues whose local record changed at/after
         // the cutoff, so a linked set in the hundreds doesn't need a full pass
         // every time. This looks at the LOCAL updated_at only (cheap, no GitHub
@@ -919,8 +1339,16 @@ async fn sync_linked_with_store(
         let wanted: HashSet<&str> = issue_ids.iter().map(String::as_str).collect();
         issues.retain(|issue| wanted.contains(issue.id.as_str()));
     }
+    issues.retain(|issue| {
+        filter.labels.iter().all(|required| {
+            issue
+                .labels
+                .iter()
+                .any(|present| present == required.as_str())
+        })
+    });
 
-    for mut issue in issues {
+    'issues: for mut issue in issues {
         let Some(url) = issue.external_ref.clone() else {
             continue;
         };
@@ -928,21 +1356,42 @@ async fn sync_linked_with_store(
             continue;
         }
 
+        let remote_identity = CanonicalGithubIssue::parse(&url)?;
+        let _sync_lease = if dry_run {
+            None
+        } else {
+            Some(acquire_sync_lease(&beads_dir, &remote_identity)?)
+        };
+        let (ancestor, latest_state) = {
+            let _lock = if dry_run {
+                crate::lock::Lock::acquire_without_recovery(&beads_dir)?
+            } else {
+                crate::lock::Lock::acquire(&beads_dir)?
+            };
+            (
+                crate::github_ancestor::load_under_lock(&beads_dir, &remote_identity)?,
+                load_state(&beads_dir)?,
+            )
+        };
+        let mut state = latest_state;
+        let original_state = state.clone();
         let handle = store.issue(&url);
         let mut remote = handle.get().await?;
-        if !storage.issue_matches_snapshot(&issue)? {
+        anyhow::ensure!(
+            CanonicalGithubIssue::parse(&remote.url)? == remote_identity,
+            "GitHub returned {} while synchronizing {}",
+            remote.url,
+            url
+        );
+        let local_matches = if dry_run {
+            storage.issue_matches_snapshot_readonly(&issue)?
+        } else {
+            storage.issue_matches_snapshot(&issue)?
+        };
+        if !local_matches {
             record_concurrent_issue(&mut report, &issue, &url);
             continue;
         }
-        if !dry_run && !pull_only {
-            handle.ensure_marker(&issue).await?;
-        }
-        let removed_marker_comments = if dry_run {
-            0
-        } else {
-            purge_local_marker_comments(storage, &issue.id)?
-        };
-        let local_comments = storage.list_comments(&issue.id)?;
         let local_hash = hash_local_issue(&issue);
         // Upgrade old ancestry that hashed a richer local workflow status.
         // This is safe only when the current local fields still match both
@@ -957,15 +1406,13 @@ async fn sync_linked_with_store(
                 previous.local_hash.clone_from(&local_hash);
             }
         }
-        let old_state = state.issues.get(&url);
-        let remote_hash = hash_remote_issue(&remote);
-        let state_has_common_base = old_state
-            .map(|s| s.local_hash == s.remote_hash)
-            .unwrap_or(false);
-        let local_changed = old_state.map(|s| s.local_hash.as_str()) != Some(local_hash.as_str());
-        let remote_changed =
-            old_state.map(|s| s.remote_hash.as_str()) != Some(remote_hash.as_str());
-        let inherited_divergence = old_state.is_some() && !state_has_common_base;
+        let old_state = state.issues.get(&url).cloned();
+        let legacy_common_hash = old_state.as_ref().and_then(|entry| {
+            (entry.local_id == issue.id && entry.local_hash == entry.remote_hash)
+                .then_some(entry.local_hash.as_str())
+        });
+        let local_fields = fields_from_local(&issue);
+        let remote_fields = fields_from_remote(&remote);
         let mut item = GithubIssueSyncReport {
             issue_id: issue.id.clone(),
             github_url: url.clone(),
@@ -978,221 +1425,159 @@ async fn sync_linked_with_store(
             details: Vec::new(),
             conflict: None,
         };
-        let mut remote_written = false;
-        let mut field_conflict = false;
+        let mut plan = match decide_field_sync(
+            &local_fields,
+            &remote_fields,
+            ancestor.as_ref(),
+            &issue.id,
+            legacy_common_hash,
+            pull_only,
+            force,
+        ) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                let conflict = describe_field_conflict(&issue, &url, &reason);
+                item.action = match reason {
+                    FieldSyncConflict::MissingAncestor => "conflict-no-ancestor",
+                    FieldSyncConflict::PullWouldDiscardLocal => "conflict-local-changed",
+                    FieldSyncConflict::LocalIdMismatch { .. } => "conflict-local-id",
+                    FieldSyncConflict::Merge(_) => "conflict",
+                }
+                .to_string();
+                item.conflict = Some(conflict.clone());
+                item.details.push(
+                    "left issue fields, comments, markers, and ancestry unchanged".to_string(),
+                );
+                report.conflicts.push(conflict);
+                report.issues.push(item);
+                continue;
+            }
+        };
+        let mut push_fields = matches!(plan.kind, FieldSyncKind::Push | FieldSyncKind::Merge);
+        let mut pull_fields = matches!(plan.kind, FieldSyncKind::Pull | FieldSyncKind::Merge);
+        item.details.push(
+            "compared title, description, and open/closed state with the common ancestor"
+                .to_string(),
+        );
+        if pull_only && force && ancestor.is_none() && plan.kind == FieldSyncKind::Pull {
+            item.details.push(
+                "--pull-only --force explicitly chose GitHub without a common ancestor".to_string(),
+            );
+        }
+
+        if !dry_run {
+            match execute_field_sync(
+                storage,
+                &handle,
+                &remote_identity,
+                issue,
+                remote,
+                ancestor.as_ref(),
+                legacy_common_hash,
+                pull_only,
+                force,
+            )
+            .await?
+            {
+                Ok(executed) => {
+                    issue = executed.issue;
+                    remote = executed.remote;
+                    plan = executed.plan;
+                    push_fields = executed.pushed;
+                    pull_fields = executed.pulled;
+                }
+                Err(FieldExecutionConflict::Fields {
+                    issue: latest_issue,
+                    conflict: reason,
+                }) => {
+                    issue = latest_issue;
+                    let conflict = describe_field_conflict(&issue, &url, &reason);
+                    item.action = "conflict-concurrent-fields".to_string();
+                    item.conflict = Some(conflict.clone());
+                    item.details.push(
+                        "a racing edit could not be reconciled; retained the previous ancestor"
+                            .to_string(),
+                    );
+                    report.conflicts.push(conflict);
+                    report.issues.push(item);
+                    continue 'issues;
+                }
+                Err(FieldExecutionConflict::RemoteChangedBeforeWrite(latest_issue)) => {
+                    issue = latest_issue;
+                    let conflict = format!(
+                        "{} / {} changed remotely during sync; no local or remote field write was attempted",
+                        issue.id, url
+                    );
+                    item.action = "conflict-remote-edit".to_string();
+                    item.conflict = Some(conflict.clone());
+                    item.details
+                        .push("retry against the latest GitHub contents".to_string());
+                    report.conflicts.push(conflict);
+                    report.issues.push(item);
+                    continue 'issues;
+                }
+                Err(FieldExecutionConflict::DidNotConverge(latest_issue)) => {
+                    issue = latest_issue;
+                    let conflict = format!(
+                        "{} / {} kept changing during field synchronization; retained the previous ancestor",
+                        issue.id, url
+                    );
+                    item.action = "conflict-verification".to_string();
+                    item.conflict = Some(conflict.clone());
+                    report.conflicts.push(conflict);
+                    report.issues.push(item);
+                    continue 'issues;
+                }
+            }
+        }
+        item.action = if dry_run {
+            match plan.kind {
+                FieldSyncKind::Unchanged => "unchanged",
+                FieldSyncKind::Push => "would-push",
+                FieldSyncKind::Pull => "would-pull",
+                FieldSyncKind::Merge => "would-merge",
+            }
+        } else {
+            match (push_fields, pull_fields) {
+                (true, true) => "merged",
+                (true, false) => "pushed",
+                (false, true) => "pulled",
+                (false, false) => "unchanged",
+            }
+        }
+        .to_string();
+        item.title = plan.fields.title().as_str().to_owned();
+        report.pushed_issues += usize::from(push_fields);
+        report.pulled_issues += usize::from(pull_fields);
+
+        if !dry_run && !pull_only {
+            handle.ensure_marker(&issue).await?;
+        }
+        let removed_marker_comments = if dry_run {
+            0
+        } else {
+            purge_local_marker_comments(storage, &issue.id)?
+        };
         if removed_marker_comments > 0 {
             item.details.push(format!(
                 "removed {} local marker comment(s)",
                 removed_marker_comments
             ));
         }
-
-        if pull_only {
-            let local_changed_since_last_sync = old_state.is_some() && local_changed;
-            if local_hash != remote_hash && local_changed_since_last_sync && !force {
-                // The title/body/status changed locally since the last recorded sync, and
-                // --pull-only would otherwise silently overwrite that edit with GitHub's
-                // version (one-directional by design, but not at the cost of losing local
-                // work without a trace). Refuse and surface exactly what would be discarded;
-                // --force overrides.
-                let warning = format!(
-                    "refusing to overwrite local edits on {} ({}) with --pull-only: \
-                     local title/description/status changed since the last sync. \
-                     Re-run with --force to let GitHub win, or use plain `mb github sync` \
-                     to push the local edit instead.\n  discarded local title: {}\n  \
-                     discarded local description:\n{}\n",
-                    issue.id, url, issue.title, issue.description
-                );
-                eprintln!("{warning}");
-                item.action = "conflict-local-changed".to_string();
-                item.conflict = Some(format!(
-                    "{} / {}: local changed since last sync; --pull-only skipped it (use --force to overwrite)",
-                    issue.id, url
-                ));
-                item.details.push(
-                    "pull-only: local title/description/status changed since last sync; refusing to overwrite without --force"
-                        .to_string(),
-                );
-                report.conflicts.push(item.conflict.clone().unwrap());
-                field_conflict = true;
-            } else if local_hash != remote_hash {
-                if !dry_run {
-                    let Some(updated) = apply_remote_to_local(storage, &issue, &remote)? else {
-                        record_concurrent_issue(&mut report, &issue, &url);
-                        continue;
-                    };
-                    issue = updated;
-                }
-                item.action = if dry_run {
-                    "would-pull".to_string()
-                } else {
-                    "pulled".to_string()
-                };
-                item.details.push(
-                    "pull-only: pulled title/body/state from GitHub into minibeads".to_string(),
-                );
-                if old_state.is_none() {
-                    item.details.push(
-                        "pull-only: no previous GitHub sync state; used GitHub as the initial common base"
-                            .to_string(),
-                    );
-                } else if force && local_changed_since_last_sync {
-                    item.details.push(
-                        "pull-only: --force overwrote local title/description/status changed since last sync"
-                            .to_string(),
-                    );
-                }
-                report.pulled_issues += 1;
-            } else if old_state.is_none() {
-                item.action = if dry_run {
-                    "would-initialize-pull-only".to_string()
-                } else {
-                    "initialized-pull-only".to_string()
-                };
-                item.details.push(
-                    "pull-only: local and GitHub issue fields already match; recorded initial common base"
-                        .to_string(),
-                );
-            } else {
-                item.details
-                    .push("pull-only: issue fields already match GitHub".to_string());
-            }
-        } else if local_hash == remote_hash {
-            item.details.push(
-                "local and GitHub fields agree; recording their common representation".into(),
-            );
-        } else {
-            match (
-                old_state.is_some(),
-                inherited_divergence,
-                local_changed,
-                remote_changed,
-            ) {
-                (false, _, _, _) => {
-                    if !dry_run {
-                        handle.edit_fields(&issue).await?;
-                        handle.set_state(issue.status).await?;
-                        remote_written = true;
-                    }
-                    item.action = if dry_run {
-                        "would-initialize-push".to_string()
-                    } else {
-                        "initialized-pushed".to_string()
-                    };
-                    item.details.push(
-                        "no previous GitHub sync state; pushed local issue fields to GitHub as initial common base"
-                            .to_string(),
-                    );
-                    report.pushed_issues += 1;
-                }
-                (true, true, false, false) => {
-                    if local_hash != remote_hash {
-                        if !dry_run {
-                            handle.edit_fields(&issue).await?;
-                            handle.set_state(issue.status).await?;
-                            remote_written = true;
-                        }
-                        item.action = if dry_run {
-                            "would-repair-divergence".to_string()
-                        } else {
-                            "repaired-divergence".to_string()
-                        };
-                        item.details.push(
-                            "previous sync state recorded divergent local/remote hashes; pushed local issue fields to establish a common base"
-                                .to_string(),
-                        );
-                        if issue.status == Status::Closed
-                            && !remote.state.eq_ignore_ascii_case("closed")
-                        {
-                            item.details.push("closed GitHub issue".to_string());
-                        } else if issue.status != Status::Closed
-                            && remote.state.eq_ignore_ascii_case("closed")
-                        {
-                            item.details.push("reopened GitHub issue".to_string());
-                        }
-                        report.pushed_issues += 1;
-                    } else {
-                        item.details.push(
-                            "previous divergent sync state has already converged; recording common base"
-                                .to_string(),
-                        );
-                    }
-                }
-                (true, _, true, true) if local_hash != remote_hash => {
-                    let conflict = format!(
-                        "{} / {} changed on both sides; leaving issue fields unchanged",
-                        issue.id, url
-                    );
-                    item.action = "conflict".to_string();
-                    item.conflict = Some(conflict.clone());
-                    item.details.push(
-                        "local and GitHub issue fields both changed since last sync".to_string(),
-                    );
-                    report.conflicts.push(conflict);
-                    field_conflict = true;
-                }
-                (_, _, true, false) => {
-                    if !dry_run {
-                        handle.edit_fields(&issue).await?;
-                        handle.set_state(issue.status).await?;
-                        remote_written = true;
-                    }
-                    item.action = if dry_run {
-                        "would-push".to_string()
-                    } else {
-                        "pushed".to_string()
-                    };
-                    item.details
-                        .push("pushed title/body from minibeads to GitHub".to_string());
-                    if issue.status == Status::Closed
-                        && !remote.state.eq_ignore_ascii_case("closed")
-                    {
-                        item.details.push("closed GitHub issue".to_string());
-                    } else if issue.status != Status::Closed
-                        && remote.state.eq_ignore_ascii_case("closed")
-                    {
-                        item.details.push("reopened GitHub issue".to_string());
-                    }
-                    report.pushed_issues += 1;
-                }
-                (_, _, false, true) => {
-                    if !dry_run {
-                        let Some(updated) = apply_remote_to_local(storage, &issue, &remote)? else {
-                            record_concurrent_issue(&mut report, &issue, &url);
-                            continue;
-                        };
-                        issue = updated;
-                    }
-                    item.action = if dry_run {
-                        "would-pull".to_string()
-                    } else {
-                        "pulled".to_string()
-                    };
-                    item.details
-                        .push("pulled title/body/state from GitHub into minibeads".to_string());
-                    report.pulled_issues += 1;
-                }
-                _ => {
-                    item.details
-                        .push("issue fields already match last synced state".to_string());
-                }
-            }
-        }
+        let local_comments = storage.list_comments(&issue.id)?;
+        let mut comment_conflict = false;
 
         let deletions = reconcile_deleted_comments(
             storage,
             &issue,
             &handle,
             &mut remote,
-            old_state,
+            old_state.as_ref(),
             dry_run,
             pull_only,
             force,
         )
         .await?;
-        if deletions.remote_written {
-            remote_written = true;
-        }
         let local_comments = if deletions.deleted_local > 0 && !dry_run {
             storage.list_comments(&issue.id)?
         } else {
@@ -1224,13 +1609,15 @@ async fn sync_linked_with_store(
             item.details.push(conflict.clone());
             item.conflict = Some(conflict.clone());
             report.conflicts.push(conflict);
-            field_conflict = true;
+            comment_conflict = true;
         }
 
         let synced_local_ids: HashSet<String> = old_state
+            .as_ref()
             .map(|s| s.synced_local_comment_ids.iter().cloned().collect())
             .unwrap_or_default();
         let synced_remote_ids: HashSet<String> = old_state
+            .as_ref()
             .map(|s| s.synced_remote_comment_ids.iter().cloned().collect())
             .unwrap_or_default();
 
@@ -1249,9 +1636,6 @@ async fn sync_linked_with_store(
             let exported =
                 export_new_local_comments(&issue, &handle, &local_comments, &synced_local_ids)
                     .await?;
-            if exported > 0 {
-                remote_written = true;
-            }
             exported
         };
         let imported = if dry_run {
@@ -1262,7 +1646,7 @@ async fn sync_linked_with_store(
                 .filter(|c| !synced_remote_ids.contains(&c.id))
                 .count()
         } else {
-            import_remote_comments_with_ancestry(storage, &issue, &remote, old_state)?
+            import_remote_comments_with_ancestry(storage, &issue, &remote, old_state.as_ref())?
         };
 
         report.exported_comments += exported;
@@ -1278,13 +1662,37 @@ async fn sync_linked_with_store(
                 .push(format!("imported {} GitHub comment(s)", imported));
         }
 
-        if !dry_run && !field_conflict {
-            let remote = if remote_written {
-                handle.snapshot_for_state().await?
-            } else {
-                remote
+        if !dry_run && !comment_conflict {
+            let remote_for_state = handle.snapshot_for_state().await?;
+            let Some(locked_issue) = storage.lock_issue_snapshot(&issue)? else {
+                let conflict = format!(
+                    "{} / {} changed while finalizing synchronization; retained the previous ancestor",
+                    issue.id, url
+                );
+                item.action = "conflict-finalization".to_string();
+                item.conflict = Some(conflict.clone());
+                report.conflicts.push(conflict);
+                report.issues.push(item);
+                continue;
             };
-            let comments = storage.list_comments(&issue.id)?;
+            if fields_from_remote(&remote_for_state) != plan.fields {
+                let conflict = format!(
+                    "{} / {} changed remotely while finalizing synchronization; retained the previous ancestor",
+                    issue.id, url
+                );
+                item.action = "conflict-finalization".to_string();
+                item.conflict = Some(conflict.clone());
+                report.conflicts.push(conflict);
+                report.issues.push(item);
+                continue;
+            }
+            let next_ancestor = GithubAncestorRecord::new(
+                remote_identity.clone(),
+                LocalIssueId::parse(issue.id.as_str())?,
+                plan.fields.clone(),
+            );
+            let comments = locked_issue.comments()?;
+            let mut proposed_state = state.clone();
             if pull_only {
                 let synced_comments = comments
                     .into_iter()
@@ -1292,23 +1700,59 @@ async fn sync_linked_with_store(
                         comment.source_id.is_some() || synced_local_ids.contains(&comment.id)
                     })
                     .collect::<Vec<_>>();
-                update_state_entry(&mut state, &issue, &remote, &synced_comments);
+                update_state_entry(
+                    &mut proposed_state,
+                    &issue,
+                    &remote_for_state,
+                    &synced_comments,
+                );
             } else {
-                update_state_entry(&mut state, &issue, &remote, &comments);
+                update_state_entry(&mut proposed_state, &issue, &remote_for_state, &comments);
             }
-        } else if field_conflict {
+            let merged_state =
+                merge_state_snapshot_under_lock(&beads_dir, &original_state, &proposed_state)?;
+            if !merged_state.conflicts.is_empty() {
+                let conflict = merged_state.conflicts.join("; ");
+                item.action = "conflict-comment-ancestry-race".to_string();
+                item.conflict = Some(conflict.clone());
+                report.conflicts.push(conflict);
+                report.issues.push(item);
+                continue;
+            }
+            let mut transaction = crate::transaction::FileTransaction::new(&beads_dir);
+            match crate::github_ancestor::compare_and_stage_under_lock(
+                &beads_dir,
+                &remote_identity,
+                ancestor.as_ref(),
+                &next_ancestor,
+                &mut transaction,
+            )? {
+                GithubAncestorStageOutcome::Staged | GithubAncestorStageOutcome::Unchanged => {}
+                GithubAncestorStageOutcome::ConcurrentChange(_) => {
+                    let conflict = format!(
+                        "{} / {} ancestry changed concurrently; retained the newer checkpoint",
+                        issue.id, url
+                    );
+                    item.action = "conflict-ancestor-race".to_string();
+                    item.conflict = Some(conflict.clone());
+                    report.conflicts.push(conflict);
+                    report.issues.push(item);
+                    continue;
+                }
+            }
+            if merged_state.changed {
+                let state_path = beads_dir.join("github-sync-state.json");
+                crate::paths::ensure_contained(&beads_dir, &state_path)?;
+                transaction.write(state_path, serialize_state(&merged_state.state)?);
+            }
+            transaction.commit()?;
+        } else if comment_conflict {
             item.details.push(
                 "left GitHub sync ancestry unchanged until the conflict is resolved".to_string(),
             );
         }
 
         report.issues.push(item);
-    }
-
-    if !dry_run {
-        report
-            .conflicts
-            .extend(merge_state(&beads_dir, &original_state, &state)?);
     }
 
     Ok(report)
@@ -1519,7 +1963,7 @@ pub fn stress_test(
                 false,
                 false,
                 false,
-                None,
+                GithubSyncFilter::default(),
             )
             .with_context(|| format!("stress sync failed for {} at step {}", issue.id, step))?;
             assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)
@@ -1541,7 +1985,7 @@ pub fn stress_test(
                 false,
                 false,
                 false,
-                None,
+                GithubSyncFilter::default(),
             )
             .with_context(|| {
                 format!("stress no-op sync failed for {} at step {}", issue.id, step)
@@ -1575,7 +2019,7 @@ pub fn stress_test(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("stress close sync failed for {}", issue.id))?;
         assert_stress_converged(&storage, &issue.id, &url, Some(repo), &expected)?;
@@ -1706,7 +2150,7 @@ fn stress_test_adversarial(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("adversarial batch sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &report)
@@ -1719,7 +2163,7 @@ fn stress_test_adversarial(
             false,
             false,
             false,
-            None,
+            GithubSyncFilter::default(),
         )
         .with_context(|| format!("adversarial no-op sync failed at round {}", step))?;
         assert_adversarial_batch(storage, Some(context.repo), &issues, &noop)
@@ -2145,6 +2589,7 @@ fn assert_marker_not_imported(storage: &Storage, issue_id: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn apply_remote_to_local(
     storage: &Storage,
     issue: &Issue,
@@ -2301,10 +2746,12 @@ async fn reconcile_deleted_comments(
         return Ok(outcome);
     }
 
-    let locked = storage
-        .lock_issue_snapshot(issue)?
-        .context("Issue changed during comment reconciliation; refusing deletion")?;
-    let local_comments = locked.comments()?;
+    let local_comments = {
+        let locked = storage
+            .lock_issue_snapshot(issue)?
+            .context("Issue changed during comment reconciliation; refusing deletion")?;
+        locked.comments()?
+    };
     let local_by_id: HashMap<&str, &Comment> =
         local_comments.iter().map(|c| (c.id.as_str(), c)).collect();
     let remote_ids: HashSet<&str> = remote
@@ -2365,12 +2812,24 @@ async fn reconcile_deleted_comments(
     }
 
     // Deleted on GitHub -> mirror the deletion locally. This is a pull, always safe.
-    for local_id in &delete_local {
-        if !dry_run {
+    if !dry_run && !delete_local.is_empty() {
+        let locked = storage
+            .lock_issue_snapshot(issue)?
+            .context("Issue changed before deleting GitHub-removed comments")?;
+        let current_comments = locked.comments()?;
+        for local_id in &delete_local {
+            let expected = local_comments
+                .iter()
+                .find(|comment| &comment.id == local_id)
+                .context("GitHub-removed comment disappeared during reconciliation")?;
+            anyhow::ensure!(
+                current_comments.iter().any(|comment| comment == expected),
+                "Comment {local_id} changed during reconciliation; refusing deletion"
+            );
             locked.delete_comment(local_id)?;
         }
-        outcome.deleted_local += 1;
     }
+    outcome.deleted_local = delete_local.len();
 
     Ok(outcome)
 }
@@ -2387,9 +2846,39 @@ fn remember_state(
     let _locked = storage
         .lock_issue_snapshot(&issue)?
         .context("Issue changed before recording GitHub sync state")?;
+    let remote_identity = CanonicalGithubIssue::parse(&remote.url)?;
+    let local_fields = fields_from_local(&issue);
+    let remote_fields = fields_from_remote(remote);
+    let mut transaction = crate::transaction::FileTransaction::new(beads_dir);
+    if local_fields == remote_fields {
+        let expected = crate::github_ancestor::load_under_lock(beads_dir, &remote_identity)?;
+        let next = GithubAncestorRecord::new(
+            remote_identity.clone(),
+            LocalIssueId::parse(issue.id.as_str())?,
+            local_fields,
+        );
+        match crate::github_ancestor::compare_and_stage_under_lock(
+            beads_dir,
+            &remote_identity,
+            expected.as_ref(),
+            &next,
+            &mut transaction,
+        )? {
+            GithubAncestorStageOutcome::Staged | GithubAncestorStageOutcome::Unchanged => {}
+            GithubAncestorStageOutcome::ConcurrentChange(_) => {
+                return Err(anyhow!(
+                    "GitHub sync ancestor changed while recording {}",
+                    remote.url
+                ));
+            }
+        }
+    }
     let mut state = load_state(beads_dir)?;
     update_state_entry(&mut state, &issue, remote, comments);
-    save_state(beads_dir, &state)
+    let state_path = beads_dir.join("github-sync-state.json");
+    crate::paths::ensure_contained(beads_dir, &state_path)?;
+    transaction.write(state_path, serialize_state(&state)?);
+    transaction.commit()
 }
 
 fn update_state_entry(
@@ -2460,12 +2949,40 @@ fn update_state_entry(
 
 /// Merge only entries changed by this operation, preserving concurrent syncs of
 /// other issues and refusing to replace a changed ancestry entry for this issue.
+#[cfg(test)]
 fn merge_state(
     beads_dir: &Path,
     original: &GithubSyncState,
     proposed: &GithubSyncState,
 ) -> Result<Vec<String>> {
     let _lock = crate::lock::Lock::acquire(beads_dir)?;
+    merge_state_under_lock(beads_dir, original, proposed)
+}
+
+#[cfg(test)]
+fn merge_state_under_lock(
+    beads_dir: &Path,
+    original: &GithubSyncState,
+    proposed: &GithubSyncState,
+) -> Result<Vec<String>> {
+    let merged = merge_state_snapshot_under_lock(beads_dir, original, proposed)?;
+    if merged.changed {
+        save_state(beads_dir, &merged.state)?;
+    }
+    Ok(merged.conflicts)
+}
+
+struct MergedGithubSyncState {
+    state: GithubSyncState,
+    conflicts: Vec<String>,
+    changed: bool,
+}
+
+fn merge_state_snapshot_under_lock(
+    beads_dir: &Path,
+    original: &GithubSyncState,
+    proposed: &GithubSyncState,
+) -> Result<MergedGithubSyncState> {
     let mut current = load_state(beads_dir)?;
     let mut conflicts = Vec::new();
     let mut changed = false;
@@ -2485,10 +3002,11 @@ fn merge_state(
             changed = true;
         }
     }
-    if changed {
-        save_state(beads_dir, &current)?;
-    }
-    Ok(conflicts)
+    Ok(MergedGithubSyncState {
+        state: current,
+        conflicts,
+        changed,
+    })
 }
 
 fn record_concurrent_issue(report: &mut GithubSyncReport, issue: &Issue, url: &str) {
@@ -2518,15 +3036,31 @@ fn load_state(beads_dir: &Path) -> Result<GithubSyncState> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
+    let state: GithubSyncState = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    anyhow::ensure!(
+        state.schema_version == GithubSyncStateSchemaVersion::CURRENT,
+        "GitHub sync state {} uses unsupported schema version {} (current version is {})",
+        path.display(),
+        state.schema_version.0,
+        GithubSyncStateSchemaVersion::CURRENT.0
+    );
+    Ok(state)
 }
 
+#[cfg(test)]
 fn save_state(beads_dir: &Path, state: &GithubSyncState) -> Result<()> {
     let path = beads_dir.join("github-sync-state.json");
-    let content =
-        serde_json::to_string_pretty(state).context("Failed to serialize GitHub sync state")?;
+    let content = serialize_state(state)?;
     crate::paths::ensure_contained(beads_dir, &path)?;
-    crate::transaction::atomic_write(&path, content.as_bytes())
+    crate::transaction::atomic_write(&path, &content)
+}
+
+fn serialize_state(state: &GithubSyncState) -> Result<Vec<u8>> {
+    let mut content =
+        serde_json::to_vec_pretty(state).context("Failed to serialize GitHub sync state")?;
+    content.push(b'\n');
+    Ok(content)
 }
 
 fn hash_local_issue(issue: &Issue) -> String {
@@ -2886,6 +3420,7 @@ fn parse_time(value: &Value, field: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github_ancestor::GithubAncestorStoreOutcome;
 
     fn remote_json_for(issue: &Issue) -> Value {
         serde_json::json!({
@@ -2952,6 +3487,62 @@ mod tests {
         assert_eq!(entry.local_id, imported.id);
         assert_eq!(entry.local_hash, hash_local_issue(&imported));
         assert_eq!(entry.local_hash, entry.remote_hash);
+        let remote_identity =
+            CanonicalGithubIssue::parse(imported.external_ref.as_deref().unwrap()).unwrap();
+        let ancestor = crate::github_ancestor::load(&storage.get_beads_dir(), &remote_identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ancestor.local_id().as_str(), imported.id);
+        assert_eq!(ancestor.common(), &fields_from_local(&imported));
+    }
+
+    #[test]
+    fn link_rejects_an_ancestor_owned_by_another_local_issue() {
+        let (_temp, storage, issue) = storage_with_issue();
+        let mut linked_shape = issue.clone();
+        linked_shape.external_ref = Some("https://github.com/example/repo/issues/1".into());
+        let remote_value = remote_json_for(&linked_shape);
+        let remote = parse_remote_issue(remote_value.clone()).unwrap();
+        let identity = CanonicalGithubIssue::parse(&remote.url).unwrap();
+        let ancestor = GithubAncestorRecord::new(
+            identity.clone(),
+            LocalIssueId::parse("other-1").unwrap(),
+            fields_from_remote(&remote),
+        );
+        assert!(matches!(
+            crate::github_ancestor::compare_and_store(
+                &storage.get_beads_dir(),
+                &identity,
+                None,
+                &ancestor,
+            )
+            .unwrap(),
+            GithubAncestorStoreOutcome::Stored
+        ));
+        let store = GithubStore::new_with_handler(move |args| {
+            anyhow::ensure!(args[1] == "view", "Unexpected remote mutation");
+            Ok(remote_value.to_string())
+        });
+
+        let error = block_on_github(link_issue_with_store(
+            &storage,
+            &issue.id,
+            identity.as_url(),
+            false,
+            &store,
+        ))
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("already owned by local issue other-1"));
+        assert!(storage
+            .get_issue(&issue.id)
+            .unwrap()
+            .unwrap()
+            .external_ref
+            .is_none());
+        assert!(storage.list_comments(&issue.id).unwrap().is_empty());
     }
 
     #[test]
@@ -2978,7 +3569,7 @@ mod tests {
             false,
             true,
             false,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -2993,6 +3584,229 @@ mod tests {
             .unwrap()
             .issues
             .is_empty());
+    }
+
+    #[test]
+    fn local_edit_without_timestamp_change_is_detected_during_fetch() {
+        let (_temp, storage, issue) = linked_fixture(Status::Open);
+        let response = remote_json_for(&issue);
+        let database = storage.get_beads_dir();
+        let id = issue.id.clone();
+        let original_updated_at = issue.updated_at;
+        let issue_path = database.join("issues").join(format!("{id}.md"));
+        let original_mtime = std::fs::metadata(&issue_path).unwrap().modified().unwrap();
+        let store = GithubStore::new_with_handler(move |args| {
+            anyhow::ensure!(
+                args[0] == "issue" && args[1] == "view",
+                "Unexpected remote mutation"
+            );
+            let storage = Storage::open(database.clone())?;
+            let mut edited = storage
+                .get_issue(&id)?
+                .context("fixture issue disappeared")?;
+            edited.title = "same-timestamp concurrent edit".to_string();
+            edited.updated_at = original_updated_at;
+            std::fs::write(&issue_path, crate::format::issue_to_markdown(&edited)?)?;
+            filetime::set_file_mtime(
+                &issue_path,
+                filetime::FileTime::from_system_time(original_mtime),
+            )?;
+            Ok(response.to_string())
+        });
+        let report = block_on_github(sync_linked_with_store(
+            &storage,
+            &[],
+            false,
+            true,
+            false,
+            GithubSyncFilter::default(),
+            &store,
+        ))
+        .unwrap();
+        assert_eq!(report.pulled_issues, 0);
+        assert_eq!(report.issues[0].action, "conflict-concurrent-edit");
+        let persisted = storage.get_issue(&issue.id).unwrap().unwrap();
+        assert_eq!(persisted.title, "same-timestamp concurrent edit");
+        assert_eq!(persisted.updated_at, original_updated_at);
+    }
+
+    #[test]
+    fn local_edit_during_remote_write_is_retried_to_convergence() {
+        let (_temp, storage, issue) = linked_fixture(Status::Open);
+        let initial_remote = parse_remote_issue(remote_json_for(&issue)).unwrap();
+        remember_state(&storage.get_beads_dir(), &issue, &initial_remote, &[]).unwrap();
+        let first = storage
+            .update_issue(
+                &issue.id,
+                HashMap::from([("title".into(), "first local edit".into())]),
+            )
+            .unwrap();
+        let response = Arc::new(std::sync::Mutex::new(remote_json_for(&issue)));
+        let handler_response = Arc::clone(&response);
+        let database = storage.get_beads_dir();
+        let issue_id = issue.id.clone();
+        let edits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_edits = Arc::clone(&edits);
+        let store = GithubStore::new_with_handler(move |args| match args[1].as_str() {
+            "view" => Ok(handler_response.lock().unwrap().to_string()),
+            "edit" => {
+                let mut response = handler_response.lock().unwrap();
+                response["title"] = Value::String(args[4].clone());
+                response["body"] = Value::String(args[6].clone());
+                drop(response);
+                if handler_edits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Storage::open(database.clone())?.update_issue(
+                        &issue_id,
+                        HashMap::from([("title".into(), "second local edit".into())]),
+                    )?;
+                }
+                Ok(String::new())
+            }
+            command => anyhow::bail!("Unexpected gh issue {command}"),
+        });
+
+        let report = block_on_github(sync_linked_with_store(
+            &storage,
+            &[],
+            false,
+            false,
+            false,
+            GithubSyncFilter::default(),
+            &store,
+        ))
+        .unwrap();
+
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(report.pushed_issues, 1);
+        assert_eq!(edits.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            storage.get_issue(&first.id).unwrap().unwrap().title,
+            "second local edit"
+        );
+        assert_eq!(response.lock().unwrap()["title"], "second local edit");
+        let identity = CanonicalGithubIssue::parse(issue.external_ref.as_ref().unwrap()).unwrap();
+        let ancestor = crate::github_ancestor::load(&storage.get_beads_dir(), &identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ancestor.common().title().as_str(), "second local edit");
+    }
+
+    #[test]
+    fn remote_edit_during_local_pull_is_retried_to_convergence() {
+        let (_temp, storage, issue) = linked_fixture(Status::Open);
+        let initial_remote = parse_remote_issue(remote_json_for(&issue)).unwrap();
+        remember_state(&storage.get_beads_dir(), &issue, &initial_remote, &[]).unwrap();
+        let mut first_remote = remote_json_for(&issue);
+        first_remote["title"] = Value::String("first remote edit".into());
+        let mut second_remote = first_remote.clone();
+        second_remote["title"] = Value::String("second remote edit".into());
+        let response = Arc::new(std::sync::Mutex::new(first_remote));
+        let handler_response = Arc::clone(&response);
+        let views = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_views = Arc::clone(&views);
+        let store = GithubStore::new_with_handler(move |args| {
+            anyhow::ensure!(args[1] == "view", "Unexpected remote mutation");
+            let output = handler_response.lock().unwrap().to_string();
+            if handler_views.fetch_add(1, Ordering::SeqCst) == 1 {
+                *handler_response.lock().unwrap() = second_remote.clone();
+            }
+            Ok(output)
+        });
+
+        let report = block_on_github(sync_linked_with_store(
+            &storage,
+            &[],
+            false,
+            false,
+            false,
+            GithubSyncFilter::default(),
+            &store,
+        ))
+        .unwrap();
+
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(report.pulled_issues, 1);
+        assert_eq!(
+            storage.get_issue(&issue.id).unwrap().unwrap().title,
+            "second remote edit"
+        );
+        let identity = CanonicalGithubIssue::parse(issue.external_ref.as_ref().unwrap()).unwrap();
+        let ancestor = crate::github_ancestor::load(&storage.get_beads_dir(), &identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ancestor.common().title().as_str(), "second remote edit");
+    }
+
+    #[test]
+    fn concurrent_syncs_export_one_copy_of_each_local_comment() {
+        let (_temp, storage, issue) = linked_fixture(Status::Open);
+        let initial_response = remote_json_for(&issue);
+        let initial_remote = parse_remote_issue(initial_response.clone()).unwrap();
+        remember_state(&storage.get_beads_dir(), &issue, &initial_remote, &[]).unwrap();
+        storage
+            .add_comment(&issue.id, "local", "one concurrent export")
+            .unwrap();
+
+        let response = Arc::new(std::sync::Mutex::new(initial_response));
+        let comment_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let database = storage.get_beads_dir();
+            let handler_response = Arc::clone(&response);
+            let handler_comment_calls = Arc::clone(&comment_calls);
+            let worker_start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || -> Result<GithubSyncReport> {
+                let storage = Storage::open(database)?;
+                let store = GithubStore::new_with_handler(move |args| match args[1].as_str() {
+                    "view" => Ok(handler_response.lock().unwrap().to_string()),
+                    "comment" => {
+                        let sequence = handler_comment_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        handler_response.lock().unwrap()["comments"]
+                            .as_array_mut()
+                            .context("mock comments are not an array")?
+                            .push(serde_json::json!({
+                                "id": format!("concurrent-{sequence}"),
+                                "url": format!("https://github.com/example/repo/issues/1#issuecomment-{sequence}"),
+                                "author": {"login": "minibeads"},
+                                "body": args[4],
+                                "createdAt": Utc::now().to_rfc3339(),
+                                "updatedAt": Utc::now().to_rfc3339(),
+                            }));
+                        Ok(String::new())
+                    }
+                    command => anyhow::bail!("Unexpected gh issue {command}"),
+                });
+                worker_start.wait();
+                block_on_github(sync_linked_with_store(
+                    &storage,
+                    &[],
+                    false,
+                    false,
+                    false,
+                    GithubSyncFilter::default(),
+                    &store,
+                ))
+            }));
+        }
+
+        let reports = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert!(reports.iter().all(|report| report.conflicts.is_empty()));
+        assert_eq!(
+            reports
+                .iter()
+                .map(|report| report.exported_comments)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(comment_calls.load(Ordering::SeqCst), 1);
+        let state = load_state(&storage.get_beads_dir()).unwrap();
+        let entry = &state.issues[issue.external_ref.as_ref().unwrap()];
+        assert_eq!(entry.synced_local_comment_ids.len(), 1);
+        assert_eq!(entry.synced_remote_comment_ids.len(), 1);
     }
 
     #[test]
@@ -3044,7 +3858,7 @@ mod tests {
                     false,
                     false,
                     false,
-                    None,
+                    GithubSyncFilter::default(),
                     &store,
                 ))
                 .unwrap();
@@ -3068,7 +3882,7 @@ mod tests {
                 false,
                 false,
                 false,
-                None,
+                GithubSyncFilter::default(),
                 &store,
             ))
             .unwrap();
@@ -3110,6 +3924,24 @@ mod tests {
             load_state(&storage.get_beads_dir()).unwrap().issues[&remote.url].local_hash,
             "ours"
         );
+    }
+
+    #[test]
+    fn future_or_unknown_legacy_state_is_rejected() {
+        let (_temp, storage, _issue) = linked_fixture(Status::Open);
+        let beads_dir = storage.get_beads_dir();
+        let path = beads_dir.join("github-sync-state.json");
+        std::fs::write(&path, r#"{"schema_version":2,"issues":{}}"#).unwrap();
+        assert!(load_state(&beads_dir)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported schema version 2"));
+
+        std::fs::write(&path, r#"{"schema_version":1,"entries":{}}"#).unwrap();
+        assert!(load_state(&beads_dir)
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse"));
     }
 
     #[test]
@@ -3811,7 +4643,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn github_sync_pull_only_imports_without_writing_to_github() {
+    fn github_sync_forced_initial_pull_imports_without_writing_to_github() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::init(
             tmp.path().join(".beads"),
@@ -3846,8 +4678,8 @@ mod tests {
             std::slice::from_ref(&issue.id),
             false,
             true,
-            false,
-            None,
+            true,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3890,7 +4722,7 @@ mod tests {
             false,
             true,
             false,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3909,7 +4741,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.starts_with("issue view "))
                 .count(),
-            1,
+            3,
             "{calls}"
         );
         assert!(
@@ -3956,15 +4788,15 @@ mod tests {
         let (program, log) = fake_gh_read_only(&tmp);
         let store = GithubStore::new_with_program(Some("example/repo"), program);
 
-        // First pull-only sync: no previous state, so GitHub's snapshot ("Remote
-        // title" / "Remote body" / closed) becomes the initial common base.
+        // Missing history plus divergent content requires an explicit choice.
+        // Force the first pull so GitHub's snapshot becomes the common base.
         block_on_github(sync_linked_with_store(
             &storage,
             std::slice::from_ref(&issue.id),
             false,
             true,
-            false,
-            None,
+            true,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -3989,7 +4821,7 @@ mod tests {
             false,
             true,
             false,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();
@@ -4029,7 +4861,7 @@ mod tests {
             false,
             true,
             true,
-            None,
+            GithubSyncFilter::default(),
             &store,
         ))
         .unwrap();

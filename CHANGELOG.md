@@ -6,6 +6,95 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-03
+
+### Added
+
+- **`mb merge-driver`: three-way git merges of issue and comment files.**
+  `mb merge-driver install` registers the driver (`git config merge.mb.*`) and
+  routes `.minibeads/`/`.beads/` issue and comment files to it via
+  `.gitattributes`; `run` implements git's `%O %A %B %L %P` protocol and `show`
+  prints the setup. Every issue field merges against the merge base: scalars
+  take the changed side, labels merge as a set, dependencies per target,
+  timestamps by rule (earliest created, latest updated, derived closed), and
+  all four prose sections through the paragraph/word merger. Comments merge as
+  a three-way set keyed by stable comment ID: additions from both sides are
+  kept exactly once, a deletion propagates unless the other side edited that
+  comment (then the edit is kept and reported), and both-sides edits merge the
+  body as prose. Conflicts are standard diff3 hunks with fixed
+  `ours`/`base`/`theirs` labels confined to the conflicting field, paragraph,
+  or comment; taking one side of every hunk reproduces that side's values
+  exactly (a conflicting status carries its own `closed_at`). Markers grow
+  past any marker-like content line, non-UTF-8 input becomes one byte hunk,
+  and each conflict is also printed as one
+  `mb merge-driver: CONFLICT <path>: <subject>: <reason>` line.
+  Non-canonical input is never re-serialized (byte-exact one-sided take, else a
+  textual merge).
+- **Full ancestor-based GitHub issue field merging.** Versioned per-issue
+  checkpoints under `.minibeads/sync_ancestors/github/` retain the last common
+  title, body, and open/closed state. Independent field and prose edits merge;
+  competing edits, structured Markdown overlap, ambiguous alignment, and work
+  limits remain explicit conflicts.
+- **`mb github sync --label LABEL`** is repeatable and requires every supplied
+  local label. Labels intersect explicit issue IDs and `--since`; an empty
+  selection performs no GitHub calls and never expands to all issues.
+
+### Changed
+
+- `mb` refuses to read an issue file containing a complete git conflict hunk
+  outside a code fence, so an unresolved merge is reported instead of being
+  parsed as prose. Section text that merely quotes a conflict outside fenced
+  code is written with its opening `<<<<<<<` line escaped as `\<<<<<<<` and
+  read back unchanged, so such text can still be created or imported from
+  GitHub; fenced code is written as it is.
+- Divergent GitHub/local issue fields without a provable common ancestor no
+  longer pick a winner during ordinary sync. Matching replicas establish a
+  baseline, legacy equal hashes can prove one-sided changes, and
+  `--pull-only --force` explicitly chooses GitHub when requested.
+- GitHub field writes refresh the remote snapshot before mutation, verify
+  convergence afterward, and retry racing local/remote changes. Per-issue leases
+  prevent duplicate concurrent comment export; ancestor and comment ancestry
+  commit together before moving to the next issue. Local ID migrations update
+  ancestor ownership transactionally, and future sync-state schemas fail closed.
+- GitHub dry runs open storage read-only and do not bootstrap ignore/config
+  files. `--since` help now states that it cannot discover remote-only changes.
+
+### Fixed
+
+- Dependencies are written in sorted order. They were serialized from a hash
+  map, so issues with two or more dependencies were rewritten in random order,
+  producing spurious diffs and merge conflicts (Markdown and JSONL export).
+- The prose merger could emit an inserted word or paragraph twice, or drop
+  text, when the same words or paragraphs repeat: each side is aligned to the
+  ancestor independently, and repeated text could anchor differently on each
+  side. A merge is now accepted only when it comes out the same under the
+  earliest and the latest alignment of both sides, only when each side lies on
+  a shortest token edit path from the ancestor to the result (so no side's edit
+  lands on a copy of its text elsewhere), and a word-level merge only when
+  every word occurs between its counts on the two sides; otherwise it is
+  reported as a competing edit. When one side already contains the other's
+  whole change (a replayed or cherry-picked edit, or one side building on the
+  other), the merge is that side as it stands, decided without any alignment.
+  A heuristic for replayed edge deletions that could silently drop a paragraph
+  was removed.
+- The prose merger now aligns a final paragraph that one side extends (by
+  appending after it) with its unchanged copy, instead of reporting a
+  conflict that paragraph-level diff3 would merge. A matched paragraph covers
+  only the blank lines both sides share, so a changed separator is an edit of
+  those bytes alone.
+- The merge driver takes the changed side of a non-UTF-8 file that only one
+  side changed, and grows the markers of a non-UTF-8 hunk past marker-like
+  lines.
+
+## [0.28.0] - 2026-09-02
+
+### Fixed
+
+- Section parsing no longer truncates descriptions containing indented `# `
+  lines (for example shell comments in code blocks). Header detection is
+  anchored to column 0, matching the writer's escape rule. (Entry backfilled in
+  0.29.0; the release commit did not update this file.)
+
 ## [0.27.0] - 2026-07-30
 
 ### Fixed

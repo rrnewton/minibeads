@@ -99,7 +99,9 @@ directory.
 │   ├── myproject-1.md   # Issue files with YAML frontmatter
 │   └── myproject-2.md
 ├── comments/            # Optional per-issue comment JSON files
-└── github-sync-state.json # Last-synced GitHub ancestry state, when used
+├── github-sync-state.json # Comment pairings and legacy content hashes
+└── sync_ancestors/      # Git-ignored common synchronization history
+    └── github/          # Versioned, content-keyed per-issue checkpoints
 ```
 
 ### Issue Format
@@ -170,7 +172,8 @@ src/
 ├── storage.rs   # File-based storage operations
 ├── format.rs    # Markdown serialization/deserialization
 ├── types.rs     # Core data structures (Issue, Status, etc.)
-└── lock.rs      # Coarse-grained file locking
+├── lock.rs      # Coarse-grained file locking
+└── merge_driver.rs, issue_merge.rs, diff3.rs  # Git merge driver (see src/README.md)
 
 tests/
 ├── e2e_tests.rs           # Test harness
@@ -244,21 +247,47 @@ issues are ignored.
 - `mb github list` - Show current minibeads-to-GitHub issue links
 - `mb github import [-R owner/repo] [--state open|closed|all] [--label LABEL] [--assignee USER] [--author USER] [--mention USER] [--milestone M] [--app APP] [--search QUERY] [--limit N] [--dry-run] [--quiet|--verbose]` - Import matching GitHub issues that are not already linked to minibeads issues
 - `mb github publish ISSUE_ID [-R owner/repo]` - Create a GitHub issue and link it
-- `mb github sync [ISSUE_ID...] [-R owner/repo] [--dry-run] [--quiet|--verbose]` - Bidirectionally sync linked issues
+- `mb github sync [ISSUE_ID...] [--label LABEL...] [-R owner/repo] [--since CUTOFF] [--dry-run] [--pull-only] [--force] [--quiet|--verbose]` - Sync selected linked issues
 - `mb github stress-test -R owner/repo [-n N] [--steps N] [--seed N] [--adversarial] [--verbose]` - Create real temporary GitHub issues in a disposable repo and run seeded randomized sync stress tests
 
-Synced fields are title, description/body, open/closed state, and comments.
-minibeads keeps `.minibeads/github-sync-state.json` as the last-synced ancestry
-record so it can distinguish local-only changes, GitHub-only changes, and
-both-sides conflicts. Labels, priority, assignee, dependencies, and other
-minibeads-specific metadata remain local for now.
+Synced issue fields are title, description/body, and GitHub's open/closed state.
+minibeads stores their last common contents in versioned per-issue records under
+`.minibeads/sync_ancestors/github/` (or the selected legacy `.beads` directory).
+It performs content-based three-way reconciliation rather than choosing the
+newest timestamp. Independent field and prose changes merge; incompatible edits
+remain conflicts. Local workflow states such as `in_progress` survive while the
+GitHub issue remains open. Labels, priority, assignee, dependencies, and other
+minibeads-specific metadata remain local.
 
-Comment sync propagates deletions in both directions. The sync state pairs each
-synced local comment with its GitHub comment id, so deleting a comment on one
-side (for example with `mb comments delete`) deletes its counterpart on the
-other side on the next sync, rather than re-importing it. Pull-only sync
-(`--pull-only`) applies GitHub-side deletions locally but never deletes on
-GitHub.
+Repeat `--label` to require every supplied **local** label. Labels, explicit IDs,
+and `--since` intersect. A selection matching nothing performs no GitHub calls
+and does not become a full sync. `--since` examines local timestamps only; omit
+it when remote-only changes must be discovered.
+
+When no common content checkpoint exists, matching copies establish one.
+Divergent copies require manual reconciliation; minibeads will not silently pick
+a side from timestamps or visit order. `--pull-only --force` is the explicit
+escape hatch for choosing GitHub and discarding the synchronized local fields.
+Ordinary bidirectional `--force` does not hide merge conflicts.
+
+The prose merger preserves independent paragraphs from both replicas, uses
+stable content-derived ordering for additions at the same boundary, and refines
+plain-prose overlap to words and whitespace. Competing word edits, delete/edit,
+ambiguous repeated text, overlapping structured Markdown, and bounded-work
+exhaustion are reported distinctly and leave all inputs unchanged.
+
+Mutating syncs serialize per GitHub issue, and the common ancestor plus comment
+ancestry commit in one recoverable local transaction. Remote contents are
+refreshed before a write, verified afterward, and racing changes receive bounded
+reconciliation retries. GitHub's issue API does not provide a compare-and-swap
+operation for this workflow, so a small remote race remains possible and is documented in
+[`ai_docs/github-sync-design.md`](ai_docs/github-sync-design.md).
+
+Comment ancestry remains in `github-sync-state.json` as a separate protocol.
+Deleting a local comment (for example with `mb comments delete`) deletes its
+GitHub counterpart on the next bidirectional sync. A missing remote counterpart
+requires `--force` before deleting the local comment. Pull-only never writes or
+deletes comments on GitHub. Comment bodies do not use the prose merger.
 
 Linked GitHub issues get a marker comment containing `MB_DO_NOT_SYNC` so people
 viewing the GitHub issue can see which local minibeads issue owns the sync. That
@@ -276,8 +305,102 @@ with elapsed time to stderr.
 Design note: upstream Beads has an `external_ref` field and import/collision
 logic around it, but does not provide this exact GitHub sync workflow in the
 vendored version. minibeads uses the same `external_ref` idea for the URL and
-keeps the sync ancestry outside the issue markdown to avoid churning normal
-issue fields.
+keeps synchronization history outside issue Markdown to avoid churning normal
+issue fields. Local Markdown/JSONL `mb sync` is a separate timestamp-based
+protocol; the GitHub common-content archive does not change that behavior.
+
+### Git Merge Driver
+
+Issue files and comment files are ordinary files under version control, so two
+branches that touch the same issue meet in `git merge`. Git's line merge handles
+them poorly: both sides always change `updated_at:`, two appended comments
+collide at the end of the JSON array, and two edits to one long prose line
+conflict. `mb merge-driver` replaces it with a field-aware three-way merge that
+uses the merge base git already computed.
+
+Install it once per clone (or with `--global` once per machine):
+
+```bash
+mb merge-driver install            # git config merge.mb.* + .gitattributes lines
+mb merge-driver install --command /path/to/mb   # pin an executable instead of PATH lookup
+mb merge-driver show               # print the config and attributes without changing anything
+```
+
+`install` writes `merge.mb.name` and `merge.mb.driver` into the local git config
+and appends any missing routing lines to the repository's `.gitattributes`
+(commit that file so every clone routes the same paths; each clone still needs
+the `git config` part, because git never runs drivers named by the repository
+alone). The equivalent manual setup is:
+
+```bash
+git config merge.mb.name "minibeads three-way issue and comment merge"
+git config merge.mb.driver "mb merge-driver run %O %A %B --marker-size %L --path %P"
+cat >> .gitattributes <<'ATTRS'
+**/.minibeads/issues/**/*.md merge=mb
+**/.minibeads/comments/*.json merge=mb
+**/.beads/issues/**/*.md merge=mb
+**/.beads/comments/*.json merge=mb
+ATTRS
+```
+
+Merge rules:
+
+- **Scalar fields** (title, status, priority, type, assignee, external ref,
+  claim window) take the side that changed; two different changes conflict.
+- **Labels** merge as a set (additions and removals from both sides).
+  **Dependencies** merge per target issue; changing a dependency's type on one
+  side while removing it on the other conflicts.
+- **Timestamps** never conflict: `created_at` keeps the earliest, `updated_at`
+  the latest, and `closed_at` follows the merged status.
+- **Prose sections** (Description, Design, Acceptance Criteria, Notes) use the
+  same bounded paragraph/word merger as GitHub sync. Edits to different
+  paragraphs merge; competing edits conflict. A side that already contains the
+  other side's whole change is taken as it stands. The merger is
+  conservative: when repeated text makes the alignment of two edits ambiguous
+  it reports a conflict rather than guess.
+- **Comments** merge as a three-way set keyed by comment ID: comments added on
+  either side are all kept, exactly once, in `created_at` order. A comment
+  deleted on one side is deleted, as git would delete its lines, unless the
+  other side edited it: then the edited comment is kept, with a `NOTICE` on
+  stderr. A GitHub-imported comment edited on both sides takes the newer GitHub
+  revision; a local comment edited on both sides merges its body as prose or
+  conflicts.
+- Files with no merge base (both branches created the same ID) merge only when
+  identical; otherwise the whole file is one conflict.
+- Input that is not exactly what `mb` writes (hand-edited YAML, unknown keys)
+  is never re-serialized: if only one side changed it is taken byte for byte,
+  otherwise the file falls back to a plain line merge.
+
+Conflicts are written as standard diff3 hunks with fixed labels, confined to
+the lines of the conflicting field, paragraph, or comment:
+
+```
+<<<<<<< ours
+title: Main title
+||||||| base
+title: Original title
+=======
+title: Feature title
+>>>>>>> theirs
+```
+
+Everything outside the hunks is already merged, so a tool can resolve a file
+by keeping one section of each hunk: keeping the same side everywhere
+reproduces exactly that side's value of every conflicting field. Markers are
+made longer than any content line that looks like one (such as a setext
+`=======` underline), so they are never ambiguous. Git's own tools assume
+markers of exactly `conflict-marker-size` (default 7), so `git diff --check`
+and rerere do not recognize a grown hunk; resolve such a file by hand or with
+a resolver that reads the marker length from the `<<<<<<<` line. The driver
+also prints one `mb merge-driver: CONFLICT <path>: <field or comment>:
+<reason>` line per conflict. `mb` refuses to read an issue file that still
+contains a hunk outside a code fence, so a hunk accidentally committed is
+reported instead of silently parsed as prose. (Text that quotes a conflict outside fenced code is
+stored with its `<<<<<<<` line escaped as `\<<<<<<<` and reads back
+unchanged; fenced code is stored as it is.)
+
+`mb merge-driver run BASE OURS THEIRS --path REPO/PATH --stdout` previews a
+merge without writing any file.
 
 ### Options
 

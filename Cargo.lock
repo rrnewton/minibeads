@@ -511,7 +511,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "minibeads"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "built",
@@ -528,6 +528,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "similar",
  "similar-asserts",
  "tempfile",
  "thiserror",
