@@ -438,12 +438,14 @@ enum Commands {
         /// Targeted edit: find this exact text in a field and swap it for
         /// --replace, instead of overwriting the whole field. Safer for agents
         /// than rewriting a long description wholesale. By default the text must
-        /// match exactly once. Requires --replace. (minibeads-specific)
+        /// match exactly once. Requires --replace. Refuses other field, label
+        /// and claim flags; make those changes in a separate update.
+        /// (minibeads-specific)
         #[arg(
             long,
             allow_hyphen_values = true,
             requires = "replace",
-            conflicts_with_all = ["description", "title", "design", "acceptance", "notes", "claim"]
+            conflicts_with_all = ["description", "description_file", "status", "priority", "assignee", "unassign", "external_ref", "add_label", "remove_label", "set_labels", "title", "design", "acceptance", "notes", "claim"]
         )]
         search: Option<String>,
 
@@ -466,11 +468,12 @@ enum Commands {
         /// another). A blank line is inserted before it when the field already
         /// has content, so the appended text becomes its own paragraph. Saves
         /// having to pass the trailing text as --search/--replace when you just
-        /// want to add to the end. (minibeads-specific)
+        /// want to add to the end. Refuses other field, label and claim flags;
+        /// make those changes in a separate update. (minibeads-specific)
         #[arg(
             long,
             allow_hyphen_values = true,
-            conflicts_with_all = ["search", "replace", "replace_all", "description", "title", "design", "acceptance", "notes", "claim"]
+            conflicts_with_all = ["search", "replace", "replace_all", "description", "description_file", "status", "priority", "assignee", "unassign", "external_ref", "add_label", "remove_label", "set_labels", "title", "design", "acceptance", "notes", "claim"]
         )]
         append: Option<String>,
 
@@ -2293,8 +2296,9 @@ fn run() -> Result<()> {
             }
 
             // Targeted search/replace edit. clap guarantees --search comes with
-            // --replace and is mutually exclusive with the wholesale field
-            // setters and --claim, so this is a self-contained mode.
+            // --replace and is mutually exclusive with every other field, label
+            // and claim flag, so this is a self-contained mode: the early return
+            // below cannot silently drop one of them.
             if let Some(search) = search {
                 refuse_unacknowledged_mirrored_description_edit(
                     &storage,
@@ -2326,8 +2330,8 @@ fn run() -> Result<()> {
             }
 
             // Targeted append edit. clap guarantees --append is mutually
-            // exclusive with --search/--replace, the wholesale field setters, and
-            // --claim, so this is a self-contained mode like search/replace.
+            // exclusive with --search/--replace and every other field, label and
+            // claim flag, so this is a self-contained mode like search/replace.
             if let Some(append) = append {
                 refuse_unacknowledged_mirrored_description_edit(
                     &storage,
