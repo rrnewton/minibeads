@@ -6,6 +6,15 @@ issue tracker; the binary is named `mb`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mb update --append` and `--search/--replace` no longer drop other flags
+  silently.** Both targeted-edit modes return before the general field update,
+  so `--add-label`, `--remove-label`, `--set-labels`, `--status`, `--priority`,
+  `--assignee`, `--unassign`, `--external-ref` and `--description-file` given in
+  the same call were discarded with exit 0. clap now refuses those
+  combinations; make such changes in a separate `mb update`.
+
 ## [0.29.0] - 2026-10-03
 
 ### Added

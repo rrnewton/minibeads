@@ -160,6 +160,37 @@ assert_contains "$(sed -n '/^# Design/,/^# /p' .minibeads/issues/test-1.md)" "An
 assert_fails "--append with --description should conflict" "$BD_BIN" update test-1 --append "x" --description "whole new body"
 assert_fails "--append with --search should conflict" "$BD_BIN" update test-1 --append "x" --search "y" --replace "z"
 
+# Test 9: both targeted modes refuse every flag their early return would drop
+echo -e "\n${YELLOW}Test 9: --append and --search refuse field and label flags${NC}"
+# Positive control: this search matches exactly once, so on its own it succeeds.
+# A refusal below can then only come from the conflicting flag.
+UNIQUE="edited via search/replace"
+OUTPUT=$("$BD_BIN" update test-1 --search "$UNIQUE" --replace "$UNIQUE" 2>&1)
+assert_contains "$OUTPUT" "Updated issue: test-1 (description field)" "The unique search alone should succeed"
+BEFORE=$(cat .minibeads/issues/test-1.md)
+for EXTRA in "--add-label L" "--remove-label L" "--set-labels L" "--status in_progress" \
+             "--priority 1" "--assignee someone" "--unassign" "--external-ref ext-1" \
+             "--description-file -"; do
+    # shellcheck disable=SC2086 # EXTRA is a flag plus its value
+    assert_fails "--append with $EXTRA should conflict" "$BD_BIN" update test-1 --append "x" $EXTRA </dev/null
+    # shellcheck disable=SC2086
+    assert_fails "--search with $EXTRA should conflict" "$BD_BIN" update test-1 --search "$UNIQUE" --replace "x" $EXTRA </dev/null
+done
+assert_equals "$BEFORE" "$(cat .minibeads/issues/test-1.md)" "Refused combinations must leave the issue untouched"
+
+# Test 10: each targeted mode alone still edits, and the refused flags work in their own update
+echo -e "\n${YELLOW}Test 10: Each mode alone, then labels and status separately${NC}"
+OUTPUT=$("$BD_BIN" update test-1 --append "Appended alone." 2>&1)
+assert_contains "$OUTPUT" "Appended to issue: test-1 (description field)" "--append alone should succeed"
+assert_contains "$(desc_body)" "Appended alone." "--append alone should store its text"
+OUTPUT=$("$BD_BIN" update test-1 --search "Appended alone." --replace "Replaced alone." 2>&1)
+assert_contains "$OUTPUT" "Updated issue: test-1 (description field)" "--search alone should succeed"
+assert_contains "$(desc_body)" "Replaced alone." "--search alone should store its replacement"
+"$BD_BIN" update test-1 --add-label L --status in_progress --priority 1 >/dev/null 2>&1
+assert_contains "$(cat .minibeads/issues/test-1.md)" "- L" "A separate update should store the label"
+assert_contains "$(cat .minibeads/issues/test-1.md)" "status: in_progress" "A separate update should store the status"
+assert_contains "$(cat .minibeads/issues/test-1.md)" "priority: 1" "A separate update should store the priority"
+
 # Print summary
 echo ""
 echo "=========================================="
