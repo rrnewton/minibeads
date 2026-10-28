@@ -5,6 +5,7 @@ priority: 3
 issue_type: feature
 created_at: 2025-10-31T13:33:00.367658716+00:00
 updated_at: 2025-10-31T13:43:25.278144196+00:00
+closed_at: 2025-10-31T13:43:25.278144196+00:00
 ---
 
 # Description

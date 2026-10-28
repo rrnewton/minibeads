@@ -6,6 +6,7 @@ issue_type: feature
 assignee: claude
 created_at: 2025-11-23T06:02:51.413795197+00:00
 updated_at: 2025-11-23T07:33:52.029189896+00:00
+closed_at: 2025-11-23T07:33:52.029189896+00:00
 ---
 
 # Description
