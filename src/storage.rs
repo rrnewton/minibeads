@@ -1476,9 +1476,10 @@ impl Storage {
         let content = fs::read_to_string(&issue_path).context("Failed to read issue file")?;
         let mut issue = markdown_to_issue(id, &content)?;
 
+        let now = chrono::Utc::now();
         issue.status = Status::Closed;
-        issue.closed_at = Some(chrono::Utc::now());
-        issue.updated_at = chrono::Utc::now();
+        issue.closed_at = Some(now);
+        issue.updated_at = now;
 
         self.write_issue_to_path(&issue_path, &issue)?;
 

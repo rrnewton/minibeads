@@ -1,4 +1,4 @@
-use crate::types::{DependencyType, Issue};
+use crate::types::{DependencyType, Issue, Status};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,8 @@ pub fn frontmatter_yaml(issue: &Issue) -> Result<String> {
             .collect(),
         created_at: issue.created_at.to_rfc3339(),
         updated_at: issue.updated_at.to_rfc3339(),
-        closed_at: issue.closed_at.map(|t| t.to_rfc3339()),
+        closed_at: (issue.status == Status::Closed)
+            .then(|| issue.closed_at.unwrap_or(issue.updated_at).to_rfc3339()),
         claimed_at: issue.claimed_at.map(|t| t.to_rfc3339()),
         claimed_until: issue.claimed_until.map(|t| t.to_rfc3339()),
     };
@@ -308,6 +309,16 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
     let (description, design, acceptance_criteria, notes) =
         parse_sections(body).with_context(|| format!("Cannot safely parse {issue_id}.md"))?;
 
+    let status = fm.status.parse()?;
+    let created_at = parse_timestamp(&fm.created_at)?;
+    let updated_at = parse_timestamp(&fm.updated_at)?;
+    let closed_at = (status == Status::Closed).then(|| {
+        fm.closed_at
+            .as_deref()
+            .and_then(|s| parse_timestamp(s).ok())
+            .unwrap_or(updated_at)
+    });
+
     // Build Issue
     let mut issue = Issue {
         id: issue_id.to_string(),
@@ -316,7 +327,7 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
         design,
         notes,
         acceptance_criteria,
-        status: fm.status.parse()?,
+        status,
         priority: fm.priority,
         issue_type: fm.issue_type.parse()?,
         assignee: fm.assignee,
@@ -324,9 +335,9 @@ pub fn markdown_to_issue(issue_id: &str, content: &str) -> Result<Issue> {
         labels: fm.labels,
         depends_on: HashMap::new(),
         dependents: Vec::new(),
-        created_at: parse_timestamp(&fm.created_at)?,
-        updated_at: parse_timestamp(&fm.updated_at)?,
-        closed_at: fm.closed_at.as_ref().and_then(|s| parse_timestamp(s).ok()),
+        created_at,
+        updated_at,
+        closed_at,
         claimed_at: fm.claimed_at.as_ref().and_then(|s| parse_timestamp(s).ok()),
         claimed_until: fm
             .claimed_until
@@ -795,5 +806,78 @@ mod tests {
                 title
             );
         }
+    }
+
+    #[test]
+    fn test_closed_at_invariant() {
+        // 1. A closed issue missing `closed_at` in frontmatter (e.g. legacy issues
+        //    like minibeads-20 or hand-edited Markdown) must default `closed_at`
+        //    deterministically to `updated_at` so JSONL exports never emit `null`.
+        let legacy_closed_md = "\
+---
+title: Legacy closed issue
+status: closed
+priority: 3
+issue_type: feature
+created_at: 2025-10-31T13:33:00.367658716+00:00
+updated_at: 2025-10-31T13:43:25.278144196+00:00
+---
+
+# Description
+
+Closed without closed_at.
+";
+        let parsed = markdown_to_issue("minibeads-20", legacy_closed_md).unwrap();
+        assert_eq!(parsed.status, Status::Closed);
+        assert_eq!(parsed.closed_at, Some(parsed.updated_at));
+
+        let json: serde_json::Value = serde_json::to_value(&parsed).unwrap();
+        assert!(
+            json["closed_at"].is_string(),
+            "exported JSONL for closed issue must have non-null closed_at, got: {}",
+            json["closed_at"]
+        );
+
+        // 2. An explicit `closed_at` distinct from `updated_at` is preserved.
+        let explicit_closed_md = "\
+---
+title: Explicit closed_at
+status: closed
+priority: 2
+issue_type: bug
+created_at: 2025-10-31T13:00:00+00:00
+updated_at: 2025-10-31T15:00:00+00:00
+closed_at: 2025-10-31T14:00:00+00:00
+---
+";
+        let parsed_explicit = markdown_to_issue("test-2", explicit_closed_md).unwrap();
+        assert_eq!(
+            parsed_explicit.closed_at,
+            Some(parse_timestamp("2025-10-31T14:00:00+00:00").unwrap())
+        );
+
+        // 3. A non-closed issue with a stale `closed_at` in frontmatter clears it.
+        let stale_open_md = "\
+---
+title: Reopened by hand
+status: open
+priority: 2
+issue_type: task
+created_at: 2025-10-31T13:00:00+00:00
+updated_at: 2025-10-31T15:00:00+00:00
+closed_at: 2025-10-31T14:00:00+00:00
+---
+";
+        let parsed_open = markdown_to_issue("test-3", stale_open_md).unwrap();
+        assert_eq!(parsed_open.status, Status::Open);
+        assert_eq!(parsed_open.closed_at, None);
+
+        // 4. Rendering an in-memory closed issue with `closed_at: None` writes
+        //    `closed_at` using `updated_at`.
+        let mut in_memory = Issue::new("test-4".into(), "Closed".into(), 2, IssueType::Task);
+        in_memory.status = Status::Closed;
+        in_memory.closed_at = None;
+        let rendered = issue_to_markdown(&in_memory).unwrap();
+        assert!(rendered.contains("closed_at:"));
     }
 }
